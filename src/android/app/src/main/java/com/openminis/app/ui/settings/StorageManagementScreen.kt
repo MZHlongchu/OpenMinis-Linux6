@@ -1,6 +1,7 @@
 package com.openminis.app.ui.settings
 
 import com.openminis.app.R
+import com.openminis.app.sandbox.SandboxSettings
 import com.openminis.app.ui.components.MinisTextButton
 
 import android.content.Context
@@ -45,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.data.db.ChatDao
 import com.openminis.app.data.db.ChatSessionEntity
+import com.openminis.app.sandbox.SandboxSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -79,7 +81,7 @@ fun StorageManagementScreen(
         scope.launch {
             isLoading = true
             withContext(Dispatchers.IO) {
-                shellSize = directorySize(File(context.filesDir, "alpine-rootfs"))
+                shellSize = directorySize(File(context.filesDir, SandboxSettings.currentProfile().rootfsDirName))
                 dbSize = databaseSize(context)
 
                 val allSessions = chatDao.listSessions()

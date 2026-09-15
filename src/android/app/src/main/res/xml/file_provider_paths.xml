@@ -16,8 +16,9 @@
          user saw "分享失败" toasts instead of the share sheet. -->
     <cache-path name="share" path="share/" />
     <!-- PRoot rootfs — expose so inline video/audio cards can hand the host
-         file to the system player via ACTION_VIEW. -->
+          file to the system player via ACTION_VIEW. -->
     <files-path name="rootfs" path="alpine-rootfs/" />
+    <files-path name="rootfs-devstack" path="devstack-rootfs/" />
     <!-- Per-session attachments/workspace/etc. where agent downloads land. -->
     <files-path name="sessions" path="minis-sessions/" />
     <files-path name="global" path="minis-global/" />

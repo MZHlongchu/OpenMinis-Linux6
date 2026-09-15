@@ -1,5 +1,7 @@
 package com.openminis.app.sandbox
 
+import com.openminis.app.sandbox.SandboxSettings
+
 import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -289,7 +291,7 @@ class ShellExecutorInstrumentedTest {
 
     private fun canBoot(): Boolean {
         return try {
-            context.assets.open("alpine-minirootfs.tar.gz").use { }
+            context.assets.open(SandboxSettings.currentProfile().rootfsAsset).use { }
             context.assets.open("proot-aarch64").use { }
             true
         } catch (_: Exception) {

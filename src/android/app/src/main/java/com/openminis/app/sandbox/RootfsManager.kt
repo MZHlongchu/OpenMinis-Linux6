@@ -1,6 +1,8 @@
 package com.openminis.app.sandbox
 
 import android.content.Context
+import com.openminis.app.sandbox.SandboxProfile
+import com.openminis.app.sandbox.SandboxSettings
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.util.Log
@@ -39,14 +41,15 @@ sealed class RootfsInstallState {
  */
 class RootfsManager private constructor(private val context: Context) {
 
-    val rootfsDir: File = File(context.filesDir, "alpine-rootfs")
-    val prootBinary: File = File(context.applicationInfo.nativeLibraryDir, "libproot.so")
+    val profile get() = SandboxSettings.currentProfile()
+    val rootfsDir: File get() = File(context.filesDir, profile.rootfsDirName)
+    val prootBinary: File get() = File(context.applicationInfo.nativeLibraryDir, profile.prootBinaryName)
 
     private val archFile: File get() = File(rootfsDir, ".arch")
 
     val isInstalled: Boolean
         get() = rootfsDir.exists() && archFile.exists() &&
-                archFile.readText().trim() == ARCH
+                archFile.readText().trim() == profile.archMarker
 
     /**
      * Observable install progress. UI layers (OnboardingScreen,
@@ -60,8 +63,8 @@ class RootfsManager private constructor(private val context: Context) {
     val installState: StateFlow<RootfsInstallState> = _installState.asStateFlow()
 
     /**
-     * Install Alpine rootfs from assets if not already present.
-     * Extracts alpine-minirootfs.tar.gz using manual POSIX tar parsing.
+      * Install rootfs from assets if not already present.
+      * Extracts rootfs tar.gz using manual POSIX tar parsing.
      * Progress is published to [installState] (Preparing → Extracting(f) →
      * Finalizing → Installed / Failed).
      */
@@ -74,7 +77,7 @@ class RootfsManager private constructor(private val context: Context) {
 
         try {
             _installState.value = RootfsInstallState.Preparing
-            Log.i(TAG, "Installing Alpine rootfs...")
+            Log.i(TAG, "Installing rootfs...")
 
             // Clean up any partial install
             if (rootfsDir.exists()) {
@@ -85,10 +88,10 @@ class RootfsManager private constructor(private val context: Context) {
             // Extract rootfs from assets.
             // AAPT may decompress .tar.gz → .tar automatically, so try both names.
             val assetName = try {
-                context.assets.open(ROOTFS_ASSET).close()
-                ROOTFS_ASSET
+                context.assets.open(profile.rootfsAsset).close()
+                profile.rootfsAsset
             } catch (_: java.io.FileNotFoundException) {
-                ROOTFS_ASSET_TAR
+                profile.rootfsAsset.replace(".tar.gz", ".tar")
             }
 
             // Asset size for progress calculation — compressed length (for .gz)
@@ -120,7 +123,7 @@ class RootfsManager private constructor(private val context: Context) {
             _installState.value = RootfsInstallState.Finalizing
 
             // Write arch marker
-            archFile.writeText(ARCH)
+            archFile.writeText(profile.archMarker)
 
             // Pre-create /var/minis directories. Mirrors iOS
             // RootfsManager.swift:76-80 (attachments/offloads/workspace/skills/
@@ -626,10 +629,6 @@ class RootfsManager private constructor(private val context: Context) {
 
     companion object {
         private const val TAG = "RootfsManager"
-        private const val ARCH = "aarch64"
-        private const val ROOTFS_ASSET = "alpine-minirootfs.tar.gz"
-        private const val ROOTFS_ASSET_TAR = "alpine-minirootfs.tar"
-        private const val PROOT_ASSET = "proot-aarch64"
         private const val DEFAULT_MOUNT_ASSET = "default_mount"
 
         /**

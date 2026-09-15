@@ -61,6 +61,8 @@ import com.openminis.app.ui.settings.UsageStatsScreen
 import com.openminis.app.ui.settings.MinisSkillsBrowserScreen
 import com.openminis.app.ui.settings.MountDetailScreen
 import com.openminis.app.ui.settings.MountedFoldersScreen
+import com.openminis.app.ui.settings.RootPassThroughScreen
+import com.openminis.app.ui.settings.ToolchainScreen
 import com.openminis.app.ui.settings.SharedFolderDetailScreen
 import com.openminis.app.ui.settings.SharedFoldersScreen
 import com.openminis.app.ui.settings.SkillsManagementScreen
@@ -176,6 +178,8 @@ object Routes {
     const val ONBOARDING_MODELS = "onboarding_models"
     /** T219-2: Mount external folders settings + detail. */
     const val MOUNTED_FOLDERS = "mounted_folders"
+    const val ROOT_PASSTHROUGH = "root_passthrough"
+    const val TOOLCHAIN = "toolchain"
     const val MOUNTED_FOLDERS_DETAIL = "mounted_folders_detail/{mountId}"
     fun mountedFoldersDetail(mountId: String) = "mounted_folders_detail/$mountId"
     /** T235: Shared folders (Shared / Skills / Memory) — fixed list. */
@@ -600,6 +604,8 @@ fun AppNavigation(
                 onLogsClick = { navController.safeNavigate(Routes.LOGS) },
                 onAboutClick = { navController.safeNavigate(Routes.ABOUT) },
                 onMountedFoldersClick = { navController.safeNavigate(Routes.MOUNTED_FOLDERS) },
+                onRootPassthroughClick = { navController.safeNavigate(Routes.ROOT_PASSTHROUGH) },
+                onToolchainClick = { navController.safeNavigate(Routes.TOOLCHAIN) },
                 onSharedFoldersClick = { navController.safeNavigate(Routes.SHARED_FOLDERS) },
             )
         }
@@ -801,6 +807,12 @@ fun AppNavigation(
                     navController.safeNavigate(Routes.mountedFoldersDetail(mountId))
                 },
             )
+        }
+        composable(Routes.ROOT_PASSTHROUGH) {
+            RootPassThroughScreen(onBack = { navController.safePopBackStack() })
+        }
+        composable(Routes.TOOLCHAIN) {
+            ToolchainScreen(onBack = { navController.safePopBackStack() })
         }
 
         composable(

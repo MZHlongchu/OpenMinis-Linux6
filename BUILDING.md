@@ -258,6 +258,33 @@ from the customization file; see [Build-time customization](#build-time-customiz
 
 ---
 
+## Devstack (Android)
+
+### Prerequisites
+- Android SDK API 35
+- NDK r27+
+- CMake 3.22.1+
+
+### Build (Devstack variant)
+
+```sh
+./gradlew assembleDebug
+```
+
+### Prepare Ubuntu 24.04 Rootfs
+
+```sh
+scripts/prepare_devstack_rootfs.sh
+```
+
+### Build PRoot with devstack socket name
+
+```sh
+NATIVE_OFFLOAD_SOCKET_NAME=app.openminis.devstack deps/build_proot.sh
+```
+
+---
+
 ## Licensing note
 
 Minis is **GPLv3** because it links iSH (GPLv3) and PRoot (GPLv2). If you

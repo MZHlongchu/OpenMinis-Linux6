@@ -37,6 +37,7 @@ import androidx.compose.material.icons.outlined.FrontHand
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.automirrored.outlined.Send
@@ -90,6 +91,7 @@ fun SettingsScreen(
     // the route yet.
     onSoulClick: () -> Unit = {},
     onPermissionsClick: () -> Unit = {},
+    onRootPassthroughClick: () -> Unit = {},
     onUsageClick: () -> Unit = {},
     onAppearanceClick: () -> Unit = {},
     onLogsClick: () -> Unit = {},
@@ -103,6 +105,7 @@ fun SettingsScreen(
     // OEM autostart guidance). Default no-op so older callers/tests
     // don't need to be retrofitted.
     onBackgroundClick: () -> Unit = {},
+    onToolchainClick: () -> Unit = {},
     // Hook accepted for forward-compat with AppNavigation's About route. The
     // About row below still has a TODO onClick in HEAD; future settings-bucket
     // work will wire this through.
@@ -258,6 +261,30 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_section_permissions),
                     subtitle = stringResource(R.string.settings_permissions_subtitle),
                     onClick = onPermissionsClick,
+                    showDivider = false,
+                )
+            }
+
+            // -- Root Passthrough (Devstack) --
+            SettingsSection(title = "") {
+                SettingsItem(
+                    icon = Icons.Filled.Lock,
+                    iconColor = Color(0xFFFF3B30),
+                    title = stringResource(R.string.root_passthrough_title),
+                    subtitle = stringResource(R.string.root_passthrough_settings_subtitle),
+                    onClick = onRootPassthroughClick,
+                    showDivider = false,
+                )
+            }
+
+            // -- Devstack Toolchain --
+            SettingsSection(title = "") {
+                SettingsItem(
+                    icon = Icons.Outlined.Build,
+                    iconColor = MaterialTheme.colorScheme.primary,
+                    title = stringResource(R.string.toolchain_title),
+                    subtitle = stringResource(R.string.toolchain_section_footer),
+                    onClick = onToolchainClick,
                     showDivider = false,
                 )
             }

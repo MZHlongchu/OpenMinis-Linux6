@@ -10,6 +10,7 @@ import android.provider.DocumentsContract
 import android.util.Log
 import com.openminis.app.data.FileMentionIndex
 import com.openminis.app.data.MountedFoldersStore
+import com.openminis.app.sandbox.SandboxSettings
 import java.io.File
 import java.util.TimeZone
 import kotlin.math.abs
@@ -46,6 +47,9 @@ object PRootKernel {
 
     /** Bind mounts: Linux path -> host filesystem path. */
     val bindMounts: MutableMap<String, String> = linkedMapOf()
+
+    /** Current sandbox profile variant. */
+    private val profile get() = SandboxSettings.currentProfile()
 
     /**
      * Initialize the PRoot environment: install rootfs and proot binary.
@@ -89,8 +93,13 @@ object PRootKernel {
         if (loaderPath.exists()) prootLoaderPath = loaderPath.absolutePath
         if (loader32Path.exists()) prootLoader32Path = loader32Path.absolutePath
 
-        // Set default PATH for Alpine Linux
-        customEnvironment.putIfAbsent("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/bin")
+        // Set default PATH for Alpine / Devstack
+        when (profile) {
+            is SandboxProfile.Alpine ->
+                customEnvironment.putIfAbsent("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/bin")
+            is SandboxProfile.Devstack ->
+                customEnvironment.putIfAbsent("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/jvm/default-java/bin:/opt/android-sdk/platform-tools:/opt/bin")
+        }
         customEnvironment.putIfAbsent("HOME", "/root")
 
         // URL interception: seed $BROWSER directly into every process envp
@@ -133,6 +142,14 @@ object PRootKernel {
         // Mirrored in default_mount/etc/profile.d/minis.sh for login shells.
         customEnvironment.putIfAbsent("UV_LINK_MODE", "symlink")
 
+        // Devstack-specific environment
+        if (profile is SandboxProfile.Devstack) {
+            customEnvironment["JAVA_HOME"] = "/usr/lib/jvm/default-java"
+            customEnvironment["ANDROID_HOME"] = "/opt/android-sdk"
+            customEnvironment["ANDROID_SDK_ROOT"] = "/opt/android-sdk"
+            customEnvironment["TERM"] = "xterm-256color"
+        }
+
         // Inject device timezone so Alpine userspace sees local time.
         // Mirrors iOS ISHShellExecutor.m:335-353 — uses POSIX TZ format with a
         // fixed name ("LCL") to avoid abbreviations like "GMT+8" which contain
@@ -150,6 +167,18 @@ object PRootKernel {
         // Register global bind mounts so direct file I/O tools (file_read, file_edit)
         // can resolve /var/minis/{memory,skills,shared}/... (idempotent).
         registerGlobalBindMounts(context)
+
+        // Devstack-specific bind mounts — ensure JVM and Android SDK host paths
+        // are bound into the rootfs. The ubuntu-noble rootfs ships the JVM under
+        // /usr/lib/jvm; binding the host's JVM dir (when present) lets the guest
+        // see additional JDK distributions installed on the Android host.
+        if (profile is SandboxProfile.Devstack) {
+            val jvmHostDir = File("/usr/lib/jvm")
+            if (jvmHostDir.exists() && jvmHostDir.isDirectory) {
+                bindMounts["/usr/lib/jvm"] = jvmHostDir.absolutePath
+                Log.i(TAG, "Devstack bind mount: ${jvmHostDir.absolutePath} -> /usr/lib/jvm")
+            }
+        }
 
         // Start the native_offload server so the proot extension can reach it
         // over the abstract unix socket. Handlers must have been registered
@@ -651,8 +680,12 @@ object PRootKernel {
             cmd.add("--native-offload=${NativeOffloadServer.socketName}:${handlers.joinToString(",")}")
         }
 
-        // Shell command
-        cmd.add("/bin/sh")
+        // Shell command — devstack uses bash, alpine uses /bin/sh
+        val shell = when (profile) {
+            is SandboxProfile.Devstack -> "/bin/bash"
+            is SandboxProfile.Alpine -> "/bin/sh"
+        }
+        cmd.add(shell)
         cmd.add("-c")
         cmd.add(shellCommand)
 

@@ -45,8 +45,8 @@ object AgentTools {
     // Aligned with iOS AIChatViewModel.swift:4982-4993
     private fun shellExecuteDefinition(): AgentToolDefinition = AgentToolDefinition(
         name = "shell_execute",
-        description = "Execute a command in an isolated Linux process (Alpine Linux via PRoot). " +
-            "The command runs via /bin/sh -c with stdout and stderr merged. " +
+        description = "Execute a command in an isolated Linux process via PRoot sandbox. " +
+            "The command runs via the profile's default shell with stdout and stderr merged. " +
             "Each invocation spawns a fresh process — there is no shared terminal session. " +
             "Default timeout is 15 minutes.",
         parameters = mapOf(

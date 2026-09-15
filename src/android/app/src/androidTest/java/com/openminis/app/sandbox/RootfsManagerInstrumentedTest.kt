@@ -1,5 +1,7 @@
 package com.openminis.app.sandbox
 
+import com.openminis.app.sandbox.SandboxSettings
+
 import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -29,6 +31,7 @@ class RootfsManagerInstrumentedTest {
     @Before
     fun setUp() {
         context = InstrumentationRegistry.getInstrumentation().targetContext
+        SandboxSettings.prime(context)
 
         // Clear singleton for clean state
         resetSingleton()
@@ -77,10 +80,10 @@ class RootfsManagerInstrumentedTest {
 
     @Test
     fun installIfNeededExtractsRootfsFromAssets() = runBlocking {
-        // This test requires alpine-minirootfs.tar.gz in assets.
+        // This test requires SandboxSettings.currentProfile().rootfsAsset in assets.
         // Skip if not present (CI or pre-asset-download)
-        if (!hasAsset("alpine-minirootfs.tar.gz")) {
-            println("SKIP: alpine-minirootfs.tar.gz not in assets")
+        if (!hasAsset(SandboxSettings.currentProfile().rootfsAsset)) {
+            println("SKIP: SandboxSettings.currentProfile().rootfsAsset not in assets")
             return@runBlocking
         }
 
@@ -111,8 +114,8 @@ class RootfsManagerInstrumentedTest {
 
     @Test
     fun installIfNeededIsIdempotent() = runBlocking {
-        if (!hasAsset("alpine-minirootfs.tar.gz")) {
-            println("SKIP: alpine-minirootfs.tar.gz not in assets")
+        if (!hasAsset(SandboxSettings.currentProfile().rootfsAsset)) {
+            println("SKIP: SandboxSettings.currentProfile().rootfsAsset not in assets")
             return@runBlocking
         }
 
@@ -130,8 +133,8 @@ class RootfsManagerInstrumentedTest {
 
     @Test
     fun installIfNeededCleansPartialInstall() = runBlocking {
-        if (!hasAsset("alpine-minirootfs.tar.gz")) {
-            println("SKIP: alpine-minirootfs.tar.gz not in assets")
+        if (!hasAsset(SandboxSettings.currentProfile().rootfsAsset)) {
+            println("SKIP: SandboxSettings.currentProfile().rootfsAsset not in assets")
             return@runBlocking
         }
 
@@ -213,8 +216,8 @@ class RootfsManagerInstrumentedTest {
 
     @Test
     fun resetDeletesAndReinstalls() = runBlocking {
-        if (!hasAsset("alpine-minirootfs.tar.gz")) {
-            println("SKIP: alpine-minirootfs.tar.gz not in assets")
+        if (!hasAsset(SandboxSettings.currentProfile().rootfsAsset)) {
+            println("SKIP: SandboxSettings.currentProfile().rootfsAsset not in assets")
             return@runBlocking
         }
 
@@ -232,8 +235,8 @@ class RootfsManagerInstrumentedTest {
 
     @Test
     fun resetKeepsUserDataWhenRequested() = runBlocking {
-        if (!hasAsset("alpine-minirootfs.tar.gz")) {
-            println("SKIP: alpine-minirootfs.tar.gz not in assets")
+        if (!hasAsset(SandboxSettings.currentProfile().rootfsAsset)) {
+            println("SKIP: SandboxSettings.currentProfile().rootfsAsset not in assets")
             return@runBlocking
         }
 

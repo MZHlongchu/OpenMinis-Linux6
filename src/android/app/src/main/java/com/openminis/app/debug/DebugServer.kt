@@ -1,6 +1,7 @@
 package com.openminis.app.debug
 
 import android.content.Context
+import com.openminis.app.BuildConfig
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,7 +21,7 @@ import java.net.Socket
  */
 class DebugServer(
     private val context: Context,
-    private val port: Int = 5321,
+    private val port: Int = BuildConfig.DEBUG_SERVER_PORT,
 ) {
     companion object {
         private const val TAG = "DebugServer"
@@ -62,7 +63,7 @@ class DebugServer(
      * [T-android-debugserver-auth] Per-install token required from
      * non-loopback clients. Generated once, persisted in filesDir so the
      * developer can read it with:
-     *   adb shell run-as com.openminis.app cat files/debug_server_token
+     * adb shell run-as ${BuildConfig.APPLICATION_ID} cat files/debug_server_token
      * Also logged at startup (logcat is adb-only — not readable remotely).
      */
     private val authToken: String by lazy {
@@ -180,7 +181,7 @@ class DebugServer(
                 val isLoopback = s.inetAddress?.isLoopbackAddress == true
                 if (!isAuthorized(isLoopback, providedToken, authToken)) {
                     Log.w(TAG, "401 unauthorized ${if (isLoopback) "loopback" else s.inetAddress?.hostAddress ?: "?"} (missing/wrong token)")
-                    sendResponse(writer, 401, rpcHandler.errorJSON(-32000, "Unauthorized — send X-Minis-Token (see `adb shell run-as com.openminis.app cat files/debug_server_token`)"))
+                    sendResponse(writer, 401, rpcHandler.errorJSON(-32000, "Unauthorized — send X-Minis-Token (see \`adb shell run-as ${BuildConfig.APPLICATION_ID} cat files/debug_server_token\`)"))
                     return
                 }
 

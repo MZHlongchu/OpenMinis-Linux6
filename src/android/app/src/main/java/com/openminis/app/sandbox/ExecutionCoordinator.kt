@@ -13,7 +13,7 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * Architecture:
  * - PRootKernel (rootfs + proot binary): global singleton, booted once
- * - PersistentShell: one per sessionId, owns its bind mounts and /bin/sh process
+ * - PersistentShell: one per sessionId, owns its bind mounts and defaultShell process
  * - Per-session Mutex: different sessions can run commands concurrently
  * - ConcurrentHashMap: thread-safe shell/mutex registry
  *

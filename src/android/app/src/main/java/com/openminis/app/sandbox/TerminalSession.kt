@@ -21,7 +21,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 /**
  * Interactive PTY shell session — mirrors iOS ISHKernel + TerminalSession.
  *
- * Uses [PtyBridge.forkExec] to spawn `proot /bin/sh -l -i` attached to a real
+ * Uses [PtyBridge.forkExec] to spawn `proot <defaultShell> -l -i` attached to a real
  * PTY (via bionic forkpty). The shell sees `isatty(0)==true`, emits its PS1
  * prompt, honours termios echo/canonical/ISIG modes, and responds to signals,
  * arrow keys, Tab completion, and interactive programs (vi, top, gh auth login)
@@ -422,7 +422,7 @@ class TerminalSession(private val context: Context) {
         }
 
         // Login + interactive so /etc/profile is sourced (readline, history, color aliases).
-        cmd.add("/bin/sh")
+        cmd.add(SandboxSettings.currentProfile().defaultShell)
         cmd.add("-l")
         cmd.add("-i")
         return cmd

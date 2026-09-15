@@ -2,6 +2,8 @@ package com.openminis.app.agent.shell
 
 import android.content.Context
 import android.util.Log
+import com.openminis.app.sandbox.SandboxProfile
+import com.openminis.app.sandbox.SandboxSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -64,6 +66,12 @@ object OnDemandBash {
         }
 
         if (executor.run("command -v bash >/dev/null 2>&1", 15_000) == 0) {
+            availability = Availability.Available
+            return Outcome.Available
+        }
+
+        // Devstack (Ubuntu 24.04) ships bash preinstalled — skip the apk add path.
+        if (SandboxSettings.currentProfile() is SandboxProfile.Devstack) {
             availability = Availability.Available
             return Outcome.Available
         }

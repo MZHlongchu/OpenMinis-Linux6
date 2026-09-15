@@ -33,7 +33,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.openminis.app"
+        applicationId = "app.openminis.devstack"
         minSdk = 26
         targetSdk = 35
         versionCode = 25
@@ -48,6 +48,8 @@ android {
             "ANTHROPIC_OAUTH_IDENTIFIER_PROMPT",
             "\"${customizationValue("ANTHROPIC_OAUTH_IDENTIFIER_PROMPT")}\""
         )
+        buildConfigField("int", "DEBUG_SERVER_PORT", "6321")
+        buildConfigField("int", "DEBUG_OFFLOAD_PORT", "6321")
 
         ndk {
             abiFilters += listOf("arm64-v8a")

@@ -1,5 +1,8 @@
 package com.openminis.app.sandbox
 
+import com.openminis.app.sandbox.SandboxProfile
+import com.openminis.app.sandbox.SandboxSettings
+
 import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -25,7 +28,7 @@ class PRootKernelInstrumentedTest {
     @Before
     fun setUp() {
         context = InstrumentationRegistry.getInstrumentation().targetContext
-        // Reset PRootKernel state
+        SandboxSettings.prime(context)
         resetKernel()
     }
 
@@ -118,7 +121,7 @@ class PRootKernelInstrumentedTest {
         // Should have -r flag with rootfs
         val rIndex = cmd.indexOf("-r")
         assertTrue("Should contain -r flag", rIndex >= 0)
-        assertTrue("Rootfs path should follow -r", cmd[rIndex + 1].contains("alpine-rootfs"))
+        assertTrue("Rootfs path should follow -r", cmd[rIndex + 1].contains(SandboxSettings.currentProfile().rootfsDirName))
 
         // Should bind /dev, /proc, /sys
         assertTrue("Should bind /dev", cmd.contains("/dev"))
@@ -130,9 +133,9 @@ class PRootKernelInstrumentedTest {
         assertTrue("Should contain -w flag", wIndex >= 0)
         assertEquals("/root", cmd[wIndex + 1])
 
-        // Should end with /bin/sh -c "echo hello"
+        // Should end with profile.defaultShell -c "echo hello"
         val lastThree = cmd.takeLast(3)
-        assertEquals("/bin/sh", lastThree[0])
+        assertEquals(SandboxSettings.currentProfile().defaultShell, lastThree[0])
         assertEquals("-c", lastThree[1])
         assertEquals("echo hello", lastThree[2])
     }
@@ -234,7 +237,7 @@ class PRootKernelInstrumentedTest {
         // No bind mounts → should resolve relative to rootfsDir
         val result = PRootKernel.resolveHostPath("/etc/resolv.conf")
         assertNotNull(result)
-        assertTrue("Should resolve inside rootfs", result!!.path.contains("alpine-rootfs"))
+        assertTrue("Should resolve inside rootfs", result!!.path.contains(SandboxSettings.currentProfile().rootfsDirName))
         assertTrue("Should end with etc/resolv.conf", result.path.endsWith("etc/resolv.conf"))
     }
 
@@ -265,7 +268,7 @@ class PRootKernelInstrumentedTest {
 
     private fun canBoot(): Boolean {
         return try {
-            context.assets.open("alpine-minirootfs.tar.gz").use { }
+            context.assets.open(SandboxSettings.currentProfile().rootfsAsset).use { }
             context.assets.open("proot-aarch64").use { }
             true
         } catch (_: Exception) {

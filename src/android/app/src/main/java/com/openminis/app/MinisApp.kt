@@ -20,7 +20,7 @@ import com.openminis.app.data.db.DatabaseVersionGuard
 import com.openminis.app.data.repository.BackgroundSettingsRepository
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.data.repository.EnvVarRepository
-import com.openminis.app.data.MountedFoldersStore
+import com.openminis.app.sandbox.SandboxSettings
 import com.openminis.app.data.repository.MemoryRepository
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.data.repository.WebAppShortcutRepository
@@ -268,6 +268,8 @@ class MinisApp : Application(), ImageLoaderFactory {
         // request-build time — including offload / title-gen calls that
         // never pass through a ViewModel.
         com.openminis.app.data.FastModePrefs.prime(this)
+        com.openminis.app.data.RootPassThroughSettings.prime(this)
+        com.openminis.app.sandbox.SandboxSettings.prime(this)
 
         // Warm the auto-compact flag the same way: the pre-send context check
         // and the in-chat one-tap opt-in both read it from places that have no
@@ -574,9 +576,14 @@ class MinisApp : Application(), ImageLoaderFactory {
         // up the binder lifecycle listeners + StateFlow.
         NativeOffloadServer.register("android-shizuku-cli", ShizukuOffloadHandler(this))
         com.openminis.app.offload.ShizukuManager.init(this)
+        // T-root-passthrough: android-root-cli — privileged su-based command
+        // execution (free mode via native su). Enabled per-toggle in Settings,
+        // audited to filesDir/audit/root-YYYY-MM-DD.log.
+        NativeOffloadServer.register("android-root-cli", RootPassThroughHandler(this))
+        NativeOffloadServer.register("devstack-toolchain", DevstackToolchainHandler(this))
 
         // T-android-minis-debug-cli: shell-side CLI wrapper around the in-app
-        // DebugServer (127.0.0.1:5321) JSON-RPC. DEBUG-only — Release builds
+        // DebugServer (127.0.0.1:6321) JSON-RPC. DEBUG-only — Release builds
         // ship neither the DebugServer nor this handler, so the
         // `/usr/local/bin/minis-debug` stub is also absent (PRootKernel.
         // installHandlerStubs enumerates currently-registered handlers).

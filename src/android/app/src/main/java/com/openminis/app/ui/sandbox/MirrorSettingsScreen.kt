@@ -424,8 +424,10 @@ object MirrorSpeedTestViewModel {
     fun isActive(category: MirrorCategory): Boolean =
         useCustomMirror[category] == true && selectedMirrorId[category] != null
 
+import com.openminis.app.sandbox.SandboxSettings
+
     private fun rootfsDataDir(context: Context): File =
-        File(context.applicationContext.filesDir, "alpine-rootfs")
+        File(context.applicationContext.filesDir, SandboxSettings.currentProfile().rootfsDirName)
 
     private fun applyMirror(context: Context, category: MirrorCategory) {
         val mirror = selectedMirror(category) ?: return
