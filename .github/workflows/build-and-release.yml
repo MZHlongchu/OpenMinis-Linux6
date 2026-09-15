@@ -38,8 +38,8 @@ jobs:
 
       - name: Install native build dependencies
         run: |
-          apt-get update
-          apt-get install -y curl tar unzip make gawk sed file
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y curl tar unzip make gawk sed file
 
       - name: Install Android SDK commandline tools
         run: |
