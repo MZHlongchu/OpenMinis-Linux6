@@ -94,6 +94,7 @@ jobs:
           gomobile init
           chmod +x deps/build_rclone_android.sh
           ANDROID_NDK_HOME="/usr/local/lib/android/sdk/ndk/${ANDROID_NDK}" bash deps/build_rclone_android.sh
+          mkdir -p src/android/app/libs
           cp deps/build/rclone/rclone.aar src/android/app/libs/
 
       - name: Assemble release APK
