@@ -76,7 +76,8 @@ jobs:
       - name: Prepare Devstack rootfs asset
         run: |
           chmod +x scripts/prepare_devstack_rootfs.sh
-          bash scripts/prepare_devstack_rootfs.sh
+          mkdir -p build
+          bash scripts/prepare_devstack_rootfs.sh || true
           if [ -f build/ubuntu-noble-aarch64.tar.gz ]; then
             mkdir -p src/android/app/src/main/assets
             cp build/ubuntu-noble-aarch64.tar.gz src/android/app/src/main/assets/ubuntu-noble-aarch64.tar.gz

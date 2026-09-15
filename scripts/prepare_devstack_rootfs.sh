@@ -34,9 +34,13 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # ─── Step 1: check disk space ───────────────────────────────────────────────
+mkdir -p "$BUILD_DIR"
+
 require_space() {
     local needed_mb=$1
-    local available_kb=$(df -k "$BUILD_DIR" | tail -1 | awk '{print $4}')
+    local check_dir="$BUILD_DIR"
+    [ -d "$check_dir" ] || check_dir="$(dirname "$BUILD_DIR")"
+    local available_kb=$(df -k "$check_dir" | tail -1 | awk '{print $4}')
     local available_mb=$((available_kb / 1024))
     if [ "$available_mb" -lt "$needed_mb" ]; then
         log_error "Need ${needed_mb}MB free space, only ${available_mb}MB available in $BUILD_DIR"
