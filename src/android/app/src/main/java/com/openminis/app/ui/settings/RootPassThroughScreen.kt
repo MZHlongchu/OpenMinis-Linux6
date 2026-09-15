@@ -78,7 +78,7 @@ fun RootPassThroughScreen(onBack: () -> Unit) {
                                     "=== ${f.name} ===\n" + f.readLines().takeLast(10).joinToString("\n")
                                 }
                         } else {
-                            stringResource(R.string.root_passthrough_no_audit)
+                            context.getString(R.string.root_passthrough_no_audit)
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),

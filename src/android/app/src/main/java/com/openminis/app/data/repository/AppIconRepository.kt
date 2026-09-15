@@ -1,5 +1,6 @@
 package com.openminis.app.data.repository
 
+import com.openminis.app.BuildConfig
 import android.content.ComponentName
 import android.content.Context
 import android.content.SharedPreferences
