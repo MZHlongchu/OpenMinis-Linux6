@@ -2,6 +2,7 @@ package com.openminis.app.ui.sandbox
 
 import com.openminis.app.ui.settings.SettingsSwitch
 import com.openminis.app.R
+import com.openminis.app.sandbox.SandboxSettings
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -423,8 +424,6 @@ object MirrorSpeedTestViewModel {
 
     fun isActive(category: MirrorCategory): Boolean =
         useCustomMirror[category] == true && selectedMirrorId[category] != null
-
-import com.openminis.app.sandbox.SandboxSettings
 
     private fun rootfsDataDir(context: Context): File =
         File(context.applicationContext.filesDir, SandboxSettings.currentProfile().rootfsDirName)
