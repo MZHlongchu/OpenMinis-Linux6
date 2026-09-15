@@ -280,7 +280,7 @@ fun SettingsScreen(
             // -- Devstack Toolchain --
             SettingsSection(title = "") {
                 SettingsItem(
-                    icon = Icons.Outlined.Build,
+                    icon = androidx.compose.material.icons.outlined.Build,
                     iconColor = MaterialTheme.colorScheme.primary,
                     title = stringResource(R.string.toolchain_title),
                     subtitle = stringResource(R.string.toolchain_section_footer),
