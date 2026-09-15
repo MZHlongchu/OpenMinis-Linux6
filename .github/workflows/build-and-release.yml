@@ -83,6 +83,16 @@ jobs:
             cp build/ubuntu-noble-aarch64.tar.gz src/android/app/src/main/assets/ubuntu-noble-aarch64.tar.gz
           fi
 
+      - name: Build rclone Android AAR
+        run: |
+          apt-get install -y golang-go
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          export PATH=$PATH:$(go env GOPATH)/bin
+          gomobile init
+          chmod +x deps/build_rclone_android.sh
+          ANDROID_NDK_HOME="/usr/local/lib/android/sdk/ndk/${ANDROID_NDK}" bash deps/build_rclone_android.sh
+          cp deps/build/rclone/rclone.aar src/android/app/libs/
+
       - name: Assemble release APK
         working-directory: src/android
         env:
