@@ -241,7 +241,7 @@ fun AppNavigation(
     // a SECOND independent instance — UI list updated but PRoot never
     // saw the change because PRootKernel.mountedFoldersStore pointed at
     // the application-scoped singleton in MinisApp.
-    val mountedFoldersStore = remember {
+    val mountedFoldersStore: MountedFoldersStore = remember {
         (context.applicationContext as com.openminis.app.MinisApp).mountedFoldersStore
     }
 

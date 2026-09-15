@@ -4,20 +4,26 @@ import android.content.Context
 import android.content.SharedPreferences
 
 sealed class SandboxProfile(val variant: String) {
+    abstract val rootfsDirName: String
+    abstract val prootBinaryName: String
+    abstract val defaultShell: String
+    abstract val rootfsAsset: String
+    abstract val archMarker: String
+
     object Alpine : SandboxProfile("alpine") {
-        val rootfsDirName = "alpine-rootfs"
-        val prootBinaryName = "libproot.so"
-        val defaultShell: String = "/bin/sh"
-        val rootfsAsset: String = "alpine-minirootfs.tar.gz"
-        val archMarker: String = ARCH
+        override val rootfsDirName = "alpine-rootfs"
+        override val prootBinaryName = "libproot.so"
+        override val defaultShell: String = "/bin/sh"
+        override val rootfsAsset: String = "alpine-minirootfs.tar.gz"
+        override val archMarker: String = android.os.Build.SUPPORTED_ABIS.firstOrNull()?.lowercase() ?: "aarch64"
     }
 
     object Devstack : SandboxProfile("devstack") {
-        val rootfsDirName = "devstack-rootfs"
-        val prootBinaryName = "libproot.so"
-        val defaultShell: String = "/bin/bash"
-        val rootfsAsset: String = "ubuntu-noble-aarch64.tar.gz"
-        val archMarker: String = "aarch64"
+        override val rootfsDirName = "devstack-rootfs"
+        override val prootBinaryName = "libproot.so"
+        override val defaultShell: String = "/bin/bash"
+        override val rootfsAsset: String = "ubuntu-noble-aarch64.tar.gz"
+        override val archMarker: String = "aarch64"
     }
 
     companion object {

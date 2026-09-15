@@ -181,7 +181,7 @@ class DebugServer(
                 val isLoopback = s.inetAddress?.isLoopbackAddress == true
                 if (!isAuthorized(isLoopback, providedToken, authToken)) {
                     Log.w(TAG, "401 unauthorized ${if (isLoopback) "loopback" else s.inetAddress?.hostAddress ?: "?"} (missing/wrong token)")
-                    sendResponse(writer, 401, rpcHandler.errorJSON(-32000, "Unauthorized — send X-Minis-Token (see \`adb shell run-as ${BuildConfig.APPLICATION_ID} cat files/debug_server_token\`)"))
+                    sendResponse(writer, 401, rpcHandler.errorJSON(-32000, "Unauthorized — send X-Minis-Token (see \`adb shell run-as ${"$"}{BuildConfig.APPLICATION_ID} cat files/debug_server_token\`)"))
                     return
                 }
 

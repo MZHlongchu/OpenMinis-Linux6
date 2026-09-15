@@ -122,5 +122,21 @@ class RootPassThroughHandler(private val context: Context) : NativeOffloadHandle
 
     companion object {
         private const val TAG = "RootPassThrough"
+        private const val HELP = """android-root-cli — execute commands via su passthrough.
+
+Usage:
+  android-root-cli exec <command> [args...]
+    Run a command as root via su -c.
+  android-root-cli audit
+    Show recent root execution audit logs.
+
+Environment:
+  ROOT_PASSTHROUGH_TIMEOUT — max wait in ms (default 120000)
+
+Examples:
+  android-root-cli exec ls /system
+  android-root-cli exec id
+  android-root-cli audit
+"""
     }
 }

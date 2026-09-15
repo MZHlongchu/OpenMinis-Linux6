@@ -8,11 +8,10 @@ import com.openminis.app.sandbox.NativeOffloadResult
 import com.openminis.app.sandbox.RootfsManager
 import com.openminis.app.sandbox.SandboxProfile
 import com.openminis.app.sandbox.SandboxSettings
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.net.URL
 import java.util.zip.ZipInputStream
 
@@ -78,18 +77,14 @@ class DevstackToolchainHandler(private val context: Context) : NativeOffloadHand
         val zipFile = File(context.cacheDir, "platform-tools.zip")
 
         log_info("Downloading platform-tools from $url...")
-        withContext(Dispatchers.IO) {
-            URL(url).openStream().use { input ->
-                FileOutputStream(zipFile).use { output ->
-                    input.copyTo(output)
-                }
+        URL(url).openStream().use { input ->
+            FileOutputStream(zipFile).use { output ->
+                input.copyTo(output)
             }
         }
 
         log_info("Extracting platform-tools...")
-        withContext(Dispatchers.IO) {
-            extractZip(zipFile, installDir)
-        }
+        extractZip(zipFile, installDir)
 
         zipFile.delete()
         return ok("platform-tools installed at $platformToolsDir\n")
@@ -101,13 +96,11 @@ class DevstackToolchainHandler(private val context: Context) : NativeOffloadHand
             return ok("JDK already configured at $jdkLink\n")
         }
 
-        withContext(Dispatchers.IO) {
-            val cmd = listOf("su", "-c", "apt-get update && apt-get install -y --no-install-recommends default-jdk")
-            val proc = ProcessBuilder(cmd)
-                .redirectErrorStream(true)
-                .start()
-            proc.waitFor()
-        }
+        val cmd = listOf("su", "-c", "apt-get update && apt-get install -y --no-install-recommends default-jdk")
+        val proc = ProcessBuilder(cmd)
+            .redirectErrorStream(true)
+            .start()
+        proc.waitFor()
 
         return ok("JDK installed\n")
     }
@@ -118,25 +111,21 @@ class DevstackToolchainHandler(private val context: Context) : NativeOffloadHand
             return ok("gradle already installed at $gradleDir\n")
         }
 
-        withContext(Dispatchers.IO) {
-            val cmd = listOf("su", "-c", "apt-get install -y --no-install-recommends gradle")
-            val proc = ProcessBuilder(cmd)
-                .redirectErrorStream(true)
-                .start()
-            proc.waitFor()
-        }
+        val cmd = listOf("su", "-c", "apt-get install -y --no-install-recommends gradle")
+        val proc = ProcessBuilder(cmd)
+            .redirectErrorStream(true)
+            .start()
+        proc.waitFor()
 
         return ok("gradle installed\n")
     }
 
     private fun installNodejs(rootfsDir: File): NativeOffloadResult {
-        withContext(Dispatchers.IO) {
-            val cmd = listOf("su", "-c", "apt-get install -y --no-install-recommends nodejs npm")
-            val proc = ProcessBuilder(cmd)
-                .redirectErrorStream(true)
-                .start()
-            proc.waitFor()
-        }
+        val cmd = listOf("su", "-c", "apt-get install -y --no-install-recommends nodejs npm")
+        val proc = ProcessBuilder(cmd)
+            .redirectErrorStream(true)
+            .start()
+        proc.waitFor()
         return ok("nodejs/npm installed\n")
     }
 
@@ -198,7 +187,7 @@ class DevstackToolchainHandler(private val context: Context) : NativeOffloadHand
         return NativeOffloadResult(1, obj.toString() + "\n")
     }
 
-    private suspend fun extractZip(zipFile: File, destDir: File) {
+    private fun extractZip(zipFile: File, destDir: File) {
         ZipInputStream(java.io.FileInputStream(zipFile).buffered()).use { zis ->
             var entry = zis.nextEntry
             while (entry != null) {
@@ -220,5 +209,21 @@ class DevstackToolchainHandler(private val context: Context) : NativeOffloadHand
     companion object {
         private const val TAG = "DevstackToolchain"
         private fun log_info(msg: String) { Log.i(TAG, msg) }
+        private const val HELP = """devstack-toolchain — install Android SDK components inside devstack rootfs.
+
+Usage:
+  devstack-toolchain install [component]
+    Install a component: platform-tools, jdk, gradle, nodejs, all.
+  devstack-toolchain list
+    List installed components.
+  devstack-toolchain check
+    Verify toolchain integrity.
+
+Examples:
+  devstack-toolchain install platform-tools
+  devstack-toolchain install jdk
+  devstack-toolchain install all
+  devstack-toolchain list
+"""
     }
 }

@@ -66,7 +66,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.stringResource
-import com.openminis.app.BuildConfig
+import com.openminis.app.BuildConfig as AppBuildConfig
 import com.openminis.app.R
 import com.openminis.app.ui.components.openExternalUrl
 import com.openminis.app.i18n.uppercaseForDisplay
@@ -427,8 +427,8 @@ private fun FeedbackSheetItem(
 private fun buildBugReportUrl(): String {
     val osVersion = android.os.Build.VERSION.RELEASE
     val sdkInt = android.os.Build.VERSION.SDK_INT
-    val versionName = BuildConfig.VERSION_NAME
-    val versionCode = BuildConfig.VERSION_CODE
+    val versionName = AppBuildConfig.VERSION_NAME
+    val versionCode = AppBuildConfig.VERSION_CODE
     val manufacturer = android.os.Build.MANUFACTURER
     val model = android.os.Build.MODEL
 
@@ -494,7 +494,7 @@ private fun buildFeedbackMailto(): String {
 
 
         ---
-        App Version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})
+        App Version: ${AppBuildConfig.VERSION_NAME} (${AppBuildConfig.VERSION_CODE})
         Android Version: ${android.os.Build.VERSION.RELEASE} (SDK ${android.os.Build.VERSION.SDK_INT})
         Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}
 
