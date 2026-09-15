@@ -1,264 +1,99 @@
-name: Build & Release
+name: Build and Release Android
 
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
 permissions:
   contents: write
-  packages: write
 
 env:
-  JAVA_VERSION: 17
-  ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
-  ANDROID_NDK_ROOT: ${{ github.workspace }}/android-ndk
+  JAVA_VERSION: "17"
+  ANDROID_PLATFORM: "android-36"
+  ANDROID_BUILD_TOOLS: "35.0.0"
+  ANDROID_CMAKE: "3.22.1"
+  ANDROID_NDK: "28.0.13004108"
   GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
 
 jobs:
-  # ── Prepare toolchain ──────────────────────────────────────────────
-  setup-toolchain:
-    name: Setup Build Toolchain
+  build-release:
+    name: Build and release APK
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
-      - name: Install JDK ${{ env.JAVA_VERSION }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y openjdk-${{ env.JAVA_VERSION }}-jdk-headless
-          echo "JAVA_HOME=/usr/lib/jvm/java-${{ env.JAVA_VERSION }}-openjdk-amd64" >> $GITHUB_ENV
-          java -version
-
-      - name: Install Android SDK & NDK
-        run: |
-          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
-          mkdir -p $ANDROID_SDK_ROOT/platform-tools
-          mkdir -p $ANDROID_NDK_ROOT
-
-          # Install cmdline-tools via zip
-          cd $ANDROID_SDK_ROOT/cmdline-tools
-          curl -sL -o cmdline-tools.zip \
-            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
-          unzip -q cmdline-tools.zip
-          mv cmdline-tools linux* 2>/dev/null || true
-
-          # sdkmanager accepts licenses
-          yes | $ANDROID_SDK_ROOT/cmdline-tools/bin/sdkmanager --licenses 2>/dev/null || true
-
-          # Install platform-tools and build-tools
-          $ANDROID_SDK_ROOT/cmdline-tools/bin/sdkmanager \
-            "platform-tools" \
-            "build-tools;35.0.0" \
-            "platforms;android-35" 2>/dev/null || true
-
-          # Download specific NDK r28 via archive
-          curl -sL -o ndk.zip \
-            "https://dl.google.com/android/repository/android-ndk-r28b-linux.zip"
-          unzip -q ndk.zip -d $ANDROID_NDK_ROOT
-          NDK_DIR=$(find $ANDROID_NDK_ROOT -maxdepth 1 -name "android-ndk-*" | head -1)
-          if [ -n "$NDK_DIR" ]; then
-            mv "$NDK_DIR" $ANDROID_NDK_ROOT/ndk
-            export ANDROID_NDK_HOME=$ANDROID_NDK_ROOT/ndk
-          fi
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
-
-      - name: Install CMake
-        run: |
-          sudo apt-get install -y cmake ninja-build make
-
-      - name: Cache SDK/NDK
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.ANDROID_SDK_ROOT }}
-            ${{ env.ANDROID_NDK_ROOT }}
-          key: android-toolchain-${{ runner.os }}-v3
-
-  # ── Build PRoot native deps ────────────────────────────────────────
-  build-proot:
-    name: Build PRoot Native Libs
-    needs: setup-toolchain
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
-      - name: Restore toolchain cache
-        uses: actions/cache@v4
+      - name: Set up JDK
+        uses: actions/setup-java@v4
         with:
-          path: |
-            ${{ env.ANDROID_SDK_ROOT }}
-            ${{ env.ANDROID_NDK_ROOT }}
-          key: android-toolchain-${{ runner.os }}-v3
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
 
-      - name: Build PRoot
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_ROOT }}/ndk
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}/ndk
-          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
-        working-directory: ${{ github.workspace }}
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" "cmake;${ANDROID_CMAKE}" "ndk;${ANDROID_NDK}"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}" >> "$GITHUB_ENV"
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl tar unzip make awk sed file
+
+      - name: Build PRoot native dependencies
         run: |
           chmod +x deps/build_proot.sh
-          bash deps/build_proot.sh
+          ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK}" bash deps/build_proot.sh
 
-      - name: Upload PRoot artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: proot-binaries
-          path: |
-            src/android/app/src/main/assets/proot-aarch64
-            src/android/app/src/main/jniLibs/arm64-v8a/*.so
-
-  # ── Prepare rootfs ─────────────────────────────────────────────────
-  prepare-rootfs:
-    name: Prepare Alpine Rootfs
-    needs: setup-toolchain
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Prepare Alpine rootfs
-        working-directory: ${{ github.workspace }}
+      - name: Prepare Alpine sandbox assets
         run: |
           chmod +x scripts/prepare_android_sandbox.sh
           bash scripts/prepare_android_sandbox.sh
 
-      - name: Upload rootfs artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: alpine-rootfs
-          path: src/android/app/src/main/assets/alpine-minirootfs.tar.gz
-
-  # ── Build Devstack Rootfs ──────────────────────────────────────────
-  build-devstack-rootfs:
-    name: Build Ubuntu Devstack Rootfs
-    needs: setup-toolchain
-    runs-on: ubuntu-22.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Docker (for rootfs build)
-        run: |
-          apt-get update && apt-get install -y docker.io
-          systemctl start docker || true
-
-      - name: Prepare Devstack rootfs
-        working-directory: ${{ github.workspace }}
+      - name: Prepare Devstack rootfs asset
         run: |
           chmod +x scripts/prepare_devstack_rootfs.sh
-          bash scripts/prepare_devstack_rootfs.sh || true
-
-      - name: Upload devstack rootfs
-        uses: actions/upload-artifact@v4
-        with:
-          name: devstack-rootfs
-          path: src/android/app/src/main/assets/ubuntu-noble-aarch64.tar.gz
-        if-no-files: skip
-
-  # ── Assemble APK ───────────────────────────────────────────────────
-  build-apk:
-    name: Assemble Debug APK (alpine)
-    needs: [build-proot, prepare-rootfs, setup-toolchain]
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Restore toolchain cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.ANDROID_SDK_ROOT }}
-            ${{ env.ANDROID_NDK_ROOT }}
-          key: android-toolchain-${{ runner.os }}-v3
-
-      - name: Restore PRoot artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: proot-binaries
-          path: ${{ github.workspace }}
-
-      - name: Restore Alpine rootfs
-        uses: actions/download-artifact@v4
-        with:
-          name: alpine-rootfs
-          path: ${{ github.workspace }}
-
-      - name: Set up JDK ${{ env.JAVA_VERSION }}
-        run: |
-          sudo apt-get install -y openjdk-17-jdk-headless
-
-      - name: Build Debug APK
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_ROOT }}/ndk
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}/ndk
-          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
-          GRADLE_OPTS: ${{ env.GRADLE_OPTS }}
-          SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-          NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}/ndk
-          ANDROID_AVD_MANAGER_USER_DATA: "{\"allow.provider.install\":\"true\"}"
-        working-directory: ${{ github.workspace }}/src/android
-        run: |
-          chmod +x gradlew
-          ./gradlew :app:assembleDebug --no-daemon
-
-      - name: Upload Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-apk-alpine
-          path: src/android/app/build/outputs/apk/debug/app-debug.apk
-
-  # ── Create Release ─────────────────────────────────────────────────
-  release:
-    name: Create GitHub Release
-    needs: [build-apk]
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download APK
-        uses: actions/download-artifact@v4
-        with:
-          name: debug-apk-alpine
-          path: ${{ github.workspace }}/releases/
-
-      - name: Rename APK
-        run: |
-          if [ -f releases/app-debug.apk ]; then
-            VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
-            mv releases/app-debug.apk releases/minis-android-${VERSION}.apk
+          bash scripts/prepare_devstack_rootfs.sh
+          if [ -f build/ubuntu-noble-aarch64.tar.gz ]; then
+            mkdir -p src/android/app/src/main/assets
+            cp build/ubuntu-noble-aarch64.tar.gz src/android/app/src/main/assets/ubuntu-noble-aarch64.tar.gz
           fi
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: |
-            releases/*.apk
-          body_path: ${{ github.workspace }}/releases/CHANGELOG.md
-          generate_release_notes: true
+      - name: Assemble release APK
+        working-directory: src/android
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK }}
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon
 
-      - name: Upload Release Assets (manual dispatch)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Verify APK
+        run: |
+          test -s src/android/app/build/outputs/apk/release/app-release.apk
+          unzip -l src/android/app/build/outputs/apk/release/app-release.apk | grep -E "libproot|proot-aarch64|alpine-minirootfs" || true
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openminis-devstack-release
+          path: src/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            releases/*.apk
+          files: src/android/app/build/outputs/apk/release/app-release.apk
+          body_path: releases/CHANGELOG.md
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
