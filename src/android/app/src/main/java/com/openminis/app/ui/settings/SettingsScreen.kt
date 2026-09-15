@@ -19,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.AutoAwesome
@@ -280,7 +281,7 @@ fun SettingsScreen(
             // -- Devstack Toolchain --
             SettingsSection(title = "") {
                 SettingsItem(
-                    icon = androidx.compose.material.icons.Icons.Outlined.Build,
+                    icon = Icons.Outlined.Build,
                     iconColor = MaterialTheme.colorScheme.primary,
                     title = stringResource(R.string.toolchain_title),
                     subtitle = stringResource(R.string.toolchain_section_footer),
