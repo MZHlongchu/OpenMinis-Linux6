@@ -195,7 +195,7 @@ class DevstackToolchainHandler(private val context: Context) : NativeOffloadHand
         return NativeOffloadResult(0, obj.toString() + "\n")
     }
 
-    private fun errEnvelope(code: String, message: String, request: NativeOffloadRequest): NativeOffloadResult {
+    private fun errEnvelope(code: String, message: String, request: NativeOffloadRequest?): NativeOffloadResult {
         val obj = JSONObject().put("ok", false)
             .put("error", JSONObject().put("code", code).put("message", message))
         return NativeOffloadResult(1, obj.toString() + "\n")

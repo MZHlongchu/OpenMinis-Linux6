@@ -95,7 +95,7 @@ enum class MirrorCategory(
             ALPINE -> Icons.Filled.Terrain
             PIP -> Icons.Filled.Inventory2
             NPM -> Icons.Outlined.Javascript
-            DEVSTACK -> Icons.Outlined.Build
+            DEVSTACK -> Icons.Filled.Build
         }
 
     val iconColor: Color
@@ -135,22 +135,6 @@ object MirrorCatalog {
 
     private fun pip(id: String, name: String, url: String, region: String, official: Boolean = false) =
         MirrorEntry("pip.$id", name, url, url, MirrorCategory.PIP, region, official)
-
-    private fun npm(id: String, name: String, url: String, region: String, official: Boolean = false) =
-        MirrorEntry("npm.$id", name, url, url, MirrorCategory.NPM, region, official)
-
-    val alpineMirrors = listOf(
-        alpine("official", "Official CDN", "https://dl-cdn.alpinelinux.org/alpine/", "Global", official = true),
-        alpine("tuna", "Tsinghua TUNA", "https://mirrors.tuna.tsinghua.edu.cn/alpine/", "China"),
-        alpine("aliyun", "Alibaba", "https://mirrors.aliyun.com/alpine/", "China"),
-        alpine("ustc", "USTC", "https://mirrors.ustc.edu.cn/alpine/", "China"),
-        alpine("huawei", "Huawei", "https://repo.huaweicloud.com/alpine/", "China"),
-        alpine("tencent", "Tencent", "https://mirrors.cloud.tencent.com/alpine/", "China"),
-        alpine("leaseweb", "LEASEWEB UK", "https://mirror.leaseweb.com/alpine/", "Europe"),
-        alpine("rwth", "RWTH Germany", "https://ftp.halifax.rwth-aachen.de/alpine/", "Europe"),
-        alpine("jaist", "JAIST Japan", "https://ftp.jaist.ac.jp/pub/Linux/alpine/", "Asia"),
-        alpine("kakao", "Kakao Korea", "https://mirror.kakao.com/alpine/", "Asia"),
-    )
 
     private fun npm(id: String, name: String, url: String, region: String, official: Boolean = false) =
         MirrorEntry("npm.$id", name, url, url, MirrorCategory.NPM, region, official)
@@ -478,6 +462,11 @@ object MirrorSpeedTestViewModel {
         val content = when (category) {
             MirrorCategory.ALPINE ->
                 "${mirror.baseURL}v3.21/main\n${mirror.baseURL}v3.21/community\n"
+            MirrorCategory.DEVSTACK ->
+                "deb ${mirror.baseURL} noble main restricted universe multiverse\n" +
+                "deb ${mirror.baseURL} noble-updates main restricted universe multiverse\n" +
+                "deb ${mirror.baseURL} noble-backports main restricted universe multiverse\n" +
+                "deb ${mirror.baseURL} noble-security main restricted universe multiverse\n"
             MirrorCategory.PIP -> {
                 val host = try { URI(mirror.baseURL).host ?: "" } catch (_: Exception) { "" }
                 """
