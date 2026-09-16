@@ -110,7 +110,7 @@ create_with_docker() {
     log_info "Repackaging as tar.gz..."
 
     cd "$DEVSTACK_DIR/minified"
-    tar -czf "$BUILD_DIR/$OUTPUT_TARBALL" .
+    tar --hard-dereference -czf "$BUILD_DIR/$OUTPUT_TARBALL" .
 
     local size_mb=$(du -m "$BUILD_DIR/$OUTPUT_TARBALL" | awk '{print $1}')
     log_info "Output: $BUILD_DIR/$OUTPUT_TARBALL (${size_mb}MB)"

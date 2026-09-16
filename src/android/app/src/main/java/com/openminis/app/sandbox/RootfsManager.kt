@@ -534,11 +534,18 @@ class RootfsManager private constructor(private val context: Context) {
                     continue // Already consumed data + padding
                 }
                 '1' -> {
-                    // Hard link — create a copy
+                    // Hard link — create a copy. File.copyTo does not carry POSIX
+                    // permission bits, so restore the exec bit from this entry's
+                    // own tar mode; otherwise binaries stored as hard links (e.g.
+                    // /usr/bin/perl on some Ubuntu base images) lose +x and dpkg
+                    // maintainer scripts fail with exit 126.
                     outFile.parentFile?.mkdirs()
                     val linkTarget = File(targetDir, linkName)
                     if (linkTarget.exists()) {
                         linkTarget.copyTo(outFile, overwrite = true)
+                    }
+                    if (mode and 0b001_001_001 != 0) {
+                        outFile.setExecutable(true, false)
                     }
                 }
                 else -> {

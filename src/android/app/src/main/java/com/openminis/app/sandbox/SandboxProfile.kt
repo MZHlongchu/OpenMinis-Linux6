@@ -40,14 +40,14 @@ object SandboxSettings {
     private const val KEY_VARIANT = "sandbox_variant"
 
     @Volatile
-    private var cachedVariant: String = SandboxProfile.Alpine.variant
+    private var cachedVariant: String = SandboxProfile.Devstack.variant
 
     private fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     fun prime(context: Context) {
-        cachedVariant = prefs(context).getString(KEY_VARIANT, SandboxProfile.Alpine.variant)
-            ?: SandboxProfile.Alpine.variant
+        cachedVariant = prefs(context).getString(KEY_VARIANT, SandboxProfile.Devstack.variant)
+            ?: SandboxProfile.Devstack.variant
     }
 
     fun currentProfile(): SandboxProfile =
