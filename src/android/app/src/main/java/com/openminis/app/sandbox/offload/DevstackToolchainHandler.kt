@@ -5,6 +5,7 @@ import android.util.Log
 import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
+import com.openminis.app.sandbox.PRootKernel
 import com.openminis.app.sandbox.RootfsManager
 import com.openminis.app.sandbox.SandboxProfile
 import com.openminis.app.sandbox.SandboxSettings
@@ -96,13 +97,17 @@ class DevstackToolchainHandler(private val context: Context) : NativeOffloadHand
             return ok("JDK already configured at $jdkLink\n")
         }
 
-        val cmd = listOf("su", "-c", "apt-get update && apt-get install -y --no-install-recommends default-jdk")
+        if (!PRootKernel.isBooted) {
+            return errEnvelope("PROOT_NOT_BOOTED", "PRoot kernel not booted. Start the sandbox first.", null)
+        }
+
+        val cmd = PRootKernel.buildProotCommand("apt-get update && apt-get install -y --no-install-recommends default-jdk")
         val proc = ProcessBuilder(cmd)
             .redirectErrorStream(true)
             .start()
+        val output = proc.inputStream.bufferedReader().use { it.readText() }
         proc.waitFor()
-
-        return ok("JDK installed\n")
+        return ok("JDK installed: exit=${proc.exitValue()}\n$output\n")
     }
 
     private fun installGradle(installDir: File): NativeOffloadResult {
@@ -111,22 +116,31 @@ class DevstackToolchainHandler(private val context: Context) : NativeOffloadHand
             return ok("gradle already installed at $gradleDir\n")
         }
 
-        val cmd = listOf("su", "-c", "apt-get install -y --no-install-recommends gradle")
+        if (!PRootKernel.isBooted) {
+            return errEnvelope("PROOT_NOT_BOOTED", "PRoot kernel not booted. Start the sandbox first.", null)
+        }
+
+        val cmd = PRootKernel.buildProotCommand("apt-get install -y --no-install-recommends gradle")
         val proc = ProcessBuilder(cmd)
             .redirectErrorStream(true)
             .start()
+        val output = proc.inputStream.bufferedReader().use { it.readText() }
         proc.waitFor()
-
-        return ok("gradle installed\n")
+        return ok("gradle installed: exit=${proc.exitValue()}\n$output\n")
     }
 
     private fun installNodejs(rootfsDir: File): NativeOffloadResult {
-        val cmd = listOf("su", "-c", "apt-get install -y --no-install-recommends nodejs npm")
+        if (!PRootKernel.isBooted) {
+            return errEnvelope("PROOT_NOT_BOOTED", "PRoot kernel not booted. Start the sandbox first.", null)
+        }
+
+        val cmd = PRootKernel.buildProotCommand("apt-get install -y --no-install-recommends nodejs npm")
         val proc = ProcessBuilder(cmd)
             .redirectErrorStream(true)
             .start()
+        val output = proc.inputStream.bufferedReader().use { it.readText() }
         proc.waitFor()
-        return ok("nodejs/npm installed\n")
+        return ok("nodejs/npm installed: exit=${proc.exitValue()}\n$output\n")
     }
 
     private fun handleList(): NativeOffloadResult {

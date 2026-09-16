@@ -69,6 +69,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.BuildConfig as AppBuildConfig
 import com.openminis.app.R
+import com.openminis.app.sandbox.SandboxProfile
+import com.openminis.app.sandbox.SandboxSettings
 import com.openminis.app.ui.components.openExternalUrl
 import com.openminis.app.i18n.uppercaseForDisplay
 
@@ -229,6 +231,22 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_section_storage),
                     subtitle = stringResource(R.string.settings_storage_subtitle),
                     onClick = onRootfsClick,
+                )
+                val currentProfile = SandboxSettings.currentProfile()
+                SettingsChoiceRow(
+                    title = stringResource(R.string.sandbox_variant_alpine),
+                    selected = currentProfile is SandboxProfile.Alpine,
+                    onSelect = {
+                        SandboxSettings.setVariant(context, SandboxProfile.Alpine.variant)
+                    },
+                )
+                SettingsChoiceRow(
+                    title = stringResource(R.string.sandbox_variant_devstack),
+                    selected = currentProfile is SandboxProfile.Devstack,
+                    onSelect = {
+                        SandboxSettings.setVariant(context, SandboxProfile.Devstack.variant)
+                    },
+                    showDivider = false,
                 )
                 SettingsItem(
                     icon = Icons.Outlined.Folder,

@@ -87,13 +87,15 @@ enum class MirrorCategory(
 ) {
     ALPINE("alpine", "Alpine APK", "etc/apk/repositories"),
     PIP("pip", "Python pip", "etc/pip/pip.conf"),
-    NPM("npm", "Node.js npm", "root/.npmrc");
+    NPM("npm", "Node.js npm", "root/.npmrc"),
+    DEVSTACK("devstack", "Devstack APT", "etc/apt/sources.list");
 
     val icon: ImageVector
         get() = when (this) {
             ALPINE -> Icons.Filled.Terrain
             PIP -> Icons.Filled.Inventory2
             NPM -> Icons.Outlined.Javascript
+            DEVSTACK -> Icons.Outlined.Build
         }
 
     val iconColor: Color
@@ -101,6 +103,7 @@ enum class MirrorCategory(
             ALPINE -> Color(0xFF007AFF)
             PIP -> Color(0xFF34C759)
             NPM -> Color(0xFFFF3B30)
+            DEVSTACK -> Color(0xFFFF9500)
         }
 }
 
@@ -149,6 +152,34 @@ object MirrorCatalog {
         alpine("kakao", "Kakao Korea", "https://mirror.kakao.com/alpine/", "Asia"),
     )
 
+    private fun npm(id: String, name: String, url: String, region: String, official: Boolean = false) =
+        MirrorEntry("npm.$id", name, url, url, MirrorCategory.NPM, region, official)
+
+    private fun devstack(id: String, name: String, url: String, region: String, official: Boolean = false) =
+        MirrorEntry("devstack.$id", name, url, url + "dists/noble/Release", MirrorCategory.DEVSTACK, region, official)
+
+    val alpineMirrors = listOf(
+        alpine("official", "Official CDN", "https://dl-cdn.alpinelinux.org/alpine/", "Global", official = true),
+        alpine("tuna", "Tsinghua TUNA", "https://mirrors.tuna.tsinghua.edu.cn/alpine/", "China"),
+        alpine("aliyun", "Alibaba", "https://mirrors.aliyun.com/alpine/", "China"),
+        alpine("ustc", "USTC", "https://mirrors.ustc.edu.cn/alpine/", "China"),
+        alpine("huawei", "Huawei", "https://repo.huaweicloud.com/alpine/", "China"),
+        alpine("tencent", "Tencent", "https://mirrors.cloud.tencent.com/alpine/", "China"),
+        alpine("leaseweb", "LEASEWEB UK", "https://mirror.leaseweb.com/alpine/", "Europe"),
+        alpine("rwth", "RWTH Germany", "https://ftp.halifax.rwth-aachen.de/alpine/", "Europe"),
+        alpine("jaist", "JAIST Japan", "https://ftp.jaist.ac.jp/pub/Linux/alpine/", "Asia"),
+        alpine("kakao", "Kakao Korea", "https://mirror.kakao.com/alpine/", "Asia"),
+    )
+
+    val devstackMirrors = listOf(
+        devstack("official", "Official Ubuntu", "https://archive.ubuntu.com/ubuntu/", "Global", official = true),
+        devstack("huawei", "Huawei Cloud", "https://repo.huaweicloud.com/ubuntu/", "China"),
+        devstack("tuna", "Tsinghua TUNA", "https://mirrors.tuna.tsinghua.edu.cn/ubuntu/", "China"),
+        devstack("aliyun", "Alibaba", "https://mirrors.aliyun.com/ubuntu/", "China"),
+        devstack("ustc", "USTC", "https://mirrors.ustc.edu.cn/ubuntu/", "China"),
+        devstack("tencent", "Tencent", "https://mirrors.cloud.tencent.com/ubuntu/", "China"),
+    )
+
     val pipMirrors = listOf(
         pip("official", "Official PyPI", "https://pypi.org/simple/", "Global", official = true),
         pip("tuna", "Tsinghua TUNA", "https://pypi.tuna.tsinghua.edu.cn/simple/", "China"),
@@ -165,10 +196,11 @@ object MirrorCatalog {
         npm("tencent", "Tencent", "https://mirrors.cloud.tencent.com/npm/", "China"),
     )
 
-    val allMirrors: List<MirrorEntry> = alpineMirrors + pipMirrors + npmMirrors
+    val allMirrors: List<MirrorEntry> = alpineMirrors + devstackMirrors + pipMirrors + npmMirrors
 
     fun mirrors(category: MirrorCategory): List<MirrorEntry> = when (category) {
         MirrorCategory.ALPINE -> alpineMirrors
+        MirrorCategory.DEVSTACK -> devstackMirrors
         MirrorCategory.PIP -> pipMirrors
         MirrorCategory.NPM -> npmMirrors
     }

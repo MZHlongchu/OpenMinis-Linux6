@@ -216,6 +216,14 @@ export ANDROID_SDK_ROOT=/opt/android-sdk
 export PATH=/opt/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/cmdline-tools/latest/bin:$PATH
 EOF
 
+    # Write /etc/apt/sources.list (Huawei Cloud mirror for China users)
+    cat > "$mini_dir/etc/apt/sources.list" <<'EOF'
+deb http://repo.huaweicloud.com/ubuntu/ noble main restricted universe multiverse
+deb http://repo.huaweicloud.com/ubuntu/ noble-updates main restricted universe multiverse
+deb http://repo.huaweicloud.com/ubuntu/ noble-backports main restricted universe multiverse
+deb http://repo.huaweicloud.com/ubuntu/ noble-security main restricted universe multiverse
+EOF
+
     # ─── Repackage ───────────────────────────────────────────────────────────
     log_info "Repackaging as $BUILD_DIR/$OUTPUT_TARBALL..."
     # Use --hard-dereference to avoid proot --link2symlink edge cases

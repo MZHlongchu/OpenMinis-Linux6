@@ -1954,6 +1954,9 @@
     <string name="toolchain_title">Toolchain</string>
     <string name="toolchain_devstack_only_header">Devstack Only</string>
     <string name="toolchain_devstack_only_footer">Toolchain installation is only available in Devstack (Ubuntu) mode. Switch to Devstack in Settings to use this feature.</string>
+    <string name="toolchain_switch_devstack">Switch to Devstack</string>
+    <string name="sandbox_variant_alpine">Alpine (musl/apk)</string>
+    <string name="sandbox_variant_devstack">Devstack (Ubuntu GLibc)</string>
     <string name="toolchain_section_header">Install Components</string>
     <string name="toolchain_section_footer">Install development tools inside the PRoot sandbox. Requires root passthrough for some components.</string>
     <string name="toolchain_install_all">Install All Components</string>

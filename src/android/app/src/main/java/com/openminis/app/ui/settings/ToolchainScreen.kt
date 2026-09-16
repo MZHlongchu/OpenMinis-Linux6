@@ -27,9 +27,11 @@ import androidx.compose.ui.unit.dp
 import com.openminis.app.R
 import com.openminis.app.sandbox.SandboxProfile
 import com.openminis.app.sandbox.SandboxSettings
+import androidx.compose.ui.platform.LocalContext
 
 @Composable
 fun ToolchainScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
     val profile = SandboxSettings.currentProfile()
     if (profile !is SandboxProfile.Devstack) {
         SettingsScaffold(
@@ -47,6 +49,14 @@ fun ToolchainScreen(onBack: () -> Unit) {
                     iconColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     showChevron = false,
                 )
+                OutlinedButton(
+                    onClick = {
+                        SandboxSettings.setVariant(context, SandboxProfile.Devstack.variant)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(stringResource(R.string.toolchain_switch_devstack))
+                }
             }
         }
         return
