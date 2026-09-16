@@ -285,15 +285,15 @@ class DevstackToolchainHandler(private val context: Context) : NativeOffloadHand
                     java.io.FileOutputStream(outFile).use { fos ->
                         zis.copyTo(fos)
                     }
-                    // Zip stores the unix mode in the high 16 bits of
-                    // externalAttributes; without this, adb/gradle launchers land
-                    // as 0644 and fail with "Permission denied" like the perl case.
-                    val unixMode = (entry.externalAttributes shr 16) and 0xFFFF
-                    if (unixMode and 0b001_001_001 != 0) {
-                        outFile.setExecutable(true, false)
-                    } else if (entry.name.endsWith("/bin/gradle") ||
+                    // ZIP unix mode is not exposed via java.util.zip.ZipEntry on
+                    // Android, so we restore +x by name for known launcher binaries.
+                    // Android's ZipEntry lacks getExternalAttributes(); without
+                    // this, adb/gradle land as 0644 and "Permission denied".
+                    if (entry.name.endsWith("/bin/gradle") ||
                         entry.name.endsWith("adb") ||
-                        entry.name.endsWith("fastboot")) {
+                        entry.name.endsWith("fastboot") ||
+                        entry.name.endsWith("dx") ||
+                        entry.name.endsWith("e2fsdroid")) {
                         outFile.setExecutable(true, false)
                     }
                 }
