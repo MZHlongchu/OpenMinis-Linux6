@@ -275,7 +275,11 @@ build_proot() {
     local cppflags="-D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -DARG_MAX=131072 -I$TALLOC_DIR"
     local cflags="-O2 -Wall -Wextra -fPIE"
     if [ -n "${NATIVE_OFFLOAD_SOCKET_NAME:-}" ]; then
-        cflags="$cflags -DNATIVE_OFFLOAD_DEFAULT_SOCKET=\"${NATIVE_OFFLOAD_SOCKET_NAME}\""
+        case "$NATIVE_OFFLOAD_SOCKET_NAME" in
+            native-offload.*) socket_name="$NATIVE_OFFLOAD_SOCKET_NAME" ;;
+            *) socket_name="native-offload.${NATIVE_OFFLOAD_SOCKET_NAME}" ;;
+        esac
+        cflags="$cflags -DNATIVE_OFFLOAD_DEFAULT_SOCKET=\"${socket_name}\""
     fi
     local ldflags="-Wl,-z,noexecstack -pie -L$BUILD_DIR -ltalloc"
 

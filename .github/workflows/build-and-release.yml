@@ -66,7 +66,7 @@ jobs:
       - name: Build PRoot native dependencies
         run: |
           chmod +x deps/build_proot.sh
-          ANDROID_NDK_HOME="/usr/local/lib/android/sdk/ndk/${ANDROID_NDK}" bash deps/build_proot.sh
+          ANDROID_NDK_HOME="/usr/local/lib/android/sdk/ndk/${ANDROID_NDK}" NATIVE_OFFLOAD_SOCKET_NAME=app.openminis.devstack bash deps/build_proot.sh
 
       - name: Prepare Alpine sandbox assets
         run: |
@@ -77,11 +77,13 @@ jobs:
         run: |
           chmod +x scripts/prepare_devstack_rootfs.sh
           mkdir -p build
-          bash scripts/prepare_devstack_rootfs.sh || true
-          if [ -f build/ubuntu-noble-aarch64.tar.gz ]; then
-            mkdir -p src/android/app/src/main/assets
-            cp build/ubuntu-noble-aarch64.tar.gz src/android/app/src/main/assets/ubuntu-noble-aarch64.tar.gz
+          bash scripts/prepare_devstack_rootfs.sh
+          if [ ! -f build/ubuntu-noble-aarch64.tar.gz ]; then
+            echo "ERROR: devstack rootfs tarball not produced" >&2
+            exit 1
           fi
+          mkdir -p src/android/app/src/main/assets
+          cp build/ubuntu-noble-aarch64.tar.gz src/android/app/src/main/assets/ubuntu-noble-aarch64.tar.gz
 
       - name: Build rclone Android AAR
         run: |
