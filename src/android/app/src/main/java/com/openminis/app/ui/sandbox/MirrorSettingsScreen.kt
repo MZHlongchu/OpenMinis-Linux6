@@ -95,7 +95,7 @@ enum class MirrorCategory(
             ALPINE -> Icons.Filled.Terrain
             PIP -> Icons.Filled.Inventory2
             NPM -> Icons.Outlined.Javascript
-            DEVSTACK -> Icons.Filled.Build
+            DEVSTACK -> Icons.Filled.Bolt
         }
 
     val iconColor: Color
