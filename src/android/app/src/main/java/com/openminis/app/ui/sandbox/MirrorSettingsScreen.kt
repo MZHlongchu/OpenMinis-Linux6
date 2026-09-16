@@ -156,12 +156,12 @@ object MirrorCatalog {
     )
 
     val devstackMirrors = listOf(
-        devstack("official", "Official Ubuntu", "https://archive.ubuntu.com/ubuntu/", "Global", official = true),
-        devstack("huawei", "Huawei Cloud", "https://repo.huaweicloud.com/ubuntu/", "China"),
-        devstack("tuna", "Tsinghua TUNA", "https://mirrors.tuna.tsinghua.edu.cn/ubuntu/", "China"),
-        devstack("aliyun", "Alibaba", "https://mirrors.aliyun.com/ubuntu/", "China"),
-        devstack("ustc", "USTC", "https://mirrors.ustc.edu.cn/ubuntu/", "China"),
-        devstack("tencent", "Tencent", "https://mirrors.cloud.tencent.com/ubuntu/", "China"),
+        devstack("official", "Official Ubuntu", "http://archive.ubuntu.com/ubuntu/", "Global", official = true),
+        devstack("huawei", "Huawei Cloud", "http://repo.huaweicloud.com/ubuntu/", "China"),
+        devstack("tuna", "Tsinghua TUNA", "http://mirrors.tuna.tsinghua.edu.cn/ubuntu/", "China"),
+        devstack("aliyun", "Alibaba", "http://mirrors.aliyun.com/ubuntu/", "China"),
+        devstack("ustc", "USTC", "http://mirrors.ustc.edu.cn/ubuntu/", "China"),
+        devstack("tencent", "Tencent", "http://mirrors.cloud.tencent.com/ubuntu/", "China"),
     )
 
     val pipMirrors = listOf(

@@ -14,6 +14,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.URL
+import java.nio.file.Files
 import java.util.zip.ZipInputStream
 
 class DevstackToolchainHandler(private val context: Context) : NativeOffloadHandler {
@@ -92,22 +93,33 @@ class DevstackToolchainHandler(private val context: Context) : NativeOffloadHand
     }
 
     private fun installJdk(installDir: File, rootfsDir: File): NativeOffloadResult {
+        if (!PRootKernel.isBooted) {
+            return errEnvelope("PROOT_NOT_BOOTED", "PRoot kernel not booted. Start the sandbox first.", null)
+        }
         val jdkLink = File(rootfsDir, "usr/lib/jvm/default-java")
         if (jdkLink.exists()) {
             return ok("JDK already configured at $jdkLink\n")
         }
 
-        if (!PRootKernel.isBooted) {
-            return errEnvelope("PROOT_NOT_BOOTED", "PRoot kernel not booted. Start the sandbox first.", null)
+        val (exit, output) = runNestedProot(aptInstallCommand("default-jdk-headless"))
+        if (exit != 0) {
+            return NativeOffloadResult(exit, "JDK install failed: exit=$exit\n$output\n")
         }
 
-        val cmd = PRootKernel.buildProotCommand("apt-get update && apt-get install -y --no-install-recommends default-jdk")
-        val proc = ProcessBuilder(cmd)
-            .redirectErrorStream(true)
-            .start()
-        val output = proc.inputStream.bufferedReader().use { it.readText() }
-        proc.waitFor()
-        return ok("JDK installed: exit=${proc.exitValue()}\n$output\n")
+        // default-jdk-headless installs java-<ver>-openjdk-arm64; expose a stable
+        // /usr/lib/jvm/default-java that the devstack profile's JAVA_HOME points at.
+        val runtime = listOf("java-17-openjdk-arm64", "java-21-openjdk-arm64", "java-11-openjdk-arm64")
+            .map { File(rootfsDir, "usr/lib/jvm/$it") }
+            .firstOrNull { it.exists() }
+        if (runtime != null) {
+            try {
+                jdkLink.parentFile?.mkdirs()
+                Files.createSymbolicLink(jdkLink.toPath(), runtime.toPath())
+            } catch (t: Throwable) {
+                Log.w(TAG, "default-java symlink failed: ${t.message}")
+            }
+        }
+        return ok("JDK installed: exit=$exit link=${jdkLink.absolutePath}\n$output\n")
     }
 
     private fun installGradle(installDir: File): NativeOffloadResult {
@@ -120,27 +132,40 @@ class DevstackToolchainHandler(private val context: Context) : NativeOffloadHand
             return errEnvelope("PROOT_NOT_BOOTED", "PRoot kernel not booted. Start the sandbox first.", null)
         }
 
-        val cmd = PRootKernel.buildProotCommand("apt-get install -y --no-install-recommends gradle")
-        val proc = ProcessBuilder(cmd)
-            .redirectErrorStream(true)
-            .start()
-        val output = proc.inputStream.bufferedReader().use { it.readText() }
-        proc.waitFor()
-        return ok("gradle installed: exit=${proc.exitValue()}\n$output\n")
+        // The apt gradle is pinned at 4.4.1 (too old to build modern Android),
+        // so deliver a current Gradle directly from the distribution zip.
+        val version = "8.10.2"
+        val url = "https://services.gradle.org/distributions/gradle-$version-bin.zip"
+        val zipFile = File(context.cacheDir, "gradle.zip")
+        return try {
+            log_info("Downloading gradle $version from $url...")
+            URL(url).openStream().use { input ->
+                FileOutputStream(zipFile).use { output -> input.copyTo(output) }
+            }
+            extractZip(zipFile, installDir)
+            zipFile.delete()
+            val extracted = File(installDir, "gradle-$version")
+            if (extracted.exists() && !gradleDir.exists()) {
+                extracted.renameTo(gradleDir)
+            }
+            File(gradleDir, "bin/gradle").setExecutable(true, false)
+            ok("gradle $version installed at $gradleDir\n")
+        } catch (t: Throwable) {
+            zipFile.delete()
+            errEnvelope("GRADLE_INSTALL_FAILED", t.message ?: "unknown", null)
+        }
     }
 
     private fun installNodejs(rootfsDir: File): NativeOffloadResult {
         if (!PRootKernel.isBooted) {
             return errEnvelope("PROOT_NOT_BOOTED", "PRoot kernel not booted. Start the sandbox first.", null)
         }
-
-        val cmd = PRootKernel.buildProotCommand("apt-get install -y --no-install-recommends nodejs npm")
-        val proc = ProcessBuilder(cmd)
-            .redirectErrorStream(true)
-            .start()
-        val output = proc.inputStream.bufferedReader().use { it.readText() }
-        proc.waitFor()
-        return ok("nodejs/npm installed: exit=${proc.exitValue()}\n$output\n")
+        val (exit, output) = runNestedProot(aptInstallCommand("nodejs npm"))
+        return if (exit != 0) {
+            NativeOffloadResult(exit, "nodejs/npm install failed: exit=$exit\n$output\n")
+        } else {
+            ok("nodejs/npm installed: exit=$exit\n$output\n")
+        }
     }
 
     private fun handleList(): NativeOffloadResult {
@@ -201,6 +226,53 @@ class DevstackToolchainHandler(private val context: Context) : NativeOffloadHand
         return NativeOffloadResult(1, obj.toString() + "\n")
     }
 
+    /**
+     * Run a guest command through a nested PRoot invocation.
+     *
+     * The previous implementations did a bare `ProcessBuilder(buildProotCommand(...))`,
+     * which inherited only the host JVM environment. That left the nested proot
+     * without PROOT_TMP_DIR / PROOT_LOADER and with TMPDIR pointing at the host
+     * cache path (invisible inside the guest), so `--link2symlink` and mktemp
+     * failed with "Permission denied" while the wrapper still reported exit 0.
+     * Here we mirror PersistentShell's env setup and, crucially, return the real
+     * child exit code so callers stop swallowing failures.
+     */
+    private fun runNestedProot(shellCommand: String): Pair<Int, String> {
+        val cmd = PRootKernel.buildProotCommand(shellCommand)
+        val pb = ProcessBuilder(cmd).redirectErrorStream(true)
+        val env = pb.environment()
+        env["PROOT_TMP_DIR"] = PRootKernel.getProotTmpDir(context).absolutePath
+        if (PRootKernel.nativeLibDir.isNotEmpty()) env["LD_LIBRARY_PATH"] = PRootKernel.nativeLibDir
+        if (PRootKernel.prootLoaderPath.isNotEmpty()) env["PROOT_LOADER"] = PRootKernel.prootLoaderPath
+        if (PRootKernel.prootLoader32Path.isNotEmpty()) env["PROOT_LOADER_32"] = PRootKernel.prootLoader32Path
+        for ((key, value) in PRootKernel.customEnvironment) env[key] = value
+        env["TMPDIR"] = "/tmp"
+        env["TERM"] = "dumb"
+        env["PS1"] = ""
+        val proc = pb.start()
+        val output = proc.inputStream.bufferedReader().use { it.readText() }
+        val exit = proc.waitFor()
+        return exit to output
+    }
+
+    /**
+     * apt/dpkg install preamble shared by every component: pin TMPDIR inside the
+     * guest, install, then reconcile any packages dpkg left half-configured and
+     * sweep the `*.dpkg-new` conffile residue that a mid-configure failure
+     * produces (Bug 3). The real apt exit code is preserved and re-raised at the
+     * end via the `exit` at the tail of the command string.
+     */
+    private fun aptInstallCommand(pkgLine: String): String =
+        "set -o pipefail; " +
+        "export TMPDIR=/tmp DEBIAN_FRONTEND=noninteractive; " +
+        "dpkg --configure -a || true; " +
+        "apt-get update -o Acquire::Retries=3 || true; " +
+        "apt-get install -y --no-install-recommends $pkgLine; " +
+        "rc=\$?; " +
+        "dpkg --configure -a || true; " +
+        "find /etc -name '*.dpkg-new' -exec sh -c 'mv \"\$1\" \"\${1%.dpkg-new}\"' _ {} \\; 2>/dev/null || true; " +
+        "exit \$rc"
+
     private fun extractZip(zipFile: File, destDir: File) {
         ZipInputStream(java.io.FileInputStream(zipFile).buffered()).use { zis ->
             var entry = zis.nextEntry
@@ -212,6 +284,17 @@ class DevstackToolchainHandler(private val context: Context) : NativeOffloadHand
                     outFile.parentFile?.mkdirs()
                     java.io.FileOutputStream(outFile).use { fos ->
                         zis.copyTo(fos)
+                    }
+                    // Zip stores the unix mode in the high 16 bits of
+                    // externalAttributes; without this, adb/gradle launchers land
+                    // as 0644 and fail with "Permission denied" like the perl case.
+                    val unixMode = (entry.externalAttributes shr 16) and 0xFFFF
+                    if (unixMode and 0b001_001_001 != 0) {
+                        outFile.setExecutable(true, false)
+                    } else if (entry.name.endsWith("/bin/gradle") ||
+                        entry.name.endsWith("adb") ||
+                        entry.name.endsWith("fastboot")) {
+                        outFile.setExecutable(true, false)
                     }
                 }
                 zis.closeEntry()

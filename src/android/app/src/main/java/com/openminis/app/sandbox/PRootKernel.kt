@@ -142,6 +142,13 @@ object PRootKernel {
         // Mirrored in default_mount/etc/profile.d/minis.sh for login shells.
         customEnvironment.putIfAbsent("UV_LINK_MODE", "symlink")
 
+        // TMPDIR must resolve inside the guest rootfs. PRoot's default guest /tmp
+        // lives under the rootfs and is writable; the host cache path (e.g.
+        // /data/user/0/app.openminis.devstack/cache) is not bind-mounted into the
+        // guest, so mktemp/debconf/postinst scripts that honour TMPDIR fail with
+        // "No such file or directory" / "Permission denied" unless it is pinned.
+        customEnvironment.putIfAbsent("TMPDIR", "/tmp")
+
         // Devstack-specific environment
         if (profile is SandboxProfile.Devstack) {
             customEnvironment["JAVA_HOME"] = "/usr/lib/jvm/default-java"
