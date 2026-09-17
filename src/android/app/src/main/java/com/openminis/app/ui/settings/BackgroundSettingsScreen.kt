@@ -1,10 +1,15 @@
 package com.openminis.app.ui.settings
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -94,6 +99,30 @@ fun BackgroundSettingsScreen(onBack: () -> Unit) {
     // [T-android-dynamic-island] Live-Updates toggle + device capability.
     val dynamicIslandEnabled by backgroundRepo.dynamicIslandEnabled.collectAsState()
 
+    var notificationPermissionGranted by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) == PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        notificationPermissionGranted = granted
+    }
+    fun refreshNotificationPermission() {
+        notificationPermissionGranted =
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) == PackageManager.PERMISSION_GRANTED
+    }
+    var askedNotificationPermission by remember { mutableStateOf(false) }
+
     var ignoringOptimizations by remember {
         mutableStateOf(PowerOptimizationManager.isIgnoringBatteryOptimizations(context))
     }
@@ -123,6 +152,7 @@ fun BackgroundSettingsScreen(onBack: () -> Unit) {
                         Settings.canDrawOverlays(context)
                 dynamicIslandCapable =
                     com.openminis.app.service.DynamicIslandSupport.isDynamicIslandCapable(context)
+                refreshNotificationPermission()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -161,9 +191,37 @@ fun BackgroundSettingsScreen(onBack: () -> Unit) {
                 iconColor = Color(0xFF007AFF),
                 title = stringResource(R.string.settings_task_notifications),
                 checked = taskNotificationsEnabled,
-                onCheckedChange = { backgroundRepo.setTaskNotificationsEnabled(it) },
+                onCheckedChange = { wanted ->
+                    backgroundRepo.setTaskNotificationsEnabled(wanted)
+                    if (wanted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        !notificationPermissionGranted
+                    ) {
+                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                },
             )
             BgFooter(stringResource(R.string.settings_task_notifications_footer))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                BgFooter(
+                    stringResource(
+                        if (notificationPermissionGranted) {
+                            R.string.settings_task_notifications_granted
+                        } else {
+                            R.string.settings_task_notifications_denied
+                        },
+                    ),
+                )
+            }
+            LaunchedEffect(taskNotificationsEnabled, notificationPermissionGranted) {
+                if (!askedNotificationPermission &&
+                    taskNotificationsEnabled &&
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    !notificationPermissionGranted
+                ) {
+                    askedNotificationPermission = true
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
 
             // T-bg-overlay phase 2: floating tool-status overlay toggle.
             // Tapping ON without SYSTEM_ALERT_WINDOW deep-links the user to

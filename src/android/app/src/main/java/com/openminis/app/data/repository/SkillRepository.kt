@@ -1137,7 +1137,12 @@ class SkillRepository(private val context: Context) {
 
     private fun installBundledSkills() {
         installOrUpgradeBundled("skill-creator", "2.0.0", SKILL_CREATOR_CONTENT)
-        installOrUpgradeBundled("android-sdk-mirrors", "1.0.0", ANDROID_SDK_MIRRORS_CONTENT)
+        installOrUpgradeBundled("android-sdk-mirrors", "1.1.0", ANDROID_SDK_MIRRORS_CONTENT)
+        installOrUpgradeBundled(
+            ANDROID_DEVICE_OPS_SKILL_ID,
+            ANDROID_DEVICE_OPS_SKILL_VERSION,
+            ANDROID_DEVICE_OPS_SKILL_CONTENT,
+        )
     }
 
     private fun installOrUpgradeBundled(bundledId: String, bundledVersion: String, content: String) {
@@ -1673,7 +1678,7 @@ Do not create extraneous files: README.md, INSTALLATION_GUIDE.md, CHANGELOG.md, 
 private val ANDROID_SDK_MIRRORS_CONTENT = """
 ---
 name: android-sdk-mirrors
-version: 1.0.0
+version: 1.1.0
 description: Android SDK 在中国大陆的下载、镜像源与 aarch64 aapt2 注意事项。当用户需要安装 Android SDK、sdkmanager、build-tools、platforms，或遇到 Google dl.google.com 无法访问、aapt2 被 x86_64 覆盖时使用本技能。
 ---
 
@@ -1687,7 +1692,9 @@ description: Android SDK 在中国大陆的下载、镜像源与 aarch64 aapt2 �
 
 - `minis-android-sdk-setup`：解压 APK 内置的 **aarch64 aapt2 / zipalign / adb**，以及精简版 Java `sdkmanager`
 - SDK 根目录默认 `/opt/android-sdk`
-- `sdkmanager` **只用来拉** `platforms;android-35`（android.jar）
+- `sdkmanager` **只用来拉** `platforms;android-36` 和 `platforms;android-35`（android.jar）
+- CMake 3.22.1 用 Kitware **linux-aarch64** 包，放到 `/opt/android-sdk/cmake/3.22.1`
+- NDK r28+ 用 [lzhiyong/termux-ndk](https://github.com/lzhiyong/termux-ndk/releases) 的 **aarch64** 包
 
 ```
 minis-android-sdk-setup
@@ -1712,6 +1719,7 @@ sdkmanager "build-tools;35.0.0"
 - 继续用 APK 捆绑的 aarch64 `android-sdk-tools-aarch64.zip`
 - 需要新版 aapt2 时，从 [lzhiyong/android-sdk-tools](https://github.com/lzhiyong/android-sdk-tools/releases) 下载 **aarch64** 包
 - 不要用 `sdkmanager "build-tools;…"`，也不要解压 Google 的 `build-tools_r*-linux.zip`
+- 同样禁止 `sdkmanager "cmake;…"` / `sdkmanager "ndk;…"`：Google 的 linux 宿主工具是 x86_64
 
 `platform-tools` 同样以 x86_64 为主，客户机请用捆绑的 aarch64 `adb`。
 
@@ -1746,10 +1754,11 @@ https://mirrors.cloud.tencent.com/android/repository/commandlinetools-linux-1107
 export SDK_MIRROR=https://mirrors.cloud.tencent.com/android/repository
 sdkmanager --sdk_root="${'$'}{ANDROID_SDK_ROOT:-/opt/android-sdk}" \
   --no_https \
-  "platforms;android-35"
+  "platforms;android-36"
 ```
 
-若 sdkmanager 仍打到 google：先用 `curl -I` 从镜像拉 zip，再手动解压到 `${'$'}ANDROID_SDK_ROOT/platforms/android-35`。
+若 sdkmanager 仍打到 google：先用 `curl -I` 从镜像拉 zip，再手动解压到 `${'$'}ANDROID_SDK_ROOT/platforms/android-36`。
+`minis-android-sdk-setup` 会依次尝试 sdkmanager 与镜像 zip。
 
 ## 如何自己找镜像
 
@@ -1767,11 +1776,14 @@ sdkmanager --sdk_root="${'$'}{ANDROID_SDK_ROOT:-/opt/android-sdk}" \
 - `ubuntu-base.tar.gz` 太大，不进 git；CI 必须现拉
 - 不要 vendor 完整 Google cmdline-tools（约 146MB）；只要精简 sdkmanager
 - NDK / CMake / platforms 在 **x86_64 的 GitHub-hosted runner** 上用官方 sdkmanager 安装是安全的（那是编译主机，不是 aarch64 客户机）
-- 客户机里永远不要装 Google linux build-tools
+- 客户机里永远不要装 Google linux build-tools / cmake / ndk
+- 客户机补工具链：`minis-dev-setup`（先修 TMPDIR=/tmp 与 ca-certificates）然后 `minis-android-sdk-setup`
 
 ## 验收
 
 - `file $(which aapt2)` 或 `file /opt/android-sdk/build-tools/*/aapt2` 必须是 **ARM aarch64**，不是 x86-64
 - `aapt2 version` 能运行
 - 只有在镜像或直连成功后才去拉 `android.jar` / platforms
+- `file /opt/android-sdk/cmake/3.22.1/bin/cmake` 必须是 ARM aarch64
+- `file /opt/android-sdk/ndk/*/toolchains/llvm/prebuilt/linux-aarch64/bin/clang` 存在且为 ARM aarch64
 """.trimIndent()

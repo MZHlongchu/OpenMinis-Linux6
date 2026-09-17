@@ -3,3 +3,6 @@ gradlew text eol=lf
 *.py text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+# Guest overlay scripts have no extension (minis-dev-setup, 99minis-proot).
+# CRLF would break shebang/apt.conf inside the Ubuntu PRoot rootfs.
+src/android/app/src/main/assets/default_mount/** text eol=lf

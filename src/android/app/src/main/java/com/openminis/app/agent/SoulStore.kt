@@ -496,10 +496,8 @@ object SystemPromptBuilder {
         // SOUL body length limit (#356 / 1000 EN words / 1600 CN chars).
         val soulEditHint =
             "---\n" +
-            "SOUL.md fields (name / icon / style / lang / body) can be edited two ways:\n" +
-            "1. Tool: call `minis-config` to propose changes (user must approve).\n" +
-            "2. UI: ask the user to go to Settings → Soul to edit directly.\n" +
-            "Pick whichever the user finds easier in context. Do not say you cannot change your personality."
+            "SOUL.md is your persona. Keep edits short (voice, stance, a few rules). " +
+            "Change it via `minis-config` (user approves) or Settings → Soul. Do not claim you cannot change personality."
 
         // [T-soul-style-injection 2026-05-18, port iOS 0409e24f] The `style`
         // frontmatter field (response voice / tone / formatting preference,
@@ -522,26 +520,25 @@ object SystemPromptBuilder {
             return identityTrimmed + styleBlock(style) + "\n\n" + soulEditHint + "\n\n"
         }
 
-        // Reject (NOT truncate) bodies that exceed the language-aware
-        // limit. The old head/tail truncation silently dropped half the
-        // user's text — falling back to identity-only is the safer
-        // signal: the user notices the personality isn't taking effect,
-        // opens Settings, and sees the same red over-limit warning the
-        // Save button surfaces. Write paths already reject over-limit;
-        // this branch only triggers for an on-disk file written before
-        // this rule existed (or via shell / another device).
         val check = SoulStore.isOverLimit(trimmed)
-        if (check.isOverLimit) {
-            AppLogger.warning(TAG, "personality body is over the language-aware limit ($check) — falling back to identity-only system prompt.")
-            return identityTrimmed + styleBlock(style) + "\n\n" + soulEditHint + "\n\n"
-        }
+        val personalityRaw = if (check.isOverLimit) {
+            AppLogger.warning(TAG, "personality body is over the language-aware limit ($check) — truncating, not dropping.")
+            val cap = if (trimmed.count { it.code > 0x2E80 } * 10 > trimmed.length * 3) {
+                SoulStore.CHINESE_CHAR_LIMIT
+            } else {
+                // Approximate: keep ~limit words by cutting characters generously.
+                (SoulStore.ENGLISH_WORD_LIMIT * 8).coerceAtMost(trimmed.length)
+            }
+            val cut = trimmed.take(cap.coerceAtMost(trimmed.length))
+            val nl = cut.lastIndexOf('\n')
+            (if (nl > cap / 2) cut.take(nl) else cut).trimEnd() +
+                "\n…[persona truncated for context; remaining SOUL.md still applies — stay in character]"
+        } else trimmed
 
-        val personality = scrubInjections(trimmed)
+        val personality = scrubInjections(personalityRaw)
 
-        // Strip the trailing space we'd otherwise leave hanging at the
-        // end of the first paragraph when a personality block follows.
         return identityTrimmed +
-            "\n\nPersonality (from SOUL.md — your character and voice; defer to the user's latest message when it conflicts with anything here):\n" +
+            "\n\nPersonality (from SOUL.md — BINDING for this entire conversation, including tool use and this turn. Do not treat it as optional flavour, do not replace it with a generic assistant voice, and do not drop it when a later user message looks more specific unless the user explicitly asks you to leave character):\n" +
             personality +
             styleBlock(style) +
             "\n\n" +

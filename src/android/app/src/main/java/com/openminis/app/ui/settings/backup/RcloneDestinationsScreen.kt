@@ -1,5 +1,8 @@
 package com.openminis.app.ui.settings.backup
 
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -34,6 +37,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -45,6 +49,7 @@ import com.openminis.app.ui.components.MinisButton
 import com.openminis.app.ui.components.MinisOutlinedButton
 import com.openminis.app.ui.components.MinisTextButton
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.openminis.app.backup.PhoneBackupFolderStore
 import com.openminis.app.backup.remote.RcloneBackendCatalog
 import com.openminis.app.ui.settings.SettingsScaffold
 import com.openminis.app.ui.settings.SettingsSection
@@ -64,6 +69,20 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
     val busy by vm.busy.collectAsState()
     val error by vm.error.collectAsState()
     val browse by vm.browse.collectAsState()
+    val context = LocalContext.current
+    val phoneStore = remember { PhoneBackupFolderStore(context) }
+    var phoneFolders by remember { mutableStateOf(phoneStore.folders) }
+    val pickPhoneFolder = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri != null) {
+            val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            runCatching { context.contentResolver.takePersistableUriPermission(uri, flags) }
+            phoneStore.add(uri, PhoneBackupFolderStore.treeDisplayName(context, uri))
+            phoneFolders = phoneStore.folders
+        }
+    }
 
     var adding by remember { mutableStateOf(false) }
     // Name of the destination saved by the last completed save, so the list
@@ -100,6 +119,32 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
         }
 
         SettingsSection(
+            header = stringResource(R.string.backup_dest_phone),
+            footer = stringResource(R.string.backup_dest_phone_footer),
+        ) {
+            if (phoneFolders.isEmpty()) {
+                Text(
+                    stringResource(R.string.backup_dest_phone_none),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(16.dp),
+                )
+            } else {
+                phoneFolders.forEachIndexed { i, f ->
+                    SettingsSwitchRow(
+                        title = f.name,
+                        subtitle = stringResource(R.string.backup_dest_phone_subtitle),
+                        checked = f.enabled,
+                        onCheckedChange = {
+                            phoneStore.setEnabled(f.id, it)
+                            phoneFolders = phoneStore.folders
+                        },
+                        showDivider = i < phoneFolders.lastIndex,
+                    )
+                }
+            }
+        }
+
+        SettingsSection(
             header = stringResource(R.string.backup_dest_saved),
             footer = stringResource(R.string.backup_dest_footer),
         ) {
@@ -127,9 +172,28 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
 
         Column(Modifier.padding(16.dp)) {
             MinisButton(
+                onClick = { pickPhoneFolder.launch(null) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.backup_dest_add_folder)) }
+
+            Spacer(Modifier.height(8.dp))
+            MinisButton(
                 onClick = { adding = true },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(stringResource(R.string.backup_dest_add_server)) }
+
+            if (phoneFolders.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                phoneFolders.forEach { f ->
+                    MinisOutlinedButton(
+                        onClick = {
+                            phoneStore.remove(f.id)
+                            phoneFolders = phoneStore.folders
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    ) { Text(stringResource(R.string.backup_dest_remove, f.name)) }
+                }
+            }
 
             if (remotes.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))

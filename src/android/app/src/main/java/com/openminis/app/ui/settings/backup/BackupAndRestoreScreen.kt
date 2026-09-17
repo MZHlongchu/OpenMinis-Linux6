@@ -37,6 +37,8 @@ import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.FolderZip
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Layers
@@ -225,6 +227,7 @@ private fun BackupTab(
     val status by vm.statusText.collectAsState()
     val error by vm.errorText.collectAsState()
     val destinations by vm.destinations.collectAsState()
+    val phoneFolders by vm.phoneFolders.collectAsState()
     val historyRecords by vm.historyRecords.collectAsState()
     val lastResult by vm.lastResult.collectAsState()
 
@@ -366,11 +369,19 @@ private fun BackupTab(
     // Destinations…" button, so the backup screen never showed WHETHER a
     // destination existed — which is how "back up with none configured"
     // stayed invisible.
+    val pickPhoneFolder = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri -> if (uri != null) vm.addPhoneFolder(uri) }
+    val canDeliver = destinations.any { it.enabled } || phoneFolders.any { it.enabled }
+
     DestinationsSection(
         destinations = destinations,
+        phoneFolders = phoneFolders,
         enabled = !running,
         onManage = onManageDestinations,
         onToggle = vm::setDestinationEnabled,
+        onTogglePhone = vm::setPhoneFolderEnabled,
+        onAddPhoneFolder = { pickPhoneFolder.launch(null) },
     )
 
     // -- Action --
@@ -399,7 +410,7 @@ private fun BackupTab(
             // dies with the app it protects — that is not a backup, so the
             // button refuses rather than producing one (iOS parity).
             enabled = running || (
-                selected.isNotEmpty() && passphraseValid && destinations.isNotEmpty()
+                selected.isNotEmpty() && passphraseValid && canDeliver
                 ),
             colors = if (running) {
                 androidx.compose.material3.ButtonDefaults.buttonColors(
@@ -439,7 +450,7 @@ private fun BackupTab(
         // already selected (same ordering and rationale as iOS).
         if (!running) {
             val hint = when {
-                destinations.isEmpty() -> stringResource(R.string.backup_needs_destination)
+                !canDeliver -> stringResource(R.string.backup_needs_destination)
                 selected.isEmpty() -> stringResource(R.string.backup_needs_category)
                 encrypt && passphrase.isEmpty() -> stringResource(R.string.backup_needs_passphrase)
                 else -> null
@@ -767,6 +778,9 @@ private fun RestoreTab(
         mutableStateOf<com.openminis.app.backup.remote.RcloneRemoteStore.Remote?>(null)
     }
     val destinations by vm.destinations.collectAsState()
+    val phoneFolders by vm.phoneFolders.collectAsState()
+    val phoneRestoreFolder by vm.phoneRestoreFolder.collectAsState()
+    val phoneRestoreItems by vm.phoneRestoreItems.collectAsState()
     LaunchedEffect(Unit) { vm.refreshDestinations() }
 
     val pickLauncher = rememberLauncherForActivityResult(
@@ -786,11 +800,55 @@ private fun RestoreTab(
         // is almost always on a server they already set up, so making that the
         // first thing on the screen — instead of a button that opens a list —
         // removes a step from the common path.
-        if (destinations.isNotEmpty()) {
+        if (phoneRestoreFolder != null) {
+            SettingsSection(
+                header = phoneRestoreFolder ?: "",
+                footer = stringResource(R.string.backup_dest_phone_footer),
+            ) {
+                if (phoneRestoreItems.isEmpty()) {
+                    Text(
+                        stringResource(R.string.backup_dest_phone_none),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(16.dp),
+                    )
+                } else {
+                    phoneRestoreItems.forEachIndexed { i, item ->
+                        RestoreSourceRow(
+                            icon = Icons.Outlined.Description,
+                            iconColor = Color(0xFF007AFF),
+                            label = item.name,
+                            enabled = !running,
+                            onClick = { vm.loadPackage(item.uri) },
+                            showDivider = i < phoneRestoreItems.lastIndex,
+                        )
+                    }
+                }
+            }
+            Column(Modifier.padding(16.dp)) {
+                MinisOutlinedButton(
+                    onClick = { vm.clearPhoneRestoreBrowse() },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(stringResource(R.string.backup_dest_cancel)) }
+            }
+            return
+        }
+
+        if (destinations.isNotEmpty() || phoneFolders.isNotEmpty()) {
             SettingsSection(
                 header = stringResource(R.string.backup_restore_destinations),
                 footer = stringResource(R.string.backup_restore_destinations_footer),
             ) {
+                phoneFolders.forEachIndexed { i, folder ->
+                    RestoreSourceRow(
+                        icon = Icons.Outlined.Folder,
+                        iconColor = Color(0xFF007AFF),
+                        label = folder.name,
+                        subtitle = stringResource(R.string.backup_dest_phone_subtitle),
+                        enabled = !running,
+                        onClick = { vm.browsePhoneFolderForRestore(folder.id) },
+                        showDivider = i < phoneFolders.lastIndex || destinations.isNotEmpty(),
+                    )
+                }
                 destinations.forEachIndexed { i, r ->
                     RestoreSourceRow(
                         icon = Icons.Outlined.Cloud,
@@ -1110,17 +1168,57 @@ private fun RestoreReport(
 @Composable
 private fun DestinationsSection(
     destinations: List<com.openminis.app.backup.remote.RcloneRemoteStore.Remote>,
+    phoneFolders: List<com.openminis.app.backup.PhoneBackupFolderStore.Folder>,
     enabled: Boolean,
     onManage: () -> Unit,
     onToggle: (String, Boolean) -> Unit,
+    onTogglePhone: (String, Boolean) -> Unit,
+    onAddPhoneFolder: () -> Unit,
 ) {
     SettingsSection(
         header = stringResource(R.string.backup_section_destinations),
         footer = stringResource(
-            if (destinations.isEmpty()) R.string.backup_destinations_empty_footer
+            if (destinations.isEmpty() && phoneFolders.isEmpty()) R.string.backup_destinations_empty_footer
             else R.string.backup_destinations_footer,
         ),
     ) {
+        phoneFolders.forEach { folder ->
+            Column {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp)
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier.size(30.dp).background(Color(0xFF007AFF), CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Outlined.Folder, contentDescription = null, tint = Color.White, modifier = Modifier.size(17.dp))
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(folder.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            stringResource(R.string.backup_dest_phone_subtitle),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    SettingsSwitch(
+                        checked = folder.enabled,
+                        onCheckedChange = { onTogglePhone(folder.id, it) },
+                        enabled = enabled,
+                    )
+                }
+                Box(
+                    Modifier.fillMaxWidth().padding(start = 56.dp)
+                        .height(0.5.dp).background(MaterialTheme.colorScheme.outlineVariant),
+                )
+            }
+        }
         destinations.forEach { remote ->
             DestinationRow(
                 remote = remote,
@@ -1129,9 +1227,14 @@ private fun DestinationsSection(
                 onClick = onManage,
             )
         }
-        // ONE entry point, as on iOS: two buttons ("Add Folder" / "Add Server")
-        // would ask the user to know which mechanism they wanted before they
-        // knew what either did.
+        RestoreSourceRow(
+            icon = Icons.Outlined.CreateNewFolder,
+            iconColor = Color(0xFF34C759),
+            label = stringResource(R.string.backup_dest_add_folder),
+            enabled = enabled,
+            onClick = onAddPhoneFolder,
+            showDivider = true,
+        )
         RestoreSourceRow(
             icon = Icons.Outlined.Add,
             iconColor = Color(0xFF34C759),

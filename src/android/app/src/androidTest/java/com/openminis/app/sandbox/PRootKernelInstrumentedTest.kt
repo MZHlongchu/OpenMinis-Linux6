@@ -55,6 +55,19 @@ class PRootKernelInstrumentedTest {
     }
 
     @Test
+    fun bootPinsGuestTmpdirToSlashTmp() = runBlocking {
+        if (!canBoot()) {
+            println("SKIP: assets not available for boot")
+            return@runBlocking
+        }
+
+        PRootKernel.boot(context)
+        assertEquals("/tmp", PRootKernel.customEnvironment["TMPDIR"])
+        assertEquals("/tmp", PRootKernel.customEnvironment["TMP"])
+        assertEquals("/tmp", PRootKernel.customEnvironment["TEMP"])
+    }
+
+    @Test
     fun bootIsIdempotent() = runBlocking {
         if (!canBoot()) {
             println("SKIP: assets not available for boot")

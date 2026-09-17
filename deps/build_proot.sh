@@ -98,17 +98,23 @@ resolve_ndk() {
     fi
 
     # Auto-detect highest available NDK in the SDK folder
-    local base="$HOME/Library/Android/sdk/ndk"
-    if [ -d "$base" ]; then
-        local latest
+    local base latest
+    for base in \
+        "${ANDROID_SDK_ROOT:-}/ndk" \
+        "${ANDROID_HOME:-}/ndk" \
+        "$HOME/Library/Android/sdk/ndk" \
+        "$HOME/Android/Sdk/ndk" \
+        "/opt/android-sdk/ndk"
+    do
+        [ -n "$base" ] && [ -d "$base" ] || continue
         latest=$(ls "$base" 2>/dev/null | sort -V | tail -n 1)
         if [ -n "$latest" ]; then
             echo "$base/$latest"
             return
         fi
-    fi
+    done
 
-    log_error "Android NDK not found. Set \$ANDROID_NDK_HOME or install via Android Studio."
+    log_error "Android NDK not found. Set \$ANDROID_NDK_HOME or run minis-android-sdk-setup in the guest."
 }
 
 setup_toolchain() {
@@ -119,6 +125,7 @@ setup_toolchain() {
     case "$(uname -s)-$(uname -m)" in
         Darwin-*)         host_tag="darwin-x86_64" ;;
         Linux-x86_64)     host_tag="linux-x86_64" ;;
+        Linux-aarch64|Linux-arm64) host_tag="linux-aarch64" ;;
         *)                log_error "Unsupported host: $(uname -s) $(uname -m)" ;;
     esac
 
@@ -261,7 +268,7 @@ build_talloc() {
 # ----------------------------------------------------------------------------
 build_proot() {
     if [ ! -d "$PROOT_DIR/src" ]; then
-        log_error "PRoot source missing at $PROOT_DIR. Did you clone OpenMinis/proot?"
+        log_error "PRoot source missing at $PROOT_DIR. Run: git submodule update --init deps/proot"
     fi
 
     log_info "Building proot (aarch64)..."

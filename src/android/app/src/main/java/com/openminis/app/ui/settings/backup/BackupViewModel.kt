@@ -11,6 +11,7 @@ import com.openminis.app.backup.BackupImporter
 import com.openminis.app.backup.BackupManifest
 import com.openminis.app.backup.BackupPackageReader
 import com.openminis.app.backup.BackupZip
+import com.openminis.app.backup.PhoneBackupFolderStore
 import com.openminis.app.data.db.AppDatabase
 import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.Dispatchers
@@ -94,15 +95,16 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         MutableStateFlow<List<com.openminis.app.backup.remote.RcloneRemoteStore.Remote>>(emptyList())
     val destinations: StateFlow<List<com.openminis.app.backup.remote.RcloneRemoteStore.Remote>> =
         _destinations.asStateFlow()
+    private val phoneStore = PhoneBackupFolderStore(getApplication())
+    private val _phoneFolders = MutableStateFlow<List<PhoneBackupFolderStore.Folder>>(emptyList())
+    val phoneFolders: StateFlow<List<PhoneBackupFolderStore.Folder>> = _phoneFolders.asStateFlow()
 
     /**
-     * True when at least one ENABLED destination can receive the package.
-     *
-     * Note the difference from [destinations], which lists every configured
-     * server: a user who switched all of them off has destinations but nowhere
-     * for the package to go, so the Start button must still refuse.
+     * True when at least one ENABLED destination can receive the package —
+     * an rclone remote OR a user-chosen phone folder outside the sandbox.
      */
-    val hasDestination: Boolean get() = _destinations.value.any { it.enabled }
+    val hasDestination: Boolean
+        get() = _destinations.value.any { it.enabled } || _phoneFolders.value.any { it.enabled }
 
     /**
      * Re-read configured destinations. Call on screen resume.
@@ -118,6 +120,23 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         _destinations.value = runCatching {
             com.openminis.app.backup.remote.RcloneRemoteStore(getApplication()).remotes
         }.getOrDefault(emptyList())
+        _phoneFolders.value = runCatching { phoneStore.folders }.getOrDefault(emptyList())
+    }
+
+    fun addPhoneFolder(uri: Uri) {
+        val name = PhoneBackupFolderStore.treeDisplayName(getApplication(), uri)
+        phoneStore.add(uri, name)
+        refreshDestinations()
+    }
+
+    fun setPhoneFolderEnabled(id: String, enabled: Boolean) {
+        phoneStore.setEnabled(id, enabled)
+        refreshDestinations()
+    }
+
+    fun removePhoneFolder(id: String) {
+        phoneStore.remove(id)
+        refreshDestinations()
     }
 
     /** Flip delivery for one destination without touching its credential. */
@@ -493,8 +512,9 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
     ): List<BackupHistory.DestinationOutcome> {
         val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
         val enabled = store.enabledRemotes
-        if (enabled.isEmpty()) return emptyList()
-        store.syncToRclone()
+        val phone = phoneStore.enabledFolders
+        if (enabled.isEmpty() && phone.isEmpty()) return emptyList()
+        if (enabled.isNotEmpty()) store.syncToRclone()
         val uploader = com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
         // [T-android-backup-history] Report EVERY destination, not just the
         // failures. "Which servers did last night's backup actually reach?"
@@ -523,7 +543,49 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
         }
+        for (folder in phone) {
+            try {
+                onProgress("Copying to ${folder.name}…")
+                phoneStore.copyPackage(folder, packageFile, packageFile.name)
+                outcomes.add(
+                    BackupHistory.DestinationOutcome(
+                        folder.name, succeeded = true,
+                        kind = "phone", path = folder.treeUri,
+                    ),
+                )
+            } catch (e: Exception) {
+                AppLogger.error(TAG, "[Backup] phone copy to ${folder.name} failed: ${e.message}")
+                outcomes.add(
+                    BackupHistory.DestinationOutcome(
+                        folder.name, succeeded = false, detail = e.message ?: "failed",
+                        kind = "phone", path = folder.treeUri,
+                    ),
+                )
+            }
+        }
         return outcomes
+    }
+
+    data class PhoneRestoreItem(val uri: Uri, val name: String, val size: Long)
+
+    private val _phoneRestoreFolder = MutableStateFlow<String?>(null)
+    val phoneRestoreFolder: StateFlow<String?> = _phoneRestoreFolder.asStateFlow()
+    private val _phoneRestoreItems = MutableStateFlow<List<PhoneRestoreItem>>(emptyList())
+    val phoneRestoreItems: StateFlow<List<PhoneRestoreItem>> = _phoneRestoreItems.asStateFlow()
+
+    fun browsePhoneFolderForRestore(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val folder = phoneStore.folders.find { it.id == id } ?: return@launch
+            _phoneRestoreFolder.value = folder.name
+            _phoneRestoreItems.value = phoneStore.listPackages(folder).map {
+                PhoneRestoreItem(it.uri, it.name ?: "backup.minisbak", it.length())
+            }
+        }
+    }
+
+    fun clearPhoneRestoreBrowse() {
+        _phoneRestoreFolder.value = null
+        _phoneRestoreItems.value = emptyList()
     }
 
     // -- Restore state ----------------------------------------------------

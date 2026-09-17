@@ -36,11 +36,13 @@ import androidx.compose.animation.core.tween
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Compress
+import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.VerticalAlignTop
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.FolderZip
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material.icons.automirrored.filled.Article
@@ -2945,6 +2947,16 @@ fun ChatScreen(
                                     Icon(Icons.Default.Description, contentDescription = null)
                                 },
                             )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.chat_menu_share_card)) },
+                                onClick = {
+                                    showChatMenu = false
+                                    viewModel.shareConversationCard()
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Share, contentDescription = null)
+                                },
+                            )
                             MinisMenuDivider()
                             // Session Skills (iOS parity)
                             if (skillRepository != null) {
@@ -3082,6 +3094,20 @@ fun ChatScreen(
                                     SettingsSwitch(
                                         checked = autoCompactOn,
                                         onCheckedChange = { viewModel.setAutoCompactEnabled(it) },
+                                    )
+                                },
+                            )
+                            val planDiscussionOn by viewModel.planDiscussionEnabled.collectAsState()
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.chat_menu_plan_discussion)) },
+                                onClick = { viewModel.setPlanDiscussionEnabled(!planDiscussionOn) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Forum, contentDescription = null)
+                                },
+                                trailingIcon = {
+                                    SettingsSwitch(
+                                        checked = planDiscussionOn,
+                                        onCheckedChange = { viewModel.setPlanDiscussionEnabled(it) },
                                     )
                                 },
                             )
@@ -4687,6 +4713,15 @@ fun ChatScreen(
                     .padding(horizontal = 12.dp)
                     .padding(top = 2.dp, bottom = 8.dp),
             ) {
+                val pendingUserQuestions by viewModel.pendingUserQuestions.collectAsState()
+                pendingUserQuestions?.let { qs ->
+                    AskUserQuestionsCard(
+                        questions = qs,
+                        onSubmit = { viewModel.submitUserQuestionAnswers(it) },
+                        onSkip = { viewModel.skipUserQuestions() },
+                    )
+                }
+
                 // T13 banner moved INSIDE the LazyColumn so it renders at the
                 // visual end of the message list (mirrors iOS — see the
                 // banner item before items() in the LazyColumn block above).

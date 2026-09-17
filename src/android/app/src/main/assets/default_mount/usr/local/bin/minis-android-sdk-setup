@@ -3,23 +3,339 @@
 #
 # Native tools (aapt2, zipalign, adb, aidl) and Java sdkmanager are vendored
 # in the APK and unpacked to ANDROID_HOME on first boot. sdkmanager is used
-# only to fetch architecture-independent platforms (android.jar). Do NOT
-# install Google's linux build-tools — those are x86_64 and would overwrite
-# aapt2.
+# only to fetch architecture-independent platforms (android.jar).
+#
+# Do NOT install Google's linux build-tools / cmake / ndk via sdkmanager —
+# those host tools are x86_64 and would overwrite aarch64 binaries or sit
+# unusable under PRoot.
 set -e
 export DEBIAN_FRONTEND=noninteractive
+export TMPDIR=/tmp
+export TMP=/tmp
+export TEMP=/tmp
+mkdir -p /tmp /var/tmp
+chmod 1777 /tmp /var/tmp 2>/dev/null || true
 
 SDK_ROOT=/opt/android-sdk
 BUILD_TOOLS_REV=35.0.2
+CMAKE_VER="${MINIS_CMAKE_VER:-3.31.6}"
+CMAKE_FALLBACK=3.22.1
 AAPT2="$SDK_ROOT/build-tools/$BUILD_TOOLS_REV/aapt2"
 SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+NDK_TAG="${MINIS_NDK_TAG:-r29}"
 
 echo "minis-android-sdk-setup: ANDROID_HOME=$SDK_ROOT"
 
-if ! command -v java >/dev/null 2>&1 || ! command -v gradle >/dev/null 2>&1; then
-  echo "JDK/Gradle missing — running minis-dev-setup first..."
+need_dev=0
+command -v java >/dev/null 2>&1 || need_dev=1
+command -v gradle >/dev/null 2>&1 || need_dev=1
+command -v curl >/dev/null 2>&1 || need_dev=1
+command -v unzip >/dev/null 2>&1 || need_dev=1
+command -v tar >/dev/null 2>&1 || need_dev=1
+[ -f /etc/ssl/certs/ca-certificates.crt ] || need_dev=1
+if [ "$need_dev" -eq 1 ]; then
+  echo "JDK/Gradle/curl/certs missing — running minis-dev-setup first..."
   /usr/local/bin/minis-dev-setup
 fi
+
+HOST_ARCH=$(uname -m)
+case "$HOST_ARCH" in
+  aarch64|arm64) GUEST_AARCH64=1 ;;
+  *) GUEST_AARCH64=0 ;;
+esac
+
+curl_first() {
+  dest=$1
+  shift
+  for url in "$@"; do
+    [ -n "$url" ] || continue
+    echo "  trying $url"
+    if curl -fL --retry 2 --retry-delay 1 --connect-timeout 20 -o "$dest" "$url"; then
+      return 0
+    fi
+    rm -f "$dest"
+  done
+  return 1
+}
+
+github_urls() {
+  # $1 = https://github.com/org/repo/releases/download/tag/file
+  orig=$1
+  echo "https://ghfast.top/$orig"
+  echo "https://ghproxy.net/$orig"
+  echo "https://mirror.ghproxy.com/$orig"
+  echo "$orig"
+}
+
+accept_licenses() {
+  mkdir -p "$SDK_ROOT/licenses" /root/.android
+  touch /root/.android/repositories.cfg
+  printf '%s\n' "24333f8a63b6825ea9c5514f83c2829b004d1fee" \
+    > "$SDK_ROOT/licenses/android-sdk-license"
+  printf '%s\n' \
+    "84831b940964616600abf39817c4ba24" \
+    > "$SDK_ROOT/licenses/android-sdk-preview-license"
+}
+
+install_platform() {
+  api=$1
+  jar="$SDK_ROOT/platforms/android-$api/android.jar"
+  if [ -f "$jar" ]; then
+    echo "platforms;android-$api already present"
+    return 0
+  fi
+  if [ -f "$SDKMANAGER" ]; then
+    echo "Fetching platforms;android-$api via bundled sdkmanager (android.jar only)..."
+    set +e
+    "$SDKMANAGER" --sdk_root="$SDK_ROOT" "platforms;android-$api"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ] && [ -f "$jar" ]; then
+      return 0
+    fi
+    echo "sdkmanager platforms;android-$api failed (rc=$rc) — trying repository zips" >&2
+  fi
+
+  stage="/tmp/minis-plat-$api-$$"
+  tmpzip="/tmp/minis-plat-$api-$$.zip"
+  mkdir -p "$stage"
+  ok=0
+  for zip in \
+      "platform-${api}_r02.zip" \
+      "platform-${api}_r01.zip" \
+      "platform-${api}-ext19_r01.zip" \
+      "platform-${api}-ext18_r03.zip" \
+      "platform-${api}-ext15_r01.zip" \
+      "platform-${api}-ext14_r03.zip"
+  do
+    set +e
+    curl_first "$tmpzip" \
+      ${SDK_MIRROR:+"$SDK_MIRROR/$zip"} \
+      "https://mirrors.cloud.tencent.com/android/repository/$zip" \
+      "https://mirrors.tuna.tsinghua.edu.cn/android/repository/$zip" \
+      "https://mirrors.ustc.edu.cn/android/repository/$zip" \
+      "https://dl.google.com/android/repository/$zip"
+    cr=$?
+    set -e
+    [ "$cr" -eq 0 ] || continue
+    unzip -qo "$tmpzip" -d "$stage" || { rm -f "$tmpzip"; continue; }
+    if [ -f "$stage/android.jar" ]; then
+      mkdir -p "$SDK_ROOT/platforms/android-$api"
+      cp -a "$stage"/. "$SDK_ROOT/platforms/android-$api"/
+      ok=1
+    elif [ -f "$stage/android-$api/android.jar" ]; then
+      mkdir -p "$SDK_ROOT/platforms"
+      rm -rf "$SDK_ROOT/platforms/android-$api"
+      mv "$stage/android-$api" "$SDK_ROOT/platforms/android-$api"
+      ok=1
+    else
+      for d in "$stage"/*; do
+        if [ -f "$d/android.jar" ]; then
+          mkdir -p "$SDK_ROOT/platforms"
+          rm -rf "$SDK_ROOT/platforms/android-$api"
+          mv "$d" "$SDK_ROOT/platforms/android-$api"
+          ok=1
+          break
+        fi
+      done
+    fi
+    rm -f "$tmpzip"
+    [ "$ok" -eq 1 ] && break
+  done
+  rm -rf "$stage"
+  if [ "$ok" -eq 1 ]; then
+    echo "platforms;android-$api installed from zip"
+    return 0
+  fi
+  echo "platforms;android-$api MISSING (android.jar not installed)" >&2
+  return 1
+}
+
+cmake_post() {
+  dest=$1
+  if [ ! -x "$dest/bin/ninja" ]; then
+    if command -v ninja >/dev/null 2>&1; then
+      ln -sf "$(command -v ninja)" "$dest/bin/ninja"
+    else
+      echo "ninja missing — AGP cmake builds need ninja-build (minis-dev-setup)" >&2
+    fi
+  fi
+  if [ ! -f "$dest/source.properties" ]; then
+    printf 'Pkg.UserSrc=false\nPkg.Revision=%s\n' "$CMAKE_VER" > "$dest/source.properties"
+  fi
+  chmod +x "$dest/bin/"* 2>/dev/null || true
+}
+
+install_one_cmake() {
+  ver=$1
+  dest="$SDK_ROOT/cmake/$ver"
+  if [ -x "$dest/bin/cmake" ]; then
+    echo "CMake $ver already present: $dest"
+    CMAKE_VER=$ver
+    cmake_post "$dest"
+    return 0
+  fi
+  if [ "$GUEST_AARCH64" != 1 ]; then
+    echo "Non-aarch64 host: installing cmake;$ver via sdkmanager"
+    if [ -f "$SDKMANAGER" ]; then
+      "$SDKMANAGER" --sdk_root="$SDK_ROOT" "cmake;$ver" || true
+    fi
+    return 0
+  fi
+  major=${ver%%.*}
+  echo "Installing CMake $ver linux-aarch64 (NOT Google x86_64 cmake package)..."
+  tgz="/tmp/cmake-${ver}-linux-aarch64.tar.gz"
+  tarball="cmake-${ver}-linux-aarch64.tar.gz"
+  set +e
+  curl_first "$tgz" \
+    "https://cmake.org/files/v${major}.0/$tarball" \
+    "https://cmake.org/files/v${ver%.*}/$tarball" \
+    $(github_urls "https://github.com/Kitware/CMake/releases/download/v${ver}/$tarball")
+  cr=$?
+  set -e
+  if [ "$cr" -ne 0 ]; then
+    echo "CMake $ver download failed" >&2
+    return 1
+  fi
+  stage="/tmp/minis-cmake-$$"
+  mkdir -p "$stage"
+  tar -xzf "$tgz" -C "$stage"
+  inner="$stage/cmake-${ver}-linux-aarch64"
+  if [ ! -x "$inner/bin/cmake" ]; then
+    echo "unexpected cmake tarball layout" >&2
+    rm -rf "$stage" "$tgz"
+    return 1
+  fi
+  mkdir -p "$SDK_ROOT/cmake"
+  rm -rf "$dest"
+  mv "$inner" "$dest"
+  rm -rf "$stage" "$tgz"
+  CMAKE_VER=$ver
+  cmake_post "$dest"
+  echo "CMake $ver -> $dest"
+}
+
+install_cmake() {
+  if [ "${MINIS_SKIP_CMAKE:-0}" = "1" ]; then
+    echo "MINIS_SKIP_CMAKE=1 — skipping CMake"
+    return 0
+  fi
+  if install_one_cmake "$CMAKE_VER"; then
+    return 0
+  fi
+  if [ "$CMAKE_VER" != "$CMAKE_FALLBACK" ]; then
+    echo "Falling back to CMake $CMAKE_FALLBACK (AGP-compatible)"
+    install_one_cmake "$CMAKE_FALLBACK"
+  fi
+}
+
+ndk_clang_ok() {
+  dir=$1
+  [ -x "$dir/toolchains/llvm/prebuilt/linux-aarch64/bin/clang" ]
+}
+
+find_aarch64_ndk() {
+  if [ -n "${ANDROID_NDK_HOME:-}" ] && ndk_clang_ok "$ANDROID_NDK_HOME"; then
+    echo "$ANDROID_NDK_HOME"
+    return 0
+  fi
+  if [ -d /var/minis/mounts/android-sdk/ndk ]; then
+    for d in /var/minis/mounts/android-sdk/ndk/*; do
+      if ndk_clang_ok "$d"; then echo "$d"; return 0; fi
+    done
+  fi
+  if [ -d "$SDK_ROOT/ndk" ]; then
+    for d in "$SDK_ROOT"/ndk/*; do
+      if ndk_clang_ok "$d"; then echo "$d"; return 0; fi
+    done
+  fi
+  return 1
+}
+
+warn_x86_ndk() {
+  if [ -d "$SDK_ROOT/ndk" ]; then
+    for d in "$SDK_ROOT"/ndk/*; do
+      if [ -x "$d/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ] && ! ndk_clang_ok "$d"; then
+        echo "WARNING: $d is linux-x86_64 NDK — unusable in this aarch64 PRoot guest. Do not sdkmanager \"ndk;…\"." >&2
+      fi
+    done
+  fi
+}
+
+install_ndk() {
+  if [ "${MINIS_SKIP_NDK:-0}" = "1" ]; then
+    echo "MINIS_SKIP_NDK=1 — skipping NDK r28+"
+    return 0
+  fi
+  existing=$(find_aarch64_ndk || true)
+  if [ -n "$existing" ]; then
+    echo "NDK aarch64 already present: $existing"
+    export ANDROID_NDK_HOME=$existing
+    export ANDROID_NDK_ROOT=$existing
+    return 0
+  fi
+  warn_x86_ndk
+  if [ "$GUEST_AARCH64" != 1 ]; then
+    echo "Non-aarch64 host: installing ndk;28.2.13676358 via sdkmanager"
+    if [ -f "$SDKMANAGER" ]; then
+      "$SDKMANAGER" --sdk_root="$SDK_ROOT" "ndk;28.2.13676358" || \
+        "$SDKMANAGER" --sdk_root="$SDK_ROOT" "ndk;28.0.12433566" || true
+    fi
+    return 0
+  fi
+
+  echo "Installing NDK ${NDK_TAG} linux-aarch64 (~1GB). Set MINIS_SKIP_NDK=1 to skip."
+  echo "Source: lzhiyong/termux-ndk (Google NDK host tools are x86_64)."
+  zip="/tmp/minis-ndk-$$.zip"
+  set +e
+  if [ -n "${MINIS_NDK_URL:-}" ]; then
+    curl_first "$zip" "$MINIS_NDK_URL"
+    cr=$?
+  else
+    curl_first "$zip" \
+      $(github_urls "https://github.com/lzhiyong/termux-ndk/releases/download/${NDK_TAG}/android-ndk-${NDK_TAG}-aarch64.zip") \
+      $(github_urls "https://github.com/lzhiyong/termux-ndk/releases/download/${NDK_TAG}/android-ndk-${NDK_TAG}-linux-aarch64.zip") \
+      $(github_urls "https://github.com/lzhiyong/termux-ndk/releases/download/r28c/android-ndk-r28c-aarch64.zip") \
+      $(github_urls "https://github.com/lzhiyong/termux-ndk/releases/download/r28b/android-ndk-r28b-aarch64.zip") \
+      $(github_urls "https://github.com/lzhiyong/termux-ndk/releases/download/r28/android-ndk-r28-aarch64.zip")
+    cr=$?
+  fi
+  set -e
+  if [ "$cr" -ne 0 ]; then
+    echo "NDK aarch64 download failed. Bind-mount an aarch64 NDK or set MINIS_NDK_URL." >&2
+    echo "Do NOT: sdkmanager \"ndk;28.…\" — that package is linux-x86_64." >&2
+    return 1
+  fi
+  stage="/tmp/minis-ndk-$$"
+  mkdir -p "$stage"
+  unzip -qo "$zip" -d "$stage"
+  inner=""
+  if ndk_clang_ok "$stage"; then
+    inner=$stage
+  else
+    for d in "$stage"/*; do
+      if ndk_clang_ok "$d"; then inner=$d; break; fi
+    done
+  fi
+  if [ -z "$inner" ]; then
+    echo "NDK zip extracted but linux-aarch64 clang not found" >&2
+    rm -rf "$stage" "$zip"
+    return 1
+  fi
+  rev=""
+  if [ -f "$inner/source.properties" ]; then
+    rev=$(awk -F= '/Pkg.Revision/ { gsub(/[ \t]/, "", $2); print $2; exit }' "$inner/source.properties")
+  fi
+  [ -n "$rev" ] || rev=28.2.13676358
+  mkdir -p "$SDK_ROOT/ndk"
+  dest="$SDK_ROOT/ndk/$rev"
+  rm -rf "$dest"
+  mv "$inner" "$dest"
+  rm -rf "$stage" "$zip"
+  export ANDROID_NDK_HOME=$dest
+  export ANDROID_NDK_ROOT=$dest
+  echo "NDK $rev -> $dest"
+}
 
 mkdir -p "$SDK_ROOT"
 
@@ -48,31 +364,40 @@ fi
 export ANDROID_HOME="$SDK_ROOT"
 export ANDROID_SDK_ROOT="$SDK_ROOT"
 SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-if [ -f "$SDKMANAGER" ]; then
-  chmod +x "$SDKMANAGER" 2>/dev/null || true
-  if [ -f "$SDK_ROOT/platforms/android-35/android.jar" ]; then
-    echo "platforms;android-35 already present"
-  else
-    echo "Fetching platforms;android-35 via bundled sdkmanager (not Google x86_64 build-tools)..."
-    set +e
-    yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" "platforms;android-35"
-    rc=$?
-    set -e
-    if [ "$rc" -ne 0 ]; then
-      echo "sdkmanager platforms install failed (rc=$rc). android.jar may be missing." >&2
-    fi
-  fi
-fi
+accept_licenses
+
+plat_ok=1
+install_platform 36 || plat_ok=0
+install_platform 35 || true
+
+cmake_ok=1
+install_cmake || cmake_ok=0
+
+ndk_ok=1
+install_ndk || ndk_ok=0
 
 mkdir -p /root/.gradle
 if ! grep -q 'android.aapt2FromMavenOverride' /root/.gradle/gradle.properties 2>/dev/null; then
   echo "android.aapt2FromMavenOverride=$SDK_ROOT/build-tools/$BUILD_TOOLS_REV/aapt2" >> /root/.gradle/gradle.properties
 fi
 
+NDK_HOME_NOW=$(find_aarch64_ndk || true)
+NDK_PATH_LINE=""
+NDK_EXPORT=""
+if [ -n "$NDK_HOME_NOW" ]; then
+  NDK_PATH_LINE="export ANDROID_NDK_HOME=$NDK_HOME_NOW"
+  NDK_EXPORT="export ANDROID_NDK_ROOT=$NDK_HOME_NOW"
+fi
+
 cat > /etc/profile.d/minis-android-sdk.sh <<EOF
+export TMPDIR=/tmp
+export TMP=/tmp
+export TEMP=/tmp
 export ANDROID_HOME=$SDK_ROOT
 export ANDROID_SDK_ROOT=$SDK_ROOT
-export PATH="\$PATH:\$ANDROID_HOME/cmdline-tools/latest/bin:\$ANDROID_HOME/platform-tools:\$ANDROID_HOME/build-tools/$BUILD_TOOLS_REV"
+$NDK_PATH_LINE
+$NDK_EXPORT
+export PATH="\$PATH:\$ANDROID_HOME/cmdline-tools/latest/bin:\$ANDROID_HOME/platform-tools:\$ANDROID_HOME/build-tools/$BUILD_TOOLS_REV:\$ANDROID_HOME/cmake/3.31.6/bin:\$ANDROID_HOME/cmake/3.22.1/bin:\$ANDROID_HOME/cmake/$CMAKE_VER/bin"
 EOF
 
 echo
@@ -87,5 +412,25 @@ if [ -f "$SDKMANAGER" ]; then
 else
   echo "sdkmanager MISSING at $SDKMANAGER"
 fi
+if [ -f "$SDK_ROOT/platforms/android-36/android.jar" ]; then
+  echo "compileSdk 36: $SDK_ROOT/platforms/android-36/android.jar"
+else
+  echo "compileSdk 36: MISSING"
+fi
+if [ -x "$SDK_ROOT/cmake/$CMAKE_VER/bin/cmake" ]; then
+  echo "CMake $CMAKE_VER: $SDK_ROOT/cmake/$CMAKE_VER/bin/cmake"
+else
+  echo "CMake $CMAKE_VER: MISSING"
+fi
+if [ -n "$NDK_HOME_NOW" ]; then
+  echo "NDK r28+ aarch64: $NDK_HOME_NOW"
+else
+  echo "NDK r28+ aarch64: MISSING"
+fi
 echo "Re-open the shell (or: . /etc/profile.d/minis-android-sdk.sh) to pick up PATH."
 echo "To compile an APK: cd <project> && gradle assembleDebug"
+echo "Never: sdkmanager \"build-tools;…\" / \"cmake;…\" / \"ndk;…\" on this aarch64 guest."
+
+if [ "$plat_ok" -ne 1 ] || [ "$cmake_ok" -ne 1 ]; then
+  exit 1
+fi

@@ -107,6 +107,7 @@
     <string name="bg_overlay_nudge_body">Grant "Display over other apps" to let Minis show the current tool while you switch to another app. Tap to open the permission screen.</string>
     <!-- T-android-overlay-reply-status-34599 — manual-dismiss button on the floating overlay -->
     <string name="overlay_dismiss">Dismiss</string>
+    <string name="overlay_stop">Stop agent</string>
     <!-- T-android-overlay-finalize item 3 — completion fallback labels -->
     <string name="overlay_completion_completed">Completed</string>
     <string name="overlay_completion_failed">Failed</string>
@@ -1146,6 +1147,11 @@
     <string name="modeldetail_identity_footer_custom">This is a custom model. The Model ID is editable.</string>
     <string name="modeldetail_identity_footer_builtin">Built-in model. Display Name overrides the provider default.</string>
     <string name="modeldetail_section_capabilities">Capabilities</string>
+    <string name="modeldetail_section_context_retry">Context &amp; retries</string>
+    <string name="modeldetail_context_retry_footer">Auto-compact runs before a send when usage crosses the threshold. Same-provider retries apply to 429 and 5xx before falling back.</string>
+    <string name="modeldetail_auto_compact">Auto compact</string>
+    <string name="modeldetail_compact_threshold">Compact at % of context window (50–95)</string>
+    <string name="modeldetail_max_retries">Max retries on 429 / 5xx (0–8)</string>
     <string name="modeldetail_context_window">Context Window</string>
     <string name="modeldetail_thinking">Thinking</string>
     <string name="modeldetail_capabilities_footer">Context window and max output tokens (in tokens). Leave empty to use provider defaults. Enable Thinking for models that support extended reasoning.</string>
@@ -1336,9 +1342,14 @@
     <string name="chat_menu_open_terminal">Open Terminal</string>
     <string name="chat_menu_open_browser">Open Browser</string>
     <string name="chat_menu_browse_chat_files">Browse Chat Files</string>
+    <string name="chat_menu_share_card">Share conversation card</string>
     <string name="chat_menu_enhanced_cache">Enhanced Cache</string>
     <string name="chat_menu_fast_mode">Enable Fast Mode</string>
     <string name="chat_menu_auto_compact">Auto Compact</string>
+    <string name="chat_menu_plan_discussion">Plan discussion</string>
+    <string name="settings_task_notifications_permission">Notification permission is required on Android 13+. If the toggle is on but you see no alerts, grant notifications for Minis Ultra.</string>
+    <string name="settings_task_notifications_granted">Notification permission granted.</string>
+    <string name="settings_task_notifications_denied">Notification permission denied — task alerts will not appear until you grant it.</string>
     <string name="context_near_capacity_title">Context Near Capacity</string>
     <string name="context_near_capacity_message">Conversation context is nearly full. Compact the history to free up space before sending. Enabling auto-compact will do this automatically from now on.</string>
     <string name="context_compact_and_send">Compact &amp; Send</string>
@@ -1534,6 +1545,15 @@
     <string name="backup_dest_footer">New backups are delivered to every enabled destination. Passwords are stored in the Android Keystore on this device only — never in the backup file.</string>
     <string name="backup_dest_none">No destinations yet.</string>
     <string name="backup_dest_add_server">Add Server…</string>
+    <string name="backup_dest_add_folder">Add Phone Folder…</string>
+    <string name="backup_dest_phone">Phone storage</string>
+    <string name="backup_dest_phone_footer">Folders you pick stay on this phone, outside the app sandbox, so a reinstall or clear-data does not wipe the backup.</string>
+    <string name="backup_dest_phone_none">No phone folders yet.</string>
+    <string name="backup_dest_phone_subtitle">This phone</string>
+    <string name="ask_user_title">A question for you</string>
+    <string name="ask_user_other">Other (optional)</string>
+    <string name="ask_user_submit">Submit answers</string>
+    <string name="ask_user_skip">Skip</string>
     <string name="backup_dest_remove">Remove %1$s</string>
     <string name="backup_dest_server_type">Server type</string>
     <string name="backup_dest_display_name">Display name</string>

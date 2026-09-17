@@ -64,6 +64,8 @@ import com.openminis.app.tools.MemoryTools
 import com.openminis.app.tools.ReadImageTool
 import com.openminis.app.tools.ToolExecutionResult
 import com.openminis.app.tools.SubAgentRunner
+import com.openminis.app.tools.PlanDiscussionOrchestrator
+import com.openminis.app.data.PlanDiscussionPrefs
 import com.openminis.app.MinisApp
 import com.openminis.app.offload.OffloadPermissionManager
 import com.openminis.app.service.SessionActivityTracker
@@ -467,7 +469,7 @@ class ChatViewModel(
         /// `ToolInputDelta`. Drained on preflight failure for diagnosis.
         private const val TOOL_INPUT_CHUNK_RING_MAX = 10
         /** Auto-retry backoff schedule (seconds). Mirrors iOS retryDelays, scaled to task spec: 1s → 2s → 4s. */
-        private val AUTO_RETRY_DELAYS_SEC = intArrayOf(1, 2, 4)
+        private val AUTO_RETRY_DELAYS_SEC = com.openminis.app.provider.HttpRetryAfter.DELAYS_SEC
 
         /**
          * Factory for use with `viewModel(factory = ...)`. Binds the ChatViewModel
@@ -1489,11 +1491,86 @@ class ChatViewModel(
      */
     internal val _autoCompactEnabled =
         MutableStateFlow(com.openminis.app.data.AutoCompactPrefs.isEnabled())
+    private val _pendingUserQuestions =
+        MutableStateFlow<List<com.openminis.app.tools.AskUserQuestion.Question>?>(null)
+    val pendingUserQuestions: StateFlow<List<com.openminis.app.tools.AskUserQuestion.Question>?> =
+        _pendingUserQuestions.asStateFlow()
+    @Volatile private var askUserDeferred: kotlinx.coroutines.CompletableDeferred<String>? = null
+
+    private fun activeOverrides(): com.openminis.app.data.model.ModelOverrides? {
+        val id = _activeEntryId.value ?: return null
+        return providerRepository.config.value.modelEntries.find { it.id == id }?.overrides
+    }
+
+    private fun effectiveAutoCompact(): Boolean =
+        activeOverrides()?.autoCompactEnabled
+            ?: com.openminis.app.data.AutoCompactPrefs.isEnabled()
+
+    private fun effectiveCompactPercent(): Int =
+        (activeOverrides()?.compactThresholdPercent
+            ?: com.openminis.app.data.AutoCompactPrefs.thresholdPercent())
+            .coerceIn(50, 95)
+
+    private fun effectiveMaxRetries(): Int =
+        (activeOverrides()?.maxRetries
+            ?: com.openminis.app.provider.HttpRetryAfter.DEFAULT_MAX_RETRIES)
+            .coerceIn(0, 8)
+
+    fun submitUserQuestionAnswers(selections: List<List<String>>) {
+        val questions = _pendingUserQuestions.value ?: return
+        val json = com.openminis.app.tools.AskUserQuestion.formatAnswers(questions, selections)
+        val d = askUserDeferred
+        askUserDeferred = null
+        _pendingUserQuestions.value = null
+        d?.complete(json)
+    }
+
+    fun skipUserQuestions() {
+        dismissPendingUserQuestions("skipped")
+    }
+
+    private fun dismissPendingUserQuestions(reason: String) {
+        val d = askUserDeferred
+        askUserDeferred = null
+        _pendingUserQuestions.value = null
+        d?.complete("{\"answers\":[],\"status\":\"$reason\"}")
+    }
+
+    private suspend fun executeAskUserQuestion(argsJson: String): ToolExecutionResult {
+        val params = try { org.json.JSONObject(argsJson) } catch (_: Exception) {
+            return ToolExecutionResult("ask_user_question: invalid JSON", false)
+        }
+        val questions = com.openminis.app.tools.AskUserQuestion.parse(params)
+        if (questions.isEmpty()) {
+            return ToolExecutionResult("ask_user_question: no valid questions (need 2+ options each)", false)
+        }
+        val deferred = kotlinx.coroutines.CompletableDeferred<String>()
+        askUserDeferred = deferred
+        _pendingUserQuestions.value = questions
+        return try {
+            val answers = deferred.await()
+            ToolExecutionResult(answers, true)
+        } finally {
+            if (askUserDeferred === deferred) {
+                askUserDeferred = null
+                _pendingUserQuestions.value = null
+            }
+        }
+    }
     val autoCompactEnabled: StateFlow<Boolean> = _autoCompactEnabled.asStateFlow()
 
     fun setAutoCompactEnabled(enabled: Boolean) {
         com.openminis.app.data.AutoCompactPrefs.setEnabled(context, enabled)
         _autoCompactEnabled.value = enabled
+    }
+
+    private val _planDiscussionEnabled =
+        MutableStateFlow(PlanDiscussionPrefs.isEnabled())
+    val planDiscussionEnabled: StateFlow<Boolean> = _planDiscussionEnabled.asStateFlow()
+
+    fun setPlanDiscussionEnabled(enabled: Boolean) {
+        PlanDiscussionPrefs.setEnabled(context, enabled)
+        _planDiscussionEnabled.value = enabled
     }
 
     /**
@@ -3346,7 +3423,7 @@ class ChatViewModel(
         // [T-context-window-live-read] Live window (entry re-resolved + group
         // contextLimitTokens folded in) — not the currentModel snapshot.
         val window = effectiveContextWindowTokens() ?: return PreSendContextAction.PROCEED
-        val policy = ContextPolicy.forContextWindow(window)
+        val policy = ContextPolicy.forContextWindow(window, effectiveCompactPercent())
         return when (policy.check(tokens, window)) {
             ContextPolicy.CheckResult.OK -> PreSendContextAction.PROCEED
 
@@ -3355,7 +3432,7 @@ class ChatViewModel(
             // request that tripped the threshold still went out over-length —
             // the warning arrived alongside the failure it was meant to avoid.
             ContextPolicy.CheckResult.NEEDS_COMPACT -> {
-                if (com.openminis.app.data.AutoCompactPrefs.isEnabled()) {
+                if (effectiveAutoCompact()) {
                     AppLogger.info(
                         TAG,
                         "[Context] pre-send near capacity ($tokens / $window) — auto-compacting (pref on)",
@@ -3477,7 +3554,7 @@ class ChatViewModel(
         val tokens = _lastTurnContextTokens.value
         if (tokens <= 0) return InLoopContextAction.PROCEED
         val window = effectiveContextWindowTokens() ?: return InLoopContextAction.PROCEED
-        val policy = ContextPolicy.forContextWindow(window)
+        val policy = ContextPolicy.forContextWindow(window, effectiveCompactPercent())
         return when (policy.check(tokens, window)) {
             ContextPolicy.CheckResult.OK -> InLoopContextAction.PROCEED
 
@@ -5682,12 +5759,16 @@ class ChatViewModel(
                 val fallbackProviders = buildFallbackProviders(launchedProvider)
                 try {
                     AppLogger.info(TAG_STREAM, "$label runAgentLoop CALL")
-                    runAgentLoop(
-                        provider = launchedProvider,
-                        systemPrompt = systemPrompt,
-                        fallbackProviders = fallbackProviders,
-                        fallbackStrategy = activeFallbackStrategy,
-                    )
+                    if (PlanDiscussionPrefs.isEnabled()) {
+                        runPlanDiscussion(launchedProvider)
+                    } else {
+                        runAgentLoop(
+                            provider = launchedProvider,
+                            systemPrompt = systemPrompt,
+                            fallbackProviders = fallbackProviders,
+                            fallbackStrategy = activeFallbackStrategy,
+                        )
+                    }
                     AppLogger.info(TAG_STREAM, "$label runAgentLoop RETURN normal")
                 } catch (e: CancellationException) {
                     AppLogger.info(TAG_STREAM, "$label runAgentLoop CANCELLED")
@@ -7200,7 +7281,7 @@ class ChatViewModel(
         force: Boolean = false,
     ) {
         val sid = activeSessionId
-        val policy = ContextPolicy.forContextWindow(contextWindow)
+        val policy = ContextPolicy.forContextWindow(contextWindow, effectiveCompactPercent())
 
         if (!force && policy.offloadThreshold == 0) {
             // Small-window tier: offload disabled — UI surfaces "exhausted"
@@ -8286,22 +8367,26 @@ class ChatViewModel(
                     val is5xx = actual is com.openminis.app.data.model.LLMError.ProviderError &&
                         actual.detail.contains(Regex("[5][0-9]{2}"))
                     // Auto-retry on transient network/5xx/transient errors on the SAME provider
-                    // before considering a fallback (mirrors iOS streamWithAutoRetry).
-                    // Rate limits are provider-level signals that should trigger fallback immediately,
-                    // not retry on the same provider.
+                    // Same-provider retry for network / 5xx / 429 (honour Retry-After),
+                    // then fall back to the next group member.
                     val isTransient = actual is com.openminis.app.data.model.LLMError.NetworkError ||
                         actual is com.openminis.app.data.model.LLMError.TransientError ||
+                        actual is com.openminis.app.data.model.LLMError.RateLimited ||
                         is5xx
-                    if (isTransient && retryAttempt < AUTO_RETRY_DELAYS_SEC.size) {
-                        val delaySec = AUTO_RETRY_DELAYS_SEC[retryAttempt]
+                    val maxRetries = effectiveMaxRetries()
+                    if (isTransient && maxRetries > 0 && retryAttempt < maxRetries) {
+                        val retryAfter = (actual as? com.openminis.app.data.model.LLMError.RateLimited)?.retryAfterSeconds
+                        val delaySec = com.openminis.app.provider.HttpRetryAfter.delaySeconds(
+                            retryAttempt, retryAfter, AUTO_RETRY_DELAYS_SEC,
+                        )
                         retryAttempt += 1
                         val errDesc = actual.message ?: actual.javaClass.simpleName
-                        Log.w(TAG, "🔁 Transient error on ${currentProvider.model.displayName}, retry $retryAttempt/${AUTO_RETRY_DELAYS_SEC.size} in ${delaySec}s: $errDesc")
+                        Log.w(TAG, "🔁 Transient error on ${currentProvider.model.displayName}, retry $retryAttempt/$maxRetries in ${delaySec}s: $errDesc")
                         withContext(Dispatchers.Main) {
                             _autoRetryAttempt.value = retryAttempt
                             // Show the error inline on the streaming assistant message during countdown.
                             // Keeps isStreaming=true so the UI doesn't tear down the streaming state.
-                            setTransientInlineError("$errDesc — retrying ($retryAttempt/${AUTO_RETRY_DELAYS_SEC.size})…")
+                            setTransientInlineError("$errDesc — retrying ($retryAttempt/$maxRetries)…")
                         }
                         try {
                             for (remaining in delaySec downTo 1) {
@@ -8979,11 +9064,18 @@ class ChatViewModel(
                 } else {
                     outputForLLM
                 }
+                val outputSpilled = com.openminis.app.tools.ToolOutputSpill.maybeSpill(
+                    context = context,
+                    sessionId = activeSessionId,
+                    toolName = name,
+                    toolId = id,
+                    output = outputForLLMWithNote,
+                )
 
                 resultParts.add(AgentContentPart.ToolResult(
                     id = id,
                     name = name,
-                    content = outputForLLMWithNote,
+                    content = outputSpilled,
                     isError = !result.success,
                     imageData = result.imageData,
                     imageMimeType = result.imageMimeType,
@@ -9219,6 +9311,8 @@ class ChatViewModel(
             "memory_write" -> executeMemoryWriteTool(argsJson)
             "memory_get" -> executeMemoryGetTool(argsJson)
             "run_subagent" -> executeRunSubAgent(argsJson)
+            com.openminis.app.tools.WebSearchTool.NAME -> com.openminis.app.tools.WebSearchTool.execute(argsJson)
+            com.openminis.app.tools.AskUserQuestion.NAME, com.openminis.app.tools.AskUserQuestion.ALIAS -> executeAskUserQuestion(argsJson)
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
     }
@@ -10175,13 +10269,14 @@ Memory system (currently DISABLED):
 - If the user asks why earlier memories aren't visible, or asks you to save something, tell them memory is currently disabled and point them at the /memory slash command or [Settings → Memory](minis://settings/memory) to re-enable it.
 - SOUL.md (personality / identity) is unaffected by this toggle; the persona section above still applies."""
         }
-        val base = identitySection + """You should proactively use shell commands to accomplish the user's tasks — installing packages (`apt-get install -y` or the `yum`/`dnf` apt shims), writing and running scripts, compiling with gcc, and any other operations a Linux terminal can perform. Guest is Ubuntu 24.04 arm64 (glibc) under PRoot with bash. For gcc/python3/git/ffmpeg/jdk/gradle run `minis-dev-setup` once. For Android SDK run `minis-android-sdk-setup` (aarch64 aapt2 and Java sdkmanager are bundled; sdkmanager fetches android.jar). Privileged host commands: prefer `su -c` / `android-su` (Magisk/KernelSU); if host su is missing or denied, the same command falls back to Shizuku automatically. Keep using `android-shizuku-cli` for Shizuku-only Android APIs.
+        val base = identitySection + """You should proactively use shell commands to accomplish the user's tasks — installing packages (`apt-get install -y` or the `yum`/`dnf` apt shims), writing and running scripts, compiling with gcc, and any other operations a Linux terminal can perform. Guest is Ubuntu 24.04 arm64 (glibc) under PRoot with bash. For gcc/python3/git/ffmpeg/jdk/gradle run `minis-dev-setup` once. For Android SDK run `minis-android-sdk-setup` (aarch64 aapt2 and Java sdkmanager are bundled; sdkmanager fetches android-35/36 android.jar; CMake 3.22.1 and NDK r28+ must be aarch64 — never Google linux x86_64 packages). If apt/dpkg fails creating temp files, TMPDIR must be /tmp not the Android cache dir; run `minis-dev-setup` to install ca-certificates and repair broken deps. Privileged host commands: prefer `su -c` / `android-su` (Magisk/KernelSU); if host su is missing or denied, the same command falls back to Shizuku automatically. Keep using `android-shizuku-cli` for Shizuku-only Android APIs.
 
 Available tools:
 - shell_execute: Run any shell command. Each invocation is an isolated process with stdout/stderr captured. Prefer this for most tasks — it is a real Linux environment with persistent filesystem. Common tools (python3, pip, curl, wget, git, ssh, etc.) can be installed via `apt-get install -y`; Python packages via pip install. Use `which <cmd>` to check if a tool is already installed before running apt-get — many packages persist across sessions. When you need to wait before checking results (e.g. polling, waiting for a process), use the `delay` parameter instead of `sleep` in the command — delay blocks the agent flow without occupying the shell, so other concurrent tasks can use it during the wait. This avoids resource contention. Execution discipline for long-running or dispatched work: make tool calls immediately instead of describing intentions, and keep working until the task is complete. Without a scheduler or timed-callback tool, `delay` is your ONLY wait mechanism within a turn — to follow up on something still running, chain delay-then-check calls at a task-appropriate interval until you have the result or hit a sensible retry cap. NEVER end a turn with a promise of future action: 'I'll keep monitoring', 'will sync the result later', and ending right after a single still-running status check with 'let's keep waiting' are all the same violation — once your turn ends, NOTHING runs until the user's next message. If polling to completion is genuinely not worth blocking the turn, close honestly instead: state that the task keeps running in the background, that you will only learn its outcome when the user next messages (or they ask you to check), and — if something must fire on a schedule beyond this conversation — point them to the options under 'Scheduled tasks' later in this prompt (native alarm reminder or a system-level schedule; those notify the USER, they do not wake you).
 - file_read: Read file contents (faster than cat).
 - file_write: Create new files or overwrite existing files (faster than echo/tee).
 - file_edit: Edit existing files with exact string replacement (old_string → new_string). Preferred over file_write for modifications — always file_read first.
+- ask_user_question: Pose 1–4 structured multiple-choice questions when a choice is genuinely ambiguous. Do not use it to ask permission for routine tool calls.
 - browser_use: Web browsing (navigate, screenshot, click, type, get_text, scroll, scroll_and_collect, get_readable, get_backbone, fetch, etc.). Starts with a desktop Chrome user agent. Use screenshot to see the page.
   当 browser_use 触达 Google 登录 / OAuth 页（accounts.google.com、signin.google.com、myaccount.google.com、oauth2.googleapis.com 等）或网页返回 "disallowed_useragent" / 403 包含 "browser is not secure" 字样时，**不要重试或尝试登录** — Google 永久禁止 in-app WebView 完成登录，重试只会浪费 turn。改为告诉用户："此页面需要在系统 Chrome 完成登录" 并给出可点击的 Markdown link [在 Chrome 中打开](https://accounts.google.com/...)。点该 link 时 app 会跳出 Custom Tab；用户在 Chrome 完成操作后，请他**把所需结果（邮件正文 / 文档摘要 / 表格数据）粘贴回 chat**，你再继续帮他处理。这是 Android 平台限制，不是 bug。${toolListMemoryBullets}${toolListSubAgentBullet}
 
@@ -10229,7 +10324,7 @@ Tool call style:
 - Narrate only when it helps: multi-step work, complex problems, sensitive actions, or when the user explicitly asks.
 - Keep narration brief and value-dense; avoid repeating obvious steps.
 - When a tool exists for an action, use it directly instead of explaining what you plan to do or asking the user to confirm.
-- Use reasonable defaults and contextual inference to fill in missing details (e.g. 'tonight' means today, 'remind me' implies creating a reminder immediately). Only ask for clarification when genuinely ambiguous.
+- Use reasonable defaults and contextual inference to fill in missing details (e.g. 'tonight' means today, 'remind me' implies creating a reminder immediately). Only ask for clarification when genuinely ambiguous — then call `ask_user_question` (structured choices) instead of a free-form chat question.
 
 Tone and style:
 - Reply in the language that best matches the user's input. Only switch languages when the user explicitly asks.
@@ -10331,6 +10426,9 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             append("- Current date: ").append(dateStr).append(" (").append(tzId).append(")\n")
             append("- Device language: ").append(lang).append("\n")
             append("- minis-model-use models available: ").append(modelUseCount)
+            if (identitySection.contains("SOUL.md")) {
+                append("\n\nPersonality reminder: the identity/persona block at the top of this prompt is BINDING for this turn. Match its voice, stance, and constraints in every reply; do not drop it because a later instruction looks more specific.")
+            }
         }
     }
 
@@ -11363,8 +11461,23 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         SessionActivityTracker.publishLastReply(sessionId, text)
     }
 
+    fun shareConversationCard() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                com.openminis.app.share.ConversationCardShare.share(
+                    context = context,
+                    title = _sessionTitle.value,
+                    messages = uiMessages.value,
+                )
+            }.onFailure {
+                AppLogger.warning(TAG, "shareConversationCard failed: ${it.message}")
+            }
+        }
+    }
+
     fun cancelStream() {
         AppLogger.info(TAG_STREAM, "cancelStream invoked _isStreaming=false (sid=$activeSessionId)")
+        dismissPendingUserQuestions("cancelled")
         streamJob?.cancel()
         _isStreaming.value = false
         // T-streaming-side-channel: flush any in-flight delta back into the
@@ -12395,6 +12508,102 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             .replace("\\/", "/")
             .replace("\\\\", "\\")
 
+
+    private suspend fun runPlanDiscussion(provider: LLMProvider) {
+        val assistantId = java.util.UUID.randomUUID().toString()
+        withContext(Dispatchers.Main) {
+            _messages.value = _messages.value + ChatMessage(
+                id = assistantId,
+                role = "assistant",
+                content = "",
+                isStreaming = true,
+                isAwaitingModelResponse = true,
+            )
+        }
+        val userText = _messages.value.lastOrNull { it.role == "user" && !it.isQueued }?.content.orEmpty()
+        val excerpt = _messages.value.takeLast(16).joinToString("\n") {
+            "${it.role}: ${it.content.take(500)}"
+        }
+        val config = providerRepository.config.value
+        val mainEntry = _activeEntryId.value?.let { id -> config.modelEntries.find { it.id == id } }
+        val mainName = mainEntry?.model?.displayName ?: currentModel?.displayName ?: "main"
+        val mainMax = (mainEntry?.model?.maxOutputTokens ?: currentModel?.maxOutputTokens ?: 4096).coerceIn(256, 8192)
+        val mainMember = PlanDiscussionOrchestrator.Member(mainName, "facilitator", provider, mainMax)
+        val stances = listOf("architect", "skeptic", "implementer", "operator")
+        val pool = multiAgentSettings.selectedModelEntryIds.value
+        val members = mutableListOf<PlanDiscussionOrchestrator.Member>()
+        if (pool.isNotEmpty()) {
+            pool.forEachIndexed { i, id ->
+                val entry = config.modelEntries.find { it.id == id } ?: return@forEachIndexed
+                val p = providerForModelEntry(entry) ?: return@forEachIndexed
+                members += PlanDiscussionOrchestrator.Member(
+                    displayName = entry.model.displayName,
+                    stance = stances[i % stances.size],
+                    provider = p,
+                    maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 8192),
+                )
+            }
+        }
+        if (members.isEmpty()) {
+            members += mainMember.copy(stance = "architect")
+            members += mainMember.copy(displayName = "$mainName · critic", stance = "skeptic")
+            members += mainMember.copy(displayName = "$mainName · implementer", stance = "implementer")
+        }
+        val tools = AgentTools.makeAgentTools(
+            supportsImageInput = currentModel?.hasImageInput == true,
+            visionGroupConfigured = false,
+            memoryEnabled = false,
+            subAgentEnabled = false,
+        )
+        val result = try {
+            PlanDiscussionOrchestrator.run(
+                userText = userText,
+                conversationExcerpt = excerpt,
+                main = mainMember,
+                members = members,
+                tools = tools,
+                executeTool = { name, json ->
+                    executeTool(name, json, "", mutableListOf(), assistantId, "")
+                },
+                onProgress = { msg ->
+                    withContext(Dispatchers.Main) {
+                        SessionActivityTracker.updateToolStatus(msg, "plan_discussion", true, msg)
+                        _messages.value = _messages.value.map {
+                            if (it.id == assistantId) {
+                                it.copy(content = msg, isAwaitingModelResponse = true, isStreaming = true)
+                            } else it
+                        }
+                    }
+                },
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val err = "计划讨论失败: ${e.message ?: e.javaClass.simpleName}"
+            withContext(Dispatchers.Main) {
+                _messages.value = _messages.value.map {
+                    if (it.id == assistantId) {
+                        it.copy(content = err, isStreaming = false, isAwaitingModelResponse = false)
+                    } else it
+                }
+            }
+            return
+        }
+        val partsJson = "[{\"type\":\"text\",\"value\":" + escapeJson(result.markdown) + "}]"
+        val persisted = chatRepository.appendMessage(activeSessionId, "assistant", partsJson)
+        withContext(Dispatchers.Main) {
+            SessionActivityTracker.updateToolStatus("", null, false)
+            _messages.value = _messages.value.map {
+                if (it.id == assistantId) it.copy(
+                    id = persisted.id,
+                    content = result.markdown,
+                    isStreaming = false,
+                    isAwaitingModelResponse = false,
+                ) else it
+            }
+        }
+    }
+
     private suspend fun executeRunSubAgent(argsJson: String): ToolExecutionResult {
         if (!multiAgentSettings.enabled.value) {
             return ToolExecutionResult("Multi-agent dispatch is disabled in Settings → Multi-agent.", false)
@@ -12487,6 +12696,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         "memory_get" -> "Read Memory"
         "web_search" -> "Search Web"
         "run_subagent" -> "Sub-agent"
+        "ask_user_question", "AskUserQuestion" -> "Ask User"
         else -> toolName
             .split('_')
             .filter { it.isNotEmpty() }

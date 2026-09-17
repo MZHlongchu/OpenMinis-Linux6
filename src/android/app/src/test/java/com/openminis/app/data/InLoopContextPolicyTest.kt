@@ -83,4 +83,25 @@ class InLoopContextPolicyTest {
             p.check(p.compactThreshold - 1, window),
         )
     }
+
+    @Test
+    fun `default 90 percent matches historic 200k and 100k headroom`() {
+        assertEquals(180_000, ContextPolicy.forContextWindow(200_000).compactThreshold)
+        assertEquals(90_000, ContextPolicy.forContextWindow(100_000).compactThreshold)
+    }
+
+    @Test
+    fun `custom compact percent scales the threshold`() {
+        val window = 200_000
+        val p = ContextPolicy.forContextWindow(window, compactPercent = 80)
+        assertEquals(160_000, p.compactThreshold)
+        assertEquals(ContextPolicy.CheckResult.OK, p.check(159_999, window))
+        assertEquals(ContextPolicy.CheckResult.NEEDS_COMPACT, p.check(160_000, window))
+    }
+
+    @Test
+    fun `windows under 64k still never compact even with a high percent`() {
+        val p = ContextPolicy.forContextWindow(40_000, compactPercent = 95)
+        assertEquals(0, p.compactThreshold)
+    }
 }

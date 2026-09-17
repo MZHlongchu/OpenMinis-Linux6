@@ -11,11 +11,11 @@ import android.content.SharedPreferences
  * key name is reused verbatim so the two platforms stay greppable as one
  * feature.
  *
- * Semantics, matching iOS:
- *   - false (the default — iOS uses a bare `UserDefaults.bool`, which is false
- *     when unset): crossing the compact threshold before a send PROMPTS the
- *     user.
- *   - true: the same crossing compacts silently and then sends.
+ * Semantics:
+ *   - true (the default): crossing the compact threshold before a send
+ *     compacts silently and then sends.
+ *   - false: the same crossing PROMPTS the user.
+ * Threshold percent defaults to 90 and is user-configurable.
  *
  * Global rather than per-session on purpose: iOS persists it so "future
  * conversations inherit it", which is the whole point of the one-tap opt-in
@@ -24,12 +24,17 @@ import android.content.SharedPreferences
 object AutoCompactPrefs {
     private const val PREFS = "minis_auto_compact_prefs"
     private const val KEY_ENABLED = "autoCompactOnThreshold"
+    private const val KEY_THRESHOLD = "autoCompactThresholdPercent"
+    const val DEFAULT_THRESHOLD_PERCENT = 90
 
     @Volatile
     private var appContext: Context? = null
 
     @Volatile
-    private var cachedEnabled: Boolean = false
+    private var cachedEnabled: Boolean = true
+
+    @Volatile
+    private var cachedThresholdPercent: Int = DEFAULT_THRESHOLD_PERCENT
 
     private fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -41,11 +46,27 @@ object AutoCompactPrefs {
      */
     fun prime(context: Context) {
         appContext = context.applicationContext
-        cachedEnabled = prefs(context).getBoolean(KEY_ENABLED, false)
+        cachedEnabled = prefs(context).getBoolean(KEY_ENABLED, true)
+        cachedThresholdPercent = prefs(context).getInt(KEY_THRESHOLD, DEFAULT_THRESHOLD_PERCENT)
+            .coerceIn(50, 95)
     }
 
-    /** Context-free read. False before [prime] runs, matching a fresh install. */
+    /** Context-free read. True before [prime] runs (auto-compact on by default). */
     fun isEnabled(): Boolean = cachedEnabled
+
+    fun thresholdPercent(): Int = cachedThresholdPercent.coerceIn(50, 95)
+
+    fun setThresholdPercent(percent: Int) {
+        cachedThresholdPercent = percent.coerceIn(50, 95)
+        appContext?.let {
+            prefs(it).edit().putInt(KEY_THRESHOLD, cachedThresholdPercent).apply()
+        }
+    }
+
+    fun setThresholdPercent(context: Context, percent: Int) {
+        cachedThresholdPercent = percent.coerceIn(50, 95)
+        prefs(context).edit().putInt(KEY_THRESHOLD, cachedThresholdPercent).apply()
+    }
 
     fun setEnabled(context: Context, enabled: Boolean) {
         cachedEnabled = enabled

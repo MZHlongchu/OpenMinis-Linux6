@@ -277,6 +277,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         // and the in-chat one-tap opt-in both read it from places that have no
         // Activity context.
         com.openminis.app.data.AutoCompactPrefs.prime(this)
+        com.openminis.app.data.PlanDiscussionPrefs.prime(this)
 
         // T283: install NDK signal handler for native crashes (SIGSEGV/
         // SIGABRT/SIGBUS/SIGFPE/SIGILL/SIGSYS). Writes a one-shot text

@@ -61,6 +61,9 @@ class SuCommandTest {
         assertTrue(SuCommand.SU_CANDIDATES.contains("/system/bin/su"))
         assertTrue(SuCommand.SU_CANDIDATES.contains("/system/bin/ksu"))
         assertTrue(SuCommand.SU_CANDIDATES.contains("/debug_ramdisk/su"))
+        assertTrue(SuCommand.SU_CANDIDATES.contains("/debug_ramdisk/ksu"))
+        assertTrue(SuCommand.SU_CANDIDATES.contains("/data/adb/ksud"))
+        assertTrue(SuCommand.SU_CANDIDATES.contains("/data/adb/magisk/magisk"))
     }
 
     @Test

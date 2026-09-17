@@ -89,6 +89,21 @@ fun ModelEntryDetailScreen(
     var videoInput by remember { mutableStateOf("video" in effectiveInput) }
     var imageOutput by remember { mutableStateOf("image" in effectiveOutput) }
     var audioOutput by remember { mutableStateOf("audio" in effectiveOutput) }
+    var autoCompactOn by remember {
+        mutableStateOf(overrides.autoCompactEnabled ?: com.openminis.app.data.AutoCompactPrefs.isEnabled())
+    }
+    var compactPercentText by remember {
+        mutableStateOf(
+            (overrides.compactThresholdPercent
+                ?: com.openminis.app.data.AutoCompactPrefs.thresholdPercent()).toString(),
+        )
+    }
+    var maxRetriesText by remember {
+        mutableStateOf(
+            (overrides.maxRetries
+                ?: com.openminis.app.provider.HttpRetryAfter.DEFAULT_MAX_RETRIES).toString(),
+        )
+    }
 
     SettingsScaffold(
         title = stringResource(R.string.model_entry_model_detail),
@@ -135,6 +150,12 @@ fun ModelEntryDetailScreen(
                         // tracks future provider updates to the base modalities.
                         inputModalities = if (newInputs.toSet() != baseInputs.toSet()) newInputs else null,
                         outputModalities = if (newOutputs.toSet() != baseOutputs.toSet()) newOutputs else null,
+                        maxThinkingLevel = overrides.maxThinkingLevel,
+                        autoCompactEnabled = autoCompactOn,
+                        compactThresholdPercent = compactPercentText.trim().toIntOrNull()?.coerceIn(50, 95)
+                            ?: com.openminis.app.data.AutoCompactPrefs.DEFAULT_THRESHOLD_PERCENT,
+                        maxRetries = maxRetriesText.trim().toIntOrNull()?.coerceIn(0, 8)
+                            ?: com.openminis.app.provider.HttpRetryAfter.DEFAULT_MAX_RETRIES,
                     )
                     val updated = if (entry.isCustom) {
                         entry.copy(baseModel = baseModel.copy(id = modelId), overrides = newOverrides, isHidden = isHidden)
@@ -176,6 +197,36 @@ fun ModelEntryDetailScreen(
                 value = instance?.label ?: instanceId,
                 showDivider = false,
             )
+        }
+
+        SettingsSection(
+            header = stringResource(R.string.modeldetail_section_context_retry),
+            footer = stringResource(R.string.modeldetail_context_retry_footer),
+        ) {
+            SettingsSwitchRow(
+                title = stringResource(R.string.modeldetail_auto_compact),
+                checked = autoCompactOn,
+                onCheckedChange = { autoCompactOn = it },
+            )
+            SettingsCardBlock {
+                RowLabel(text = stringResource(R.string.modeldetail_compact_threshold))
+                SectionTextField(
+                    value = compactPercentText,
+                    onValueChange = { compactPercentText = it.filter { c -> c.isDigit() }.take(2) },
+                    placeholder = "90",
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+                Spacer(Modifier.height(12.dp))
+                RowLabel(text = stringResource(R.string.modeldetail_max_retries))
+                SectionTextField(
+                    value = maxRetriesText,
+                    onValueChange = { maxRetriesText = it.filter { c -> c.isDigit() }.take(1) },
+                    placeholder = "5",
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+            }
         }
 
         // ── Capabilities ────────────────────────────────────────────────

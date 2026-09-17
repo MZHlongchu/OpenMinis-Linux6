@@ -110,6 +110,11 @@ The Xcode project references `deps/libs/`, `deps/include/`, `deps/frameworks/`
 and `deps/resources/` relative to the project, so nothing needs to be copied
 by hand.
 
+`rclone.aar` is gitignored. A missing AAR no longer fails `:app:compile*Kotlin`:
+the stub under `src/rcloneStub` compiles instead. Rebuild the real binding only
+when you need remote backup destinations (`./deps/build_rclone_android.sh`,
+requires Go 1.22+ and gomobile on the **host**, not on first APK compile).
+
 ### 2. Build the app
 
 ```sh
@@ -155,6 +160,22 @@ xcodebuild -project src/ios/Minis.xcodeproj -scheme Minis \
 
 Gradle itself comes from the wrapper (Gradle 8.11.1, AGP 8.7.3, Kotlin 2.1.0) —
 do not install it separately.
+
+First-build downloads (wrapper ZIP, AGP, Kotlin, Compose, Google Maven) should
+not be pinned to a single mirror. From a China-reachable network:
+
+```
+python scripts/pick_build_mirrors.py          # writes src/android/mirrors.local.properties
+set MINIS_BUILD_MIRRORS=cn                    # Windows cmd
+# export MINIS_BUILD_MIRRORS=cn               # bash
+```
+
+`settings.gradle.kts` prepends several Aliyun / Huawei / Tencent candidates, then
+still falls back to `google()` and `mavenCentral()`. Override the candidate list
+with `MINIS_MAVEN_URLS` (comma-separated). `MINIS_BUILD_MIRRORS=off` uses official
+only. If `services.gradle.org` is blocked, `python scripts/pick_build_mirrors.py --fetch-gradle`
+prints a reachable Gradle distribution URL — point `gradle-wrapper.properties`
+`distributionUrl` at it locally (do not commit a single pinned mirror).
 
 Only `arm64-v8a` is built (`abiFilters`), so use an arm64 device or emulator
 image.

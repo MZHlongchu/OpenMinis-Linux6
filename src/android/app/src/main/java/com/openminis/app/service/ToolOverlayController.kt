@@ -119,6 +119,7 @@ class ToolOverlayController(private val context: Context) {
     private var replyView: TextView? = null
     private var statusIconView: StatusGlyphView? = null
     private var closeView: View? = null
+    private var lastIsRunning: Boolean = false
     private var layoutParams: WindowManager.LayoutParams? = null
     // [T-android-overlay-reply-status-34599] Session ID associated with
     // the current overlay capsule. The whole-capsule tap builds a
@@ -432,7 +433,14 @@ class ToolOverlayController(private val context: Context) {
                 leftMargin = dpToPx(10)
                 gravity = Gravity.CENTER_VERTICAL
             }
-            setOnClickListener { onUserDismiss() }
+            setOnClickListener {
+                if (lastIsRunning) {
+                    SessionActivityTracker.cancelAllActiveStreams()
+                    com.openminis.app.sandbox.ExecutionCoordinator.stopCurrentCommand()
+                } else {
+                    onUserDismiss()
+                }
+            }
             contentDescription = context.getString(R.string.overlay_dismiss)
         }
         closeView = closeBtn
@@ -536,12 +544,11 @@ class ToolOverlayController(private val context: Context) {
             }
         }
 
-        // [T-android-overlay-reply-status-34599] The X close button is
-        // useful only once the user has something to dismiss — while a
-        // tool is mid-stream the overlay self-tears-down when the tool
-        // finishes (no completion state yet to linger on), and the X
-        // shouldn't double as a "cancel the run" affordance.
-        closeView?.visibility = if (isRunning) View.GONE else View.VISIBLE
+        lastIsRunning = isRunning
+        closeView?.visibility = View.VISIBLE
+        closeView?.contentDescription = context.getString(
+            if (isRunning) R.string.overlay_stop else R.string.overlay_dismiss,
+        )
 
         val ring = ringView
         if (ring != null) {

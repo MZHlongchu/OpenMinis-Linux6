@@ -347,6 +347,12 @@ data class ModelOverrides(
     // of older JSON (unlike adding an enum case) — old configs simply lack the
     // key and it defaults to null.
     val maxThinkingLevel: ThinkingLevel? = null,
+    /** Per-model auto-compact; null inherits the app default (on). */
+    val autoCompactEnabled: Boolean? = null,
+    /** Compact when context usage reaches this percent (50–95). null = app default 90. */
+    val compactThresholdPercent: Int? = null,
+    /** Same-provider retries on 429 / 5xx / network. null = default 5. */
+    val maxRetries: Int? = null,
 ) {
     val isEmpty: Boolean
         get() = displayName == null
@@ -356,6 +362,9 @@ data class ModelOverrides(
             && inputModalities == null
             && outputModalities == null
             && maxThinkingLevel == null
+            && autoCompactEnabled == null
+            && compactThresholdPercent == null
+            && maxRetries == null
 }
 
 @Serializable

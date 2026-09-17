@@ -341,6 +341,10 @@ class RootfsManager private constructor(private val context: Context) {
             hosts.parentFile?.mkdirs()
             hosts.writeText("127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n")
         }
+        // Guest TMPDIR=/tmp; ubuntu-base usually ships these, but a partial
+        // extract or overlay must not leave dpkg without a writable temp.
+        File(rootfsDir, "tmp").mkdirs()
+        File(rootfsDir, "var/tmp").mkdirs()
         installBundledAndroidSdkTools()
         installBundledCmdlineTools()
     }

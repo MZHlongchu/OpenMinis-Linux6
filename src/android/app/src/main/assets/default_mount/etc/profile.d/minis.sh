@@ -36,10 +36,16 @@ export BROWSER=/usr/local/bin/minis-open
 # touched as link sources. Reported as openminis/openminis#7.
 export UV_LINK_MODE=symlink
 
+# Android leaks TMPDIR=/data/user/0/<pkg>/cache into the guest. That path is
+# not a PRoot guest directory, so dpkg/apt/curl fail creating temp files.
+export TMPDIR=/tmp
+export TMP=/tmp
+export TEMP=/tmp
+
 # Toolchain paths (populated by minis-dev-setup / minis-android-sdk-setup).
 export ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk}"
 export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/opt/android-sdk}"
-export PATH="$PATH:/opt/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/35.0.2:/opt/gradle/bin"
+export PATH="$PATH:/opt/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/35.0.2:/opt/android-sdk/cmake/3.22.1/bin:/opt/gradle/bin"
 for _jdk in /usr/lib/jvm/java-21-openjdk-arm64 /usr/lib/jvm/java-17-openjdk-arm64 /usr/lib/jvm/default-java; do
   if [ -d "$_jdk" ]; then
     export JAVA_HOME="$_jdk"

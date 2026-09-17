@@ -93,7 +93,8 @@ object PRootKernel {
         customEnvironment.putIfAbsent(
             "PATH",
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/bin:" +
-                "/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/35.0.2:/opt/gradle/bin",
+                "/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:" +
+                "/opt/android-sdk/build-tools/35.0.2:/opt/android-sdk/cmake/3.22.1/bin:/opt/gradle/bin",
         )
         customEnvironment.putIfAbsent("DEBIAN_FRONTEND", "noninteractive")
         customEnvironment.putIfAbsent("SHELL", "/bin/bash")
@@ -140,6 +141,16 @@ object PRootKernel {
         // sources. Reported as openminis/openminis#7.
         // Mirrored in default_mount/etc/profile.d/minis.sh for login shells.
         customEnvironment.putIfAbsent("UV_LINK_MODE", "symlink")
+
+        // ProcessBuilder inherits Android's TMPDIR (typically
+        // /data/user/0/<pkg>/cache). PRoot treats that as a *guest* path, so
+        // it either does not exist or is the host cache Android may have
+        // wiped. dpkg/apt then fail unpacking — first seen installing
+        // ca-certificates. Always pin guest temp to /tmp. Mirrored in
+        // default_mount/etc/profile.d/minis.sh and the setup scripts.
+        customEnvironment["TMPDIR"] = "/tmp"
+        customEnvironment["TMP"] = "/tmp"
+        customEnvironment["TEMP"] = "/tmp"
 
         // Inject device timezone so Alpine userspace sees local time.
         // Mirrors iOS ISHShellExecutor.m:335-353 — uses POSIX TZ format with a

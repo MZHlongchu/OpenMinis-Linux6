@@ -36,8 +36,8 @@ android {
         applicationId = "com.openminis.linux"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "1.13-linux"
+        versionCode = 26
+        versionName = "1.14-linux"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -108,6 +108,13 @@ android {
     sourceSets {
         getByName("androidTest") {
             assets.srcDirs("$projectDir/schemas")
+        }
+        // First APK: if rclone.aar is absent (Go/gomobile not required), compile
+        // the stub so :app:compile*Kotlin does not fail on Gomobile symbols.
+        getByName("main") {
+            if (!file("libs/rclone.aar").isFile) {
+                java.srcDir("src/rcloneStub/java")
+            }
         }
     }
 
@@ -235,12 +242,19 @@ dependencies {
     // note in `ndk`; we ship arm64-v8a only.
     implementation("com.github.helloooideeeeea:RealTimeCutVADLibraryForAndroid:1.0.5@aar")
 
-    // rclone, via its official gomobile binding, for backup destinations
-    // (SMB / WebDAV / SFTP / S3 / FTP). Build it with
-    // `deps/build_rclone_android.sh` — the .aar is a build artifact under
-    // app/libs/, not a checked-in binary. Backends are decided by
-    // deps/rclone-mobile/backends/backends.go, shared with the iOS build.
-    implementation(group = "", name = "rclone", ext = "aar")
+    // rclone gomobile AAR is gitignored (~15MB). First APK compiles without Go
+    // via src/rcloneStub. Remote backup destinations need the real AAR:
+    // host Go 1.22+ + gomobile, then ./deps/build_rclone_android.sh
+    val rcloneAar = file("libs/rclone.aar")
+    if (rcloneAar.isFile) {
+        implementation(group = "", name = "rclone", ext = "aar")
+    } else {
+        logger.lifecycle(
+            "rclone.aar missing — compiling rcloneStub. " +
+                "SMB/WebDAV/SFTP/S3/FTP backup needs Go+gomobile " +
+                "(deps/build_rclone_android.sh). See BUILDING.md / LINUX.md.",
+        )
+    }
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
@@ -257,6 +271,7 @@ dependencies {
 
     // Chrome Custom Tabs (in-app browser for OAuth)
     implementation("androidx.browser:browser:1.8.0")
+    implementation("androidx.documentfile:documentfile:1.0.1")
 
     // T-pwa-1: WebViewAssetLoader serves pinned PWA HTML under
     // https://appassets.androidplatform.net/ inside PwaActivity, so

@@ -54,10 +54,16 @@ data class ContextPolicy(
          * Produce the policy for a given context window size. Four tiers:
          *   - `<32K`   → offload/compact disabled; UI tells user to start a new chat.
          *   - `32K–64K` → offload only; exhaust line = ctx − 10k.
-         *   - `64K–128K` → offload + compact; headroom 10k for compact.
-         *   - `≥128K`  → generous offload + compact; headroom 20k.
+         *   - `64K–128K` / `≥128K` → offload + compact at [compactPercent] of the window
+         *     (default 90).
          */
-        fun forContextWindow(contextWindow: Int): ContextPolicy = when {
+        fun forContextWindow(
+            contextWindow: Int,
+            compactPercent: Int = AutoCompactPrefs.DEFAULT_THRESHOLD_PERCENT,
+        ): ContextPolicy {
+            val pct = compactPercent.coerceIn(50, 95)
+            val compactAt = (contextWindow.toLong() * pct / 100L).toInt().coerceAtLeast(1)
+            return when {
             contextWindow < 32_000 -> ContextPolicy(
                 offloadThreshold = 0,
                 offloadTarget = 0,
@@ -75,17 +81,18 @@ data class ContextPolicy(
             contextWindow < 128_000 -> ContextPolicy(
                 offloadThreshold = contextWindow - 20_000,
                 offloadTarget = contextWindow - 30_000,
-                compactThreshold = contextWindow - 10_000,
+                compactThreshold = compactAt,
                 exhaustedOnly = false,
                 manualCompactAllowed = true,
             )
             else -> ContextPolicy(
                 offloadThreshold = contextWindow - 40_000,
                 offloadTarget = contextWindow - 60_000,
-                compactThreshold = contextWindow - 20_000,
+                compactThreshold = compactAt,
                 exhaustedOnly = false,
                 manualCompactAllowed = true,
             )
+            }
         }
     }
 }

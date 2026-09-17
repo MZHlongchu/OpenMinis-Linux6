@@ -3,6 +3,7 @@ package com.openminis.app.sandbox
 import android.content.Context
 import android.util.Log
 import com.openminis.app.data.repository.EnvVarRepository
+import com.openminis.app.sandbox.SandboxResourceGate
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
@@ -78,7 +79,8 @@ object ExecutionCoordinator {
         // ConcurrentHashMap.getOrPut is not atomic, use putIfAbsent pattern
         val mutex = mutexes.getOrPut(sessionId) { Mutex() }
 
-        return mutex.withLock {
+        return SandboxResourceGate.withCommandLock(command) {
+        mutex.withLock {
             val startTime = System.currentTimeMillis()
 
             // Auto-boot PRoot if not already booted
@@ -121,6 +123,7 @@ object ExecutionCoordinator {
             }
 
             CommandResult(output = output, exitCode = exitCode, durationMs = durationMs)
+        }
         }
     }
 

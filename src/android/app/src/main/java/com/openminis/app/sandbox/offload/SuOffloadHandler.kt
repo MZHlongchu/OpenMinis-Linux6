@@ -162,8 +162,14 @@ internal object SuCommand {
         "/sbin/su",
         "/su/bin/su",
         "/debug_ramdisk/su",
+        "/debug_ramdisk/ksu",
+        "/debug_ramdisk/magisk",
         "/system/bin/ksu",
         "/system/xbin/ksu",
+        "/system/bin/magisk",
+        "/data/adb/ksu/bin/ksu",
+        "/data/adb/ksud",
+        "/data/adb/magisk/magisk",
     )
 
     fun parse(argv: List<String>): Parsed {
@@ -211,17 +217,19 @@ internal object SuCommand {
             val f = File(path)
             if (f.exists() && f.canExecute()) return path
         }
-        return try {
-            val proc = ProcessBuilder("/system/bin/sh", "-c", "command -v su").start()
-            val out = proc.inputStream.bufferedReader().readText().trim()
-            if (!proc.waitFor(3, TimeUnit.SECONDS)) {
-                proc.destroyForcibly()
-                return null
+        for (which in listOf("su", "ksu", "ksud")) {
+            try {
+                val proc = ProcessBuilder("/system/bin/sh", "-c", "command -v $which").start()
+                val out = proc.inputStream.bufferedReader().readText().trim()
+                if (!proc.waitFor(3, TimeUnit.SECONDS)) {
+                    proc.destroyForcibly()
+                    continue
+                }
+                out.takeIf { it.isNotEmpty() && File(it).canExecute() }?.let { return it }
+            } catch (_: Throwable) {
             }
-            out.takeIf { it.isNotEmpty() && File(it).canExecute() }
-        } catch (_: Throwable) {
-            null
         }
+        return null
     }
 
     fun runHost(argv: List<String>, timeoutMs: Long): Pair<Int, String> {
