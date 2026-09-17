@@ -1,0 +1,120 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      NDK_VERSION: "28.0.12433566"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          lfs: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK and CMake
+        run: |
+          sdkmanager --install \
+            "ndk;${NDK_VERSION}" \
+            "cmake;3.22.1" \
+            "platforms;android-36" \
+            "build-tools;35.0.0" \
+            "platform-tools"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: deps/rclone-mobile/go.sum
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          gomobile init
+
+      - name: Build PRoot
+        run: |
+          chmod +x deps/build_proot.sh
+          ./deps/build_proot.sh
+
+      - name: Prepare Ubuntu sandbox + SDK assets
+        run: |
+          chmod +x scripts/prepare_android_sandbox.sh
+          ./scripts/prepare_android_sandbox.sh
+
+      - name: Build rclone.aar
+        run: |
+          chmod +x deps/build_rclone_android.sh
+          ./deps/build_rclone_android.sh
+          mkdir -p src/android/app/libs
+          cp deps/build/rclone/rclone.aar src/android/app/libs/rclone.aar
+
+      - name: Provider customization stub
+        run: |
+          test -f src/android/app/provider-customization.properties \
+            || cp src/android/app/provider-customization.properties.example \
+                  src/android/app/provider-customization.properties
+
+      - name: Assemble release APK
+        working-directory: src/android
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8"
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Stage APK
+        run: |
+          mkdir -p dist
+          SRC=src/android/app/build/outputs/apk/release/app-release.apk
+          test -f "$SRC"
+          cp "$SRC" dist/minis-ultra-com.openminis.linux.apk
+          ls -lh dist/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: minis-ultra-apk
+          path: dist/minis-ultra-com.openminis.linux.apk
+          if-no-files-found: error
+
+      - name: Publish rolling pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-latest
+          name: Minis Ultra (Android)
+          prerelease: true
+          generate_release_notes: false
+          files: dist/minis-ultra-com.openminis.linux.apk
+          body: |
+            Rolling Android build from `${{ github.sha }}`.
+
+            - applicationId: `com.openminis.linux`
+            - launcher name: **Minis Ultra**
+            - arm64-v8a, debug-signed release APK

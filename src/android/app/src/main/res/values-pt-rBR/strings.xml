@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Minis Linux</string>
+    <string name="app_name">Minis Ultra</string>
     <string name="new_chat">Nova conversa</string>
     <string name="settings">Configurações</string>
     <string name="providers">Provedores</string>
@@ -1567,7 +1567,7 @@
     <string name="system_permissions_a11y_restricted_shizuku_sub">Um toque — remove a marcação sem sair do Minis</string>
     <string name="system_permissions_a11y_restricted_working">Liberando…</string>
     <string name="system_permissions_a11y_restricted_failed">Falhou — siga os passos manuais abaixo</string>
-    <string name="a11y_service_label">Acessibilidade do Minis Linux</string>
+    <string name="a11y_service_label">Acessibilidade do Minis Ultra</string>
     <string name="a11y_service_description">Permite que o Minis leia a estrutura da interface na tela, faça toques e gestos e receba eventos do sistema em nome dos Agentes que chamam o android-a11y-cli.</string>
     <string name="a11y_service_summary">Backend de automação da interface para o Minis</string>
     <string name="back">Voltar</string>

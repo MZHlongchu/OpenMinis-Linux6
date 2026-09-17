@@ -15,6 +15,7 @@ OpenMinis bundles, links, or depends on the following third-party components. Ve
 | Alpine Linux minirootfs | downloaded at build time by `deps/prepare_alpine_rootfs.sh` | Aggregate of package licenses (musl **MIT**, BusyBox **GPL-2.0**, etc.) | iOS iSH guest only; not stored in this repo |
 | Ubuntu 24.04 base (noble arm64) | downloaded by `scripts/prepare_android_sandbox.sh` | Canonical / Ubuntu package licenses (glibc **LGPL-2.1**, apt **GPL-2.0**, etc.) | Android PRoot guest; not stored in this repo |
 | [android-sdk-tools](https://github.com/lzhiyong/android-sdk-tools) aarch64 (aapt2, zipalign, adb, aidl) | 35.0.2 static | **Apache-2.0** (AOSP) | Vendored as `assets/android-sdk-tools-aarch64.zip`; unpacked to `/opt/android-sdk` |
+| Android SDK Command-line Tools (`sdkmanager`) | 12.0 (`commandlinetools-linux-11076708`) | **Apache-2.0** (Google / AOSP) | Slimmed to the sdkmanager classpath as `assets/android-cmdline-tools.zip`; lint/R8/kotlin-compiler omitted |
 
 ## iOS — Swift Package Manager dependencies
 

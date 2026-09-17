@@ -28,15 +28,17 @@ iOS continues to use iSH + Alpine; this Ubuntu switch is Android-only.
 ```
 apt-get update && apt-get install -y python3
 minis-dev-setup              # bash, gcc, python3, git, ffmpeg, openjdk-21, gradle
-minis-android-sdk-setup      # ANDROID_HOME skeleton + best-effort cmdline-tools
+minis-android-sdk-setup      # bundled aapt2 + sdkmanager; fetches android.jar
 yum install python3          # → apt-get install -y python3
 ```
 
 `aapt2` / `zipalign` / `adb` ship in the APK as **aarch64** static binaries
 (AOSP via lzhiyong/android-sdk-tools 35.0.2) and unpack to `/opt/android-sdk`.
-`sdkmanager` is Java (works on aarch64 OpenJDK) and is used only to fetch
-`platforms;android-35`. Do not install Google's linux build-tools — they are
-x86_64 and would overwrite aapt2.
+`sdkmanager` (Google cmdline-tools 12.0, Java) is also bundled — slimmed to
+the sdkmanager classpath (~20MB; lint/R8/kotlin-compiler dropped). It runs
+on aarch64 OpenJDK and is used only to fetch `platforms;android-35`.
+Do not install Google's linux build-tools — they are x86_64 and would
+overwrite aapt2.
 
 Optional: bind-mount a full SDK as `/var/minis/mounts/android-sdk`.
 
@@ -45,7 +47,7 @@ Optional: bind-mount a full SDK as `/var/minis/mounts/android-sdk`.
 | | Official | This fork |
 |---|---|---|
 | `applicationId` | `com.openminis.app` | `com.openminis.linux` |
-| Launcher name | Minis | Minis Linux |
+| Launcher name | Minis | Minis Ultra |
 | Abstract socket | `native-offload` | `native-offload-linux` |
 | Debug JSON-RPC | `127.0.0.1:5321` | `127.0.0.1:5322` |
 | Guest | Alpine musl | Ubuntu 24.04 glibc |

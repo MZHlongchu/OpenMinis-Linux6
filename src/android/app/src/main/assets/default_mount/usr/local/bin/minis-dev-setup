@@ -60,5 +60,5 @@ echo "  java:    $(command -v java 2>/dev/null || echo missing)"
 echo "  gradle:  $(command -v gradle 2>/dev/null || echo missing)"
 echo
 echo "This guest is Ubuntu 24.04 arm64 glibc — aarch64 Linux binaries run natively."
-echo "Google's Android cmdline-tools are still x86_64; run minis-android-sdk-setup."
+echo "Android SDK: run minis-android-sdk-setup (bundled aarch64 aapt2 + Java sdkmanager)."
 echo "Re-open the shell (or: . /etc/profile.d/minis-dev.sh) to pick up PATH."

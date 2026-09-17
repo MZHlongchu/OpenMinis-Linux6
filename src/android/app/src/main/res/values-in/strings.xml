@@ -5,7 +5,7 @@
      directory is never consulted and the app would silently fall back
      to English. -->
 <resources>
-    <string name="app_name">Minis Linux</string>
+    <string name="app_name">Minis Ultra</string>
     <string name="new_chat">Obrolan Baru</string>
     <string name="settings">Pengaturan</string>
     <string name="providers">Penyedia</string>
@@ -1572,7 +1572,7 @@
     <string name="system_permissions_a11y_restricted_shizuku_sub">Satu ketukan — menghapus penanda tanpa meninggalkan Minis</string>
     <string name="system_permissions_a11y_restricted_working">Mengizinkan…</string>
     <string name="system_permissions_a11y_restricted_failed">Gagal — gunakan langkah manual di bawah ini</string>
-    <string name="a11y_service_label">Aksesibilitas Minis Linux</string>
+    <string name="a11y_service_label">Aksesibilitas Minis Ultra</string>
     <string name="a11y_service_description">Memungkinkan Minis membaca struktur antarmuka di layar, melakukan ketukan dan gestur, serta menerima peristiwa sistem atas nama Agen yang memanggil android-a11y-cli.</string>
     <string name="a11y_service_summary">Backend otomasi lapisan antarmuka untuk Minis</string>
     <string name="back">Kembali</string>

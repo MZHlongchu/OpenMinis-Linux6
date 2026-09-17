@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Minis Linux</string>
+    <string name="app_name">Minis Ultra</string>
     <string name="new_chat">Новый чат</string>
     <string name="settings">Настройки</string>
     <string name="providers">Провайдеры</string>
@@ -1575,7 +1575,7 @@
     <string name="system_permissions_a11y_restricted_shizuku_sub">Одно нажатие — снимает флаг, не выходя из Minis</string>
     <string name="system_permissions_a11y_restricted_working">Разрешение…</string>
     <string name="system_permissions_a11y_restricted_failed">Не удалось — выполните шаги вручную ниже</string>
-    <string name="a11y_service_label">Спец. возможности Minis Linux</string>
+    <string name="a11y_service_label">Спец. возможности Minis Ultra</string>
     <string name="a11y_service_description">Позволяет Minis читать структуру экранного UI, выполнять нажатия и жесты и получать системные события от имени Minis Agent, вызывающих android-a11y-cli.</string>
     <string name="a11y_service_summary">Бэкенд автоматизации UI-слоя для Minis</string>
     <string name="back">Назад</string>

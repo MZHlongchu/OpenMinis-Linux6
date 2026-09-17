@@ -62,4 +62,22 @@ if [ -f "$SDK_TOOLS_ZIP" ]; then
   ls -lh "$SDK_TOOLS_ZIP"
 fi
 
+# Official commandlinetools-linux is ~150MB (lint/R8/kotlin-compiler).
+# Keep only the Java sdkmanager classpath (~20MB) so it can ship in the APK.
+CMDLINE_ZIP="$ASSETS/android-cmdline-tools.zip"
+CMDLINE_URL="${CMDLINE_URL:-https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip}"
+if [ ! -f "$CMDLINE_ZIP" ]; then
+  echo "==> Fetching Android cmdline-tools and slimming to sdkmanager"
+  TMP_CMDLINE="$(mktemp)"
+  if curl -fL --retry 3 -o "$TMP_CMDLINE" "$CMDLINE_URL"; then
+    python3 "$ROOT/scripts/slim_android_cmdline_tools.py" "$TMP_CMDLINE" "$CMDLINE_ZIP"
+  else
+    echo "WARNING: cmdline-tools download failed; on-device sdkmanager will be missing" >&2
+  fi
+  rm -f "$TMP_CMDLINE"
+fi
+if [ -f "$CMDLINE_ZIP" ]; then
+  ls -lh "$CMDLINE_ZIP"
+fi
+
 echo "==> Android sandbox assets ready (Ubuntu ${UBUNTU_CODENAME})"

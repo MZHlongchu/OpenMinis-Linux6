@@ -342,6 +342,7 @@ class RootfsManager private constructor(private val context: Context) {
             hosts.writeText("127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n")
         }
         installBundledAndroidSdkTools()
+        installBundledCmdlineTools()
     }
 
     /**
@@ -404,6 +405,44 @@ class RootfsManager private constructor(private val context: Context) {
             Log.w(TAG, "Failed to install bundled aarch64 SDK tools: ${t.message}", t)
         }
     }
+
+    /**
+     * Unpack the slimmed Google cmdline-tools (Java sdkmanager only) into
+     * `/opt/android-sdk/cmdline-tools/latest`. Lint/R8/kotlin-compiler are
+     * omitted so the APK stays small; platforms still download at runtime.
+     */
+    private fun installBundledCmdlineTools() {
+        val input = try {
+            context.assets.open(CMD_TOOLS_ASSET)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Bundled sdkmanager asset missing: ${t.message}")
+            return
+        }
+        try {
+            input.use { raw ->
+                ZipInputStream(raw).use { zis ->
+                    while (true) {
+                        val entry = zis.nextEntry ?: break
+                        val name = entry.name.replace('\\', '/').trimStart('/')
+                        if (name.isEmpty() || name.contains("..")) continue
+                        if (!name.startsWith("cmdline-tools/")) continue
+                        val out = File(rootfsDir, "opt/android-sdk/$name")
+                        if (entry.isDirectory || name.endsWith("/")) {
+                            out.mkdirs()
+                            continue
+                        }
+                        out.parentFile?.mkdirs()
+                        out.outputStream().use { zis.copyTo(it) }
+                        if (name.contains("/bin/")) out.setExecutable(true, false)
+                    }
+                }
+            }
+            Log.i(TAG, "Installed bundled Java sdkmanager")
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to install bundled sdkmanager: ${t.message}", t)
+        }
+    }
+
 
     /** Drop the previous Alpine extract so it doesn't sit around after the distro switch. */
     private fun deleteLegacyAlpineRootfs() {
@@ -733,6 +772,7 @@ class RootfsManager private constructor(private val context: Context) {
         private const val PROOT_ASSET = "proot-aarch64"
         private const val DEFAULT_MOUNT_ASSET = "default_mount"
         private const val SDK_TOOLS_ASSET = "android-sdk-tools-aarch64.zip"
+        private const val CMD_TOOLS_ASSET = "android-cmdline-tools.zip"
         private const val SDK_BUILD_TOOLS_REV = "35.0.2"
 
         /**

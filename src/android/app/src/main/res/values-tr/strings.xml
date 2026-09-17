@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Minis Linux</string>
+    <string name="app_name">Minis Ultra</string>
     <string name="new_chat">Yeni Sohbet</string>
     <string name="settings">Ayarlar</string>
     <string name="providers">Sağlayıcılar</string>
@@ -1567,7 +1567,7 @@
     <string name="system_permissions_a11y_restricted_shizuku_sub">Tek dokunuş — Minis\'ten çıkmadan işareti kaldırır</string>
     <string name="system_permissions_a11y_restricted_working">İzin veriliyor…</string>
     <string name="system_permissions_a11y_restricted_failed">Başarısız — aşağıdaki elle yapılan adımları kullanın</string>
-    <string name="a11y_service_label">Minis Linux Erişilebilirlik</string>
+    <string name="a11y_service_label">Minis Ultra Erişilebilirlik</string>
     <string name="a11y_service_description">android-a11y-cli çağıran Agent\'lar adına Minis\'in ekrandaki arayüz yapısını okumasını, dokunma ve hareketler yapmasını ve sistem olaylarını almasını sağlar.</string>
     <string name="a11y_service_summary">Minis için arayüz düzeyinde otomasyon arka ucu</string>
     <string name="back">Geri</string>

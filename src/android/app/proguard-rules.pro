@@ -26,3 +26,7 @@
 # NOTE FOR VERIFICATION: debug builds don't minify, so this bug is invisible
 # there. Any change here must be checked against an assembleRelease APK.
 -keep class io.codeconcept.realtimecutvadlibrary.** { *; }
+
+# gomobile rclone binding — JNI / generated Java must keep original names
+-keep class com.openminis.rclone.** { *; }
+-dontwarn com.openminis.rclone.**

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Minis Linux</string>
+    <string name="app_name">Minis Ultra</string>
     <string name="new_chat">Sembang Baharu</string>
     <string name="settings">Tetapan</string>
     <string name="providers">Pembekal</string>
@@ -1567,7 +1567,7 @@
     <string name="system_permissions_a11y_restricted_shizuku_sub">Satu ketikan — membuang penanda tanpa meninggalkan Minis</string>
     <string name="system_permissions_a11y_restricted_working">Membenarkan…</string>
     <string name="system_permissions_a11y_restricted_failed">Gagal — gunakan langkah manual di bawah</string>
-    <string name="a11y_service_label">Kebolehaksesan Minis Linux</string>
+    <string name="a11y_service_label">Kebolehaksesan Minis Ultra</string>
     <string name="a11y_service_description">Membolehkan Minis membaca struktur antara muka pada skrin, melakukan ketikan dan gerak isyarat, serta menerima peristiwa sistem bagi pihak Ejen yang memanggil android-a11y-cli.</string>
     <string name="a11y_service_summary">Backend automasi lapisan antara muka untuk Minis</string>
     <string name="back">Kembali</string>

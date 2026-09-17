@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Minis Linux</string>
+    <string name="app_name">Minis Ultra</string>
     <string name="new_chat">Nowy czat</string>
     <string name="settings">Ustawienia</string>
     <string name="providers">Dostawcy</string>
@@ -1575,7 +1575,7 @@
     <string name="system_permissions_a11y_restricted_shizuku_sub">Jedno dotknięcie — usuwa flagę bez opuszczania Minis</string>
     <string name="system_permissions_a11y_restricted_working">Zezwalanie…</string>
     <string name="system_permissions_a11y_restricted_failed">Niepowodzenie — wykonaj ręczne kroki poniżej</string>
-    <string name="a11y_service_label">Ułatwienia dostępu Minis Linux</string>
+    <string name="a11y_service_label">Ułatwienia dostępu Minis Ultra</string>
     <string name="a11y_service_description">Pozwala aplikacji Minis odczytywać strukturę interfejsu na ekranie, wykonywać dotknięcia i gesty oraz odbierać zdarzenia systemowe w imieniu Agentów wywołujących android-a11y-cli.</string>
     <string name="a11y_service_summary">Zaplecze automatyzacji interfejsu dla Minis</string>
     <string name="back">Wstecz</string>

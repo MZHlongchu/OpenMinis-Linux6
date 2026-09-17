@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Minis Linux</string>
+    <string name="app_name">Minis Ultra</string>
     <string name="new_chat">Bagong Chat</string>
     <string name="settings">Mga Setting</string>
     <string name="providers">Mga Provider</string>
@@ -1567,7 +1567,7 @@
     <string name="system_permissions_a11y_restricted_shizuku_sub">Isang tap — inaalis ang flag nang hindi umaalis sa Minis</string>
     <string name="system_permissions_a11y_restricted_working">Pinapayagan…</string>
     <string name="system_permissions_a11y_restricted_failed">Nabigo — gamitin ang mga manu-manong hakbang sa ibaba</string>
-    <string name="a11y_service_label">Accessibility ng Minis Linux</string>
+    <string name="a11y_service_label">Accessibility ng Minis Ultra</string>
     <string name="a11y_service_description">Pinapayagan ang Minis na basahin ang istruktura ng UI sa screen, mag-tap at gumawa ng galaw, at tumanggap ng mga event ng system para sa mga Agent na tumatawag ng android-a11y-cli.</string>
     <string name="a11y_service_summary">Backend ng automation sa antas ng UI para sa Minis</string>
     <string name="back">Bumalik</string>

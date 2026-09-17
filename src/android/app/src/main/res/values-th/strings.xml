@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Minis Linux</string>
+    <string name="app_name">Minis Ultra</string>
     <string name="new_chat">แชทใหม่</string>
     <string name="settings">การตั้งค่า</string>
     <string name="providers">ผู้ให้บริการ</string>
@@ -1567,7 +1567,7 @@
     <string name="system_permissions_a11y_restricted_shizuku_sub">แตะครั้งเดียว — ล้างค่าสถานะโดยไม่ต้องออกจาก Minis</string>
     <string name="system_permissions_a11y_restricted_working">กำลังอนุญาต…</string>
     <string name="system_permissions_a11y_restricted_failed">ไม่สำเร็จ — ใช้ขั้นตอนด้วยตนเองด้านล่าง</string>
-    <string name="a11y_service_label">การช่วยเหลือพิเศษของ Minis Linux</string>
+    <string name="a11y_service_label">การช่วยเหลือพิเศษของ Minis Ultra</string>
     <string name="a11y_service_description">ให้ Minis อ่านโครงสร้างหน้าจอ แตะและทำท่าทาง รวมถึงรับเหตุการณ์ของระบบแทน Agent ที่เรียกใช้ android-a11y-cli</string>
     <string name="a11y_service_summary">แบ็กเอนด์ระบบอัตโนมัติระดับหน้าจอสำหรับ Minis</string>
     <string name="back">ย้อนกลับ</string>

@@ -1,18 +1,18 @@
 #!/bin/sh
 # Android SDK for this Ubuntu 24.04 arm64 PRoot guest.
 #
-# Native tools (aapt2, zipalign, adb, aidl) are vendored in the APK as
-# android-sdk-tools-aarch64.zip and unpacked to ANDROID_HOME on first boot.
-# sdkmanager itself is Java and runs on aarch64 OpenJDK; it is used only to
-# fetch architecture-independent platforms (android.jar). Do NOT install
-# Google's linux build-tools — those are x86_64 and would overwrite aapt2.
+# Native tools (aapt2, zipalign, adb, aidl) and Java sdkmanager are vendored
+# in the APK and unpacked to ANDROID_HOME on first boot. sdkmanager is used
+# only to fetch architecture-independent platforms (android.jar). Do NOT
+# install Google's linux build-tools — those are x86_64 and would overwrite
+# aapt2.
 set -e
 export DEBIAN_FRONTEND=noninteractive
 
 SDK_ROOT=/opt/android-sdk
 BUILD_TOOLS_REV=35.0.2
 AAPT2="$SDK_ROOT/build-tools/$BUILD_TOOLS_REV/aapt2"
-CMDLINE_ZIP_URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
 
 echo "minis-android-sdk-setup: ANDROID_HOME=$SDK_ROOT"
 
@@ -28,7 +28,7 @@ if [ -d /var/minis/mounts/android-sdk ] && { [ -e /var/minis/mounts/android-sdk/
   rm -rf "$SDK_ROOT"
   ln -s /var/minis/mounts/android-sdk "$SDK_ROOT"
 else
-  if [ ! -x "$AAPT2" ] && [ ! -f "$AAPT2" ]; then
+  if [ ! -f "$AAPT2" ]; then
     echo "Bundled aapt2 not found at $AAPT2"
     echo "Reinstall the app / re-extract the Ubuntu rootfs, or bind-mount an SDK named android-sdk." >&2
   else
@@ -36,29 +36,12 @@ else
     file "$AAPT2" 2>/dev/null || true
   fi
 
-  if ! command -v unzip >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends unzip; fi
-  if ! command -v curl >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends curl ca-certificates; fi
-
-  SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
   if [ ! -f "$SDKMANAGER" ]; then
-    TMP=/tmp/commandlinetools.zip
-    echo "Downloading Android cmdline-tools (Java sdkmanager)..."
-    if curl -fL --retry 3 -o "$TMP" "$CMDLINE_ZIP_URL"; then
-      mkdir -p "$SDK_ROOT/cmdline-tools"
-      rm -rf /tmp/cmdline-unpack "$SDK_ROOT/cmdline-tools/latest"
-      mkdir -p /tmp/cmdline-unpack
-      unzip -q -o "$TMP" -d /tmp/cmdline-unpack
-      mkdir -p "$SDK_ROOT/cmdline-tools/latest"
-      if [ -d /tmp/cmdline-unpack/cmdline-tools ]; then
-        cp -a /tmp/cmdline-unpack/cmdline-tools/. "$SDK_ROOT/cmdline-tools/latest/"
-      else
-        cp -a /tmp/cmdline-unpack/. "$SDK_ROOT/cmdline-tools/latest/"
-      fi
-      rm -f "$TMP"
-      rm -rf /tmp/cmdline-unpack
-    else
-      echo "cmdline-tools download failed; sdkmanager skipped. aapt2 is still available." >&2
-    fi
+    echo "Bundled sdkmanager not found at $SDKMANAGER"
+    echo "Reinstall the app / re-extract the Ubuntu rootfs." >&2
+  else
+    echo "Using bundled Java sdkmanager: $SDKMANAGER"
+    chmod +x "$SDKMANAGER" 2>/dev/null || true
   fi
 fi
 
@@ -67,13 +50,17 @@ export ANDROID_SDK_ROOT="$SDK_ROOT"
 SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
 if [ -f "$SDKMANAGER" ]; then
   chmod +x "$SDKMANAGER" 2>/dev/null || true
-  echo "Fetching platforms;android-35 via Java sdkmanager (not Google x86_64 build-tools)..."
-  set +e
-  yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" "platforms;android-35"
-  rc=$?
-  set -e
-  if [ "$rc" -ne 0 ]; then
-    echo "sdkmanager platforms install failed (rc=$rc). android.jar may be missing." >&2
+  if [ -f "$SDK_ROOT/platforms/android-35/android.jar" ]; then
+    echo "platforms;android-35 already present"
+  else
+    echo "Fetching platforms;android-35 via bundled sdkmanager (not Google x86_64 build-tools)..."
+    set +e
+    yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" "platforms;android-35"
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "sdkmanager platforms install failed (rc=$rc). android.jar may be missing." >&2
+    fi
   fi
 fi
 
@@ -94,6 +81,11 @@ if [ -f "$AAPT2" ]; then
   echo "aapt2 (aarch64)=$AAPT2"
 else
   echo "aapt2 MISSING at $AAPT2"
+fi
+if [ -f "$SDKMANAGER" ]; then
+  echo "sdkmanager=$SDKMANAGER"
+else
+  echo "sdkmanager MISSING at $SDKMANAGER"
 fi
 echo "Re-open the shell (or: . /etc/profile.d/minis-android-sdk.sh) to pick up PATH."
 echo "To compile an APK: cd <project> && gradle assembleDebug"

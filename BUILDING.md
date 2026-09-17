@@ -163,7 +163,7 @@ image.
 
 ```sh
 ./deps/build_proot.sh              # → assets/proot-aarch64, jniLibs/arm64-v8a/*.so
-./scripts/prepare_android_sandbox.sh   # → assets/ubuntu-base.tar.gz
+./scripts/prepare_android_sandbox.sh   # → ubuntu-base + aarch64 aapt2 + slim sdkmanager
 ```
 
 - **`build_proot.sh`** cross-compiles a static `libtalloc` and the
@@ -185,11 +185,12 @@ image.
   Artifacts are **not** byte-identical across NDK releases; the loader's code
   differs between toolchain generations. Functionally equivalent — don't expect
   checksums to match someone else's build.
-- **`prepare_android_sandbox.sh`** downloads Ubuntu 24.04 arm64 `ubuntu-base` into
-  `assets/ubuntu-base.tar.gz`.
+- **`prepare_android_sandbox.sh`** downloads Ubuntu 24.04 arm64 `ubuntu-base`
+  into `assets/ubuntu-base.tar.gz`, plus the aarch64 aapt2 zip and a slimmed
+  Google `sdkmanager` (`assets/android-cmdline-tools.zip`, ~20MB).
 
-Both write into `src/android/app/src/main/`, and their outputs are gitignored —
-they are build artifacts, so rerun the scripts rather than committing them.
+`ubuntu-base.tar.gz` is gitignored (too large). The aapt2 and sdkmanager zips
+are committed so a clone can build the APK without hitting Google.
 
 The small JNI libraries in `src/main/cpp/` (`pty_bridge`, the crash handler,
 `jieba_jni`) are built by CMake as part of the normal Gradle build; no separate

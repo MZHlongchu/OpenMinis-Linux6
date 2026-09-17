@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Minis Linux</string>
+    <string name="app_name">Minis Ultra</string>
     <string name="new_chat">Nouvelle conversation</string>
     <string name="settings">Réglages</string>
     <string name="providers">Fournisseurs AI</string>
@@ -1567,7 +1567,7 @@
     <string name="system_permissions_a11y_restricted_shizuku_sub">Un seul appui — lève l\'indicateur sans quitter Minis</string>
     <string name="system_permissions_a11y_restricted_working">Autorisation en cours…</string>
     <string name="system_permissions_a11y_restricted_failed">Échec — suivez les étapes manuelles ci-dessous</string>
-    <string name="a11y_service_label">Accessibilité Minis Linux</string>
+    <string name="a11y_service_label">Accessibilité Minis Ultra</string>
     <string name="a11y_service_description">Permet à Minis de lire la structure de l\'interface à l\'écran, d\'effectuer des appuis et des gestes, et de recevoir des événements système pour le compte des Agents qui utilisent android-a11y-cli.</string>
     <string name="a11y_service_summary">Backend d\'automatisation de l\'interface pour Minis</string>
     <string name="back">Retour</string>
