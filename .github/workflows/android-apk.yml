@@ -12,66 +12,85 @@ concurrency:
   group: android-apk-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  JAVA_VERSION: "17"
+  ANDROID_PLATFORM: "android-36"
+  ANDROID_BUILD_TOOLS: "35.0.0"
+  ANDROID_CMAKE: "3.22.1"
+  ANDROID_NDK: "28.0.13004108"
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g"
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build Minis Ultra APK
+    runs-on: ubuntu-22.04
     timeout-minutes: 180
-    env:
-      NDK_VERSION: "28.0.12433566"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          lfs: false
+          fetch-depth: 0
 
-      - name: Set up JDK 17
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK and CMake
+      - name: Install native build dependencies
         run: |
-          sdkmanager --install \
-            "ndk;${NDK_VERSION}" \
-            "cmake;3.22.1" \
-            "platforms;android-36" \
-            "build-tools;35.0.0" \
-            "platform-tools"
-          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y curl tar unzip make gawk sed file python3
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.25.x"
-          cache-dependency-path: deps/rclone-mobile/go.sum
-
-      - name: Install gomobile
+      - name: Install Android SDK commandline tools
         run: |
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          gomobile init
+          mkdir -p /usr/local/lib/android/sdk/cmdline-tools
+          cd /tmp
+          curl -sL -o cmdline-tools.zip \
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+          unzip -q cmdline-tools.zip -d /tmp/sdk
+          mv /tmp/sdk/cmdline-tools /usr/local/lib/android/sdk/cmdline-tools/latest
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+
+      - name: Install Android SDK components
+        run: |
+          /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager \
+            "platform-tools" \
+            "platforms;${ANDROID_PLATFORM}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "cmake;${ANDROID_CMAKE}" \
+            "ndk;${ANDROID_NDK}"
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/${ANDROID_NDK}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=/usr/local/lib/android/sdk/ndk/${ANDROID_NDK}" >> "$GITHUB_ENV"
 
       - name: Build PRoot
         run: |
           chmod +x deps/build_proot.sh
-          ./deps/build_proot.sh
+          ANDROID_NDK_HOME="/usr/local/lib/android/sdk/ndk/${ANDROID_NDK}" bash deps/build_proot.sh
 
       - name: Prepare Ubuntu sandbox + SDK assets
         run: |
           chmod +x scripts/prepare_android_sandbox.sh
-          ./scripts/prepare_android_sandbox.sh
+          bash scripts/prepare_android_sandbox.sh
+          test -f src/android/app/src/main/assets/ubuntu-base.tar.gz
+          test -f src/android/app/src/main/assets/android-sdk-tools-aarch64.zip
+          test -f src/android/app/src/main/assets/android-cmdline-tools.zip
 
       - name: Build rclone.aar
         run: |
+          curl -sL -o /tmp/go.tar.gz https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
+          sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+          export PATH=/usr/local/go/bin:$PATH
+          go version
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          export PATH=$PATH:$(go env GOPATH)/bin
+          gomobile init
           chmod +x deps/build_rclone_android.sh
-          ./deps/build_rclone_android.sh
+          ANDROID_NDK_HOME="/usr/local/lib/android/sdk/ndk/${ANDROID_NDK}" bash deps/build_rclone_android.sh
           mkdir -p src/android/app/libs
           cp deps/build/rclone/rclone.aar src/android/app/libs/rclone.aar
 
@@ -84,17 +103,20 @@ jobs:
       - name: Assemble release APK
         working-directory: src/android
         env:
-          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8"
+          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/${{ env.ANDROID_NDK }}
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
         run: |
+          sed -i 's|org.gradle.jvmargs=.*|org.gradle.jvmargs=-Xmx6g -Dfile.encoding=UTF-8|' gradle.properties
           chmod +x gradlew
           ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
       - name: Stage APK
         run: |
-          mkdir -p dist
           SRC=src/android/app/build/outputs/apk/release/app-release.apk
-          test -f "$SRC"
+          test -s "$SRC"
+          mkdir -p dist
           cp "$SRC" dist/minis-ultra-com.openminis.linux.apk
+          unzip -l "$SRC" | grep -E "libproot|proot-aarch64|ubuntu-base|android-sdk-tools|android-cmdline-tools" || true
           ls -lh dist/
 
       - name: Upload APK artifact
