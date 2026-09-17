@@ -127,6 +127,7 @@ object Routes {
     const val FILE_PREVIEW = "file_preview"
     const val ENV_VARS = "env_vars"
     const val SKILLS = "skills"
+    const val MULTI_AGENT = "multi_agent"
     const val SKILL_DETAIL = "skill/{skillId}"
     const val SKILL_FILE = "skill_file/{skillId}/{relativePath}"
     const val MINIS_SKILLS_BROWSER = "minis_skills_browser"
@@ -591,6 +592,7 @@ fun AppNavigation(
                 onBackupClick = { navController.safeNavigate(Routes.BACKUP) },
                 onEnvVarsClick = { navController.safeNavigate(Routes.ENV_VARS) },
                 onSkillsClick = { navController.safeNavigate(Routes.SKILLS) },
+                onMultiAgentClick = { navController.safeNavigate(Routes.MULTI_AGENT) },
                 onTerminalClick = { navController.safeNavigate(Routes.terminal()) },
                 onMemoryClick = { navController.safeNavigate(Routes.MEMORY) },
                 onMcpClick = { navController.safeNavigate(Routes.MCP) },
@@ -1174,6 +1176,12 @@ fun AppNavigation(
                     onBack = { navController.safePopBackStack() },
                 )
             }
+        }
+
+        composable(Routes.MULTI_AGENT) {
+            com.openminis.app.ui.settings.MultiAgentSettingsScreen(
+                onBack = { navController.safePopBackStack() },
+            )
         }
 
         composable(Routes.SKILLS) {

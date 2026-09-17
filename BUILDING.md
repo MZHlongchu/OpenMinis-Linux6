@@ -192,6 +192,19 @@ image.
 `ubuntu-base.tar.gz` is gitignored (too large). The aapt2 and sdkmanager zips
 are committed so a clone can build the APK without hitting Google.
 
+### Android SDK（中国大陆 / 客户机架构）
+
+在 **x86_64 的 GitHub-hosted runner 或开发机** 上，用官方 `sdkmanager` 装 NDK、CMake、platforms 是安全的——那是编译主机。
+
+在 **aarch64 PRoot 客户机** 里：
+
+- 用 APK 捆绑的 aarch64 `aapt2` / `zipalign` / `adb`（`minis-android-sdk-setup`）
+- `sdkmanager` 只拉 `platforms;android-35`（android.jar）
+- **不要**执行 `sdkmanager "build-tools;…"`，也不要解压 Google 的 `build-tools_r*-linux.zip`：那是 x86_64，会覆盖 aapt2
+
+`dl.google.com` 在境内经常超时。镜像与自助查找方法见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md) 和内置技能 `android-sdk-mirrors`。`ubuntu-base.tar.gz` 太大不进 git，CI 必须现拉；不要 vendor 完整 Google cmdline-tools（约 146MB）。
+
+
 The small JNI libraries in `src/main/cpp/` (`pty_bridge`, the crash handler,
 `jieba_jni`) are built by CMake as part of the normal Gradle build; no separate
 step is needed.

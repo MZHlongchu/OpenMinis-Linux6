@@ -168,6 +168,19 @@
     <string name="settings_section_agent_runtime">Agent Runtime</string>
     <string name="settings_skills">Skills</string>
     <string name="settings_skills_subtitle">Manage Minis Agent skills and instructions</string>
+    <string name="settings_multi_agent">Multi-agent</string>
+    <string name="settings_multi_agent_subtitle">Parallel sub-agents, concurrency cap, and team models</string>
+    <string name="settings_multi_agent_section_dispatch">Dispatch</string>
+    <string name="settings_multi_agent_enable">Enable multi-agent</string>
+    <string name="settings_multi_agent_enable_subtitle">Main session model coordinates; teammates run via run_subagent</string>
+    <string name="settings_multi_agent_max">Max concurrent sub-agents</string>
+    <string name="settings_multi_agent_max_subtitle">Up to %1$d teammates in one turn</string>
+    <string name="settings_multi_agent_decrease">Decrease</string>
+    <string name="settings_multi_agent_increase">Increase</string>
+    <string name="settings_multi_agent_footer_dispatch">The main chat model is the coordinator. It decomposes, dispatches, accepts and summarizes — it should not do all the work itself. Independent tasks run in parallel; dependent phases wait for acceptance.</string>
+    <string name="settings_multi_agent_section_models">Team models</string>
+    <string name="settings_multi_agent_footer_models">Select up to %1$d models (linked to the concurrency cap). Sub-agents round-robin this pool unless a call names a model. Leave empty to reuse the main session model.</string>
+    <string name="settings_multi_agent_no_models">No enabled models yet. Add a provider first.</string>
     <string name="settings_memory">Memory</string>
     <string name="settings_memory_subtitle">Persistent knowledge across sessions</string>
     <!-- [T-mcp-integration-android] MCP Integrations settings entry + management screen -->

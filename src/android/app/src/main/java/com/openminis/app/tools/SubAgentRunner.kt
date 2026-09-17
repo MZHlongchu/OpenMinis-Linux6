@@ -1,0 +1,158 @@
+package com.openminis.app.tools
+
+import com.openminis.app.data.model.AgentContentPart
+import com.openminis.app.data.model.AgentToolDefinition
+import com.openminis.app.data.model.LLMMessage
+import com.openminis.app.data.model.LLMStreamChunk
+import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.provider.LLMProvider
+import kotlinx.coroutines.CancellationException
+import org.json.JSONObject
+
+/**
+ * Nested agent loop used by [run_subagent]. Sub-agents do not receive the
+ * parent conversation and must not spawn further sub-agents.
+ */
+object SubAgentRunner {
+
+    const val MAX_TURNS = 12
+    private const val MAX_REPORT_CHARS = 24_000
+
+    suspend fun run(
+        provider: LLMProvider,
+        modelDisplayName: String,
+        userPrompt: String,
+        role: String?,
+        skillsHint: String?,
+        tools: List<AgentToolDefinition>,
+        maxTokens: Int,
+        executeTool: suspend (name: String, argsJson: String) -> ToolExecutionResult,
+    ): ToolExecutionResult {
+        val history = mutableListOf(
+            LLMMessage(role = LLMMessage.Role.USER, content = userPrompt),
+        )
+        val system = workerSystemPrompt(modelDisplayName, role, skillsHint)
+        val report = StringBuilder()
+
+        try {
+            repeat(MAX_TURNS) {
+                val textSb = StringBuilder()
+                val toolCalls = mutableListOf<Triple<String, String, JSONObject>>()
+                provider.streamMessage(
+                    messages = history,
+                    systemPrompt = system,
+                    maxTokens = maxTokens.coerceIn(256, 8192),
+                    tools = tools,
+                    thinkingLevel = ThinkingLevel.OFF,
+                ).collect { chunk ->
+                    when (chunk) {
+                        is LLMStreamChunk.Text -> textSb.append(chunk.text)
+                        is LLMStreamChunk.ToolCallComplete ->
+                            toolCalls.add(Triple(chunk.id, chunk.name, chunk.args))
+                        else -> Unit
+                    }
+                }
+
+                val text = textSb.toString().trim()
+                if (text.isNotEmpty()) {
+                    if (report.isNotEmpty()) report.append("\n\n")
+                    report.append(text)
+                }
+
+                if (toolCalls.isEmpty()) {
+                    val out = report.toString().ifBlank { text.ifBlank { "(sub-agent finished with empty output)" } }
+                    return ToolExecutionResult(truncate(out), true)
+                }
+
+                val assistantParts = mutableListOf<AgentContentPart>()
+                if (text.isNotEmpty()) assistantParts.add(AgentContentPart.Text(text))
+                for ((id, name, args) in toolCalls) {
+                    assistantParts.add(AgentContentPart.ToolUse(id, name, input = args))
+                }
+                history.add(
+                    LLMMessage(
+                        role = LLMMessage.Role.ASSISTANT,
+                        content = text,
+                        contentParts = assistantParts,
+                    ),
+                )
+
+                val resultParts = mutableListOf<AgentContentPart>()
+                for ((id, name, args) in toolCalls) {
+                    if (name == "run_subagent") {
+                        resultParts.add(
+                            AgentContentPart.ToolResult(
+                                id = id,
+                                name = name,
+                                content = "Error: sub-agents cannot spawn further sub-agents. Complete the assigned work yourself.",
+                                isError = true,
+                            ),
+                        )
+                        continue
+                    }
+                    val result = try {
+                        executeTool(name, args.toString())
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        ToolExecutionResult("Error: ${e.message ?: e.javaClass.simpleName}", false)
+                    }
+                    resultParts.add(
+                        AgentContentPart.ToolResult(
+                            id = id,
+                            name = name,
+                            content = result.output,
+                            isError = !result.success,
+                            imageData = result.imageData,
+                            imageMimeType = result.imageMimeType,
+                            imageLinuxPath = result.imageLinuxPath,
+                        ),
+                    )
+                }
+                history.add(
+                    LLMMessage(
+                        role = LLMMessage.Role.USER,
+                        content = "",
+                        contentParts = resultParts,
+                    ),
+                )
+            }
+            val out = report.toString().ifBlank { "(sub-agent hit the $MAX_TURNS-turn cap without a final answer)" }
+            return ToolExecutionResult(truncate(out), true)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val prefix = report.toString().trim()
+            val msg = buildString {
+                if (prefix.isNotEmpty()) {
+                    append(prefix)
+                    append("\n\n")
+                }
+                append("Sub-agent failed: ${e.message ?: e.javaClass.simpleName}")
+            }
+            return ToolExecutionResult(truncate(msg), false)
+        }
+    }
+
+    private fun truncate(text: String): String {
+        if (text.length <= MAX_REPORT_CHARS) return text
+        return "…(truncated)\n" + text.takeLast(MAX_REPORT_CHARS)
+    }
+
+    private fun workerSystemPrompt(modelDisplayName: String, role: String?, skillsHint: String?): String {
+        val roleLine = role?.trim()?.takeIf { it.isNotEmpty() }?.let { "Assigned role: $it.\n" } ?: ""
+        val skillsLine = skillsHint?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            "Read these skills first (file_read `/var/minis/skills/<id>/SKILL.md`): $it\n"
+        } ?: ""
+        return """You are a sub-agent worker, not the session coordinator. Model: $modelDisplayName.
+${roleLine}${skillsLine}You cannot see the parent conversation. Everything you need is in the user prompt: goal, workspace paths, relevant files, constraints, acceptance criteria.
+
+Rules:
+- Complete ONLY the assigned slice. Do not rewrite unrelated files.
+- Do not spawn further sub-agents.
+- Use tools immediately. Prefer file_read / file_edit / file_write / shell_execute.
+- When done, return a concise report: what changed, files touched, leftover risks, and whether acceptance criteria passed.
+- If you cannot meet the acceptance criteria, say so explicitly and list what failed.
+"""
+    }
+}

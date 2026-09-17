@@ -1,79 +1,79 @@
-# Minis Linux (OpenMinis-Linux fork)
+# Minis Ultra（OpenMinis-Linux 分支）
 
-This fork keeps the OpenMinis agent + PRoot sandbox, then adds a Linux-leaning
-toolchain, host `su` passthrough, POSIX shared-storage mounts, and a distinct
-Android identity so it can be installed **next to** official OpenMinis.
+本分支保留 OpenMinis 的 Agent + PRoot 沙箱，并加上偏 Linux 的工具链、主机 `su` 直通、POSIX 共享存储挂载，以及独立的 Android 包名，因此可以和官方 OpenMinis **并排安装**。
 
-## Guest OS
+启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。
 
-The Android guest is **Ubuntu 24.04 (noble) arm64** extracted from Canonical's
-`ubuntu-base` tarball, running under **PRoot** (not KVM, not a chroot that
-needs kernel user namespaces).
+## 客户机系统
+
+Android 客户机是 Canonical **Ubuntu 24.04 (noble) arm64** 的 `ubuntu-base`，跑在 **PRoot** 里（不是 KVM，也不依赖内核 user namespace 的 chroot）。
 
 | | |
 |---|---|
-| libc | glibc (`aarch64-linux-gnu`) |
-| shell | GNU bash (`/bin/bash`; `/bin/sh` is dash) |
-| packages | `apt-get` / `apt`. `yum`/`dnf` are apt shims, not RPM. |
-| arch | arm64. Packages come from **ports.ubuntu.com**, not archive.ubuntu.com. |
-| init | none — ubuntu-base has no systemd under PRoot |
+| libc | glibc（`aarch64-linux-gnu`） |
+| shell | GNU bash（`/bin/bash`；`/bin/sh` 是 dash） |
+| 软件包 | `apt-get` / `apt`。`yum`/`dnf` 只是 apt 的兼容包装，不是 RPM |
+| 架构 | arm64。软件源走 **ports.ubuntu.com**，不是 archive.ubuntu.com |
+| init | 无。ubuntu-base 在 PRoot 下没有 systemd |
 
-PRoot still fakes uid 0 *inside* the guest. That is not host root. Host root is
-only the `su` / `android-su` offload (Magisk/KernelSU).
+PRoot 会在客户机里**假装** uid 0。那不是主机 root。主机 root 只来自 `su` / `android-su` 卸载通道（Magisk / KernelSU）。
 
-iOS continues to use iSH + Alpine; this Ubuntu switch is Android-only.
+iOS 仍使用 iSH + Alpine；Ubuntu 切换仅限 Android。
 
-## Toolchain
+## 工具链
 
 ```
 apt-get update && apt-get install -y python3
 minis-dev-setup              # bash, gcc, python3, git, ffmpeg, openjdk-21, gradle
-minis-android-sdk-setup      # bundled aapt2 + sdkmanager; fetches android.jar
+minis-android-sdk-setup      # 捆绑的 aarch64 aapt2 + sdkmanager；再拉 android.jar
 yum install python3          # → apt-get install -y python3
 ```
 
-`aapt2` / `zipalign` / `adb` ship in the APK as **aarch64** static binaries
-(AOSP via lzhiyong/android-sdk-tools 35.0.2) and unpack to `/opt/android-sdk`.
-`sdkmanager` (Google cmdline-tools 12.0, Java) is also bundled — slimmed to
-the sdkmanager classpath (~20MB; lint/R8/kotlin-compiler dropped). It runs
-on aarch64 OpenJDK and is used only to fetch `platforms;android-35`.
-Do not install Google's linux build-tools — they are x86_64 and would
-overwrite aapt2.
+`aapt2` / `zipalign` / `adb` 以 **aarch64** 静态二进制打进 APK（AOSP，来自 lzhiyong/android-sdk-tools 35.0.2），解压到 `/opt/android-sdk`。
+`sdkmanager`（Google cmdline-tools 12.0，Java）也捆绑了——精简到 sdkmanager 的 classpath（约 20MB，丢掉 lint/R8/kotlin-compiler）。它跑在 aarch64 OpenJDK 上，**只用来拉** `platforms;android-35`。
 
-Optional: bind-mount a full SDK as `/var/minis/mounts/android-sdk`.
+**严禁**在客户机里安装 Google 的 linux build-tools：那是 x86_64，会把 aapt2 覆盖成无法执行的 ELF。完整镜像清单、如何自己找镜像，见内置技能 `android-sdk-mirrors` 和 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。
 
-## Coexistence with official OpenMinis
+可选：把完整 SDK bind-mount 到 `/var/minis/mounts/android-sdk`。
 
-| | Official | This fork |
+## 多智能体
+
+设置 → Agent Runtime → **多智能体**（深链 `minis://settings/multi-agent`）：
+
+- 主会话模型是**任务协调者**：拆解、分派、验收、汇总，而不是独自做完所有活。
+- 工具是 `run_subagent`。同一回合里多条独立调用会并行，上限 1–8（默认 3），并与「团队模型」池的勾选数量联动。
+- 有依赖的阶段必须验收通过后再进入下一阶段。
+- 子代理看不到主会话，prompt 必须自包含；子代理禁止再开子代理。
+- 团队模型留空则沿用主会话模型；否则在池中轮询，也可在调用里指定。
+
+## 与官方 OpenMinis 共存
+
+| | 官方 | 本分支 |
 |---|---|---|
 | `applicationId` | `com.openminis.app` | `com.openminis.linux` |
-| Launcher name | Minis | Minis Ultra |
-| Abstract socket | `native-offload` | `native-offload-linux` |
+| 启动器名称 | Minis | Minis Ultra |
+| 抽象套接字 | `native-offload` | `native-offload-linux` |
 | Debug JSON-RPC | `127.0.0.1:5321` | `127.0.0.1:5322` |
-| Guest | Alpine musl | Ubuntu 24.04 glibc |
-| Rootfs dir | `files/alpine-rootfs` | `files/ubuntu-rootfs` |
+| 客户机 | Alpine musl | Ubuntu 24.04 glibc |
+| Rootfs 目录 | `files/alpine-rootfs` | `files/ubuntu-rootfs` |
 
-First launch after this switch extracts Ubuntu and deletes leftover
-`alpine-rootfs`. Rebuild assets with:
+首次启动会解压 Ubuntu 并删除残留的 `alpine-rootfs`。重建资源：
 
 ```
 ./scripts/prepare_android_sandbox.sh
 ```
 
-## Host `su` (Shizuku coexist)
+## 主机 `su`（可与 Shizuku 共存）
 
-Prefer Magisk/KernelSU. If `su` is missing or Magisk denies elevation, the
-same command is retried through Shizuku (when the binder is ready). Settings
-→ Permissions has a **Host su** card next to Shizuku.
+优先 Magisk / KernelSU。若没有 `su` 或 Magisk 拒绝提权，同一条命令会在 binder 就绪时经 Shizuku 重试。设置 → 权限里，**Host su** 卡片就在 Shizuku 旁边。
 
 ```
 su -c id
 android-su status
 ```
 
-Deep link: `minis://settings/host-su`.
+深链：`minis://settings/host-su`。
 
-## Shared storage
+## 共享存储
 
-SAF folders bind at `/var/minis/mounts/<name>/`. With All Files Access:
-`/sdcard`, `/storage/emulated/0`, `/var/minis/mounts/sdcard`.
+SAF 目录绑定在 `/var/minis/mounts/<name>/`。若有「所有文件访问」：`/sdcard`、`/storage/emulated/0`、`/var/minis/mounts/sdcard`。

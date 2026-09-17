@@ -18,6 +18,7 @@ import com.openminis.app.browser.BrowserTabPool
 import com.openminis.app.data.db.AppDatabase
 import com.openminis.app.data.db.DatabaseVersionGuard
 import com.openminis.app.data.repository.BackgroundSettingsRepository
+import com.openminis.app.data.repository.MultiAgentSettingsRepository
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.data.repository.EnvVarRepository
 import com.openminis.app.data.MountedFoldersStore
@@ -162,6 +163,8 @@ class MinisApp : Application(), ImageLoaderFactory {
     lateinit var webAppShortcutRepository: WebAppShortcutRepository
         private set
     lateinit var backgroundSettingsRepository: BackgroundSettingsRepository
+        private set
+    lateinit var multiAgentSettingsRepository: MultiAgentSettingsRepository
         private set
     lateinit var backgroundTaskNotifier: BackgroundTaskNotifier
         private set
@@ -626,6 +629,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         // posts a tap-to-open notification when the app is backgrounded.
         // Mirrors iOS BackgroundKeepAliveManager.postBackgroundTaskNotification.
         backgroundSettingsRepository = BackgroundSettingsRepository(this)
+        multiAgentSettingsRepository = MultiAgentSettingsRepository(this)
         backgroundTaskNotifier = BackgroundTaskNotifier(
             context = this,
             chatRepository = chatRepository,

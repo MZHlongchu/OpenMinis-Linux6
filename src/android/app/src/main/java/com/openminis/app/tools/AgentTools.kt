@@ -27,6 +27,7 @@ object AgentTools {
         // attempt those calls. Mirrors the iOS gate at
         // AIChatViewModel.makeAgentTools(memoryEnabled:).
         memoryEnabled: Boolean = true,
+        subAgentEnabled: Boolean = false,
     ): List<AgentToolDefinition> = buildList {
         add(shellExecuteDefinition())
         add(FileReadTool.definition())
@@ -40,7 +41,27 @@ object AgentTools {
             add(memoryWriteDefinition())
             add(memoryGetDefinition())
         }
+        if (subAgentEnabled) {
+            add(runSubAgentDefinition())
+        }
     }
+
+    private fun runSubAgentDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "run_subagent",
+        description = """Dispatch a teammate sub-agent. You are the session coordinator: decompose, dispatch, accept, summarize — do not do all the work yourself.
+
+Each call MUST include a self-contained prompt (sub-agents cannot see this conversation): goal, workspace paths, relevant files, constraints, acceptance criteria. Note the member role and which skills to read.
+
+Independent slices: emit multiple run_subagent calls in ONE turn (they run in parallel up to the configured cap). Dependent phases: wait for results, verify against acceptance criteria, then dispatch the next phase. If a result fails acceptance, point out the gap and re-dispatch. Each member may only change their assigned files.""",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "Short live-status title, e.g. 'Review RootfsManager'."),
+            "prompt" to AgentToolParam("string", "Complete self-contained task prompt for the sub-agent."),
+            "role" to AgentToolParam("string", "Member role, e.g. 'Android reviewer', 'docs writer'."),
+            "skills" to AgentToolParam("string", "Comma-separated skill ids the worker should read first."),
+            "model" to AgentToolParam("string", "Optional model-entry id from the configured sub-agent pool. Omit to round-robin."),
+        ),
+        required = listOf("prompt"),
+    )
 
     // Aligned with iOS AIChatViewModel.swift:4982-4993
     private fun shellExecuteDefinition(): AgentToolDefinition = AgentToolDefinition(

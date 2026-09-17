@@ -29,6 +29,7 @@ import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Email
 import androidx.compose.material.icons.outlined.Extension
+import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.Feedback
 import androidx.compose.material.icons.outlined.Backup
 import androidx.compose.material.icons.outlined.Folder
@@ -80,6 +81,7 @@ fun SettingsScreen(
     onBackupClick: () -> Unit = {},
     onEnvVarsClick: () -> Unit = {},
     onSkillsClick: () -> Unit = {},
+    onMultiAgentClick: () -> Unit = {},
     onTerminalClick: () -> Unit = {},
     onMemoryClick: () -> Unit = {},
     // [T-mcp-integration-android] MCP Integrations page, listed directly below
@@ -174,6 +176,13 @@ fun SettingsScreen(
 
             // -- Agent Runtime --
             SettingsSection(title = stringResource(R.string.settings_section_agent_runtime)) {
+                SettingsItem(
+                    icon = Icons.Outlined.Groups,
+                    iconColor = Color(0xFF5856D6),
+                    title = stringResource(R.string.settings_multi_agent),
+                    subtitle = stringResource(R.string.settings_multi_agent_subtitle),
+                    onClick = onMultiAgentClick,
+                )
                 SettingsItem(
                     icon = Icons.Outlined.Extension,
                     iconColor = Color(0xFF007AFF),

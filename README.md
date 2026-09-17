@@ -3,9 +3,9 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-iOS%20%7C%20Android-lightgrey.svg)](#beta-programme)
 
-**Your private, on-device AI agent.**
+**你的私人、端侧 AI Agent。**
 
-> **This tree is the OpenMinis-Linux fork** — Android app **Minis Ultra** (`applicationId` `com.openminis.linux`). It can be installed next to official OpenMinis. See [LINUX.md](LINUX.md) for host `su`, toolchain setup (`minis-dev-setup`), POSIX `/sdcard` binds, and the Ubuntu 24.04 PRoot guest.
+> **本仓库是 OpenMinis-Linux 分支** — Android 应用 **Minis Ultra**（`applicationId` 为 `com.openminis.linux`），可与官方 OpenMinis 并排安装。主机 `su`、工具链（`minis-dev-setup`）、POSIX `/sdcard` 挂载、Ubuntu 24.04 PRoot 客户机见 [LINUX.md](LINUX.md)。多智能体调度见设置 → 多智能体（`minis://settings/multi-agent`）。中国大陆编译 Android SDK / 切勿覆盖 aarch64 aapt2 见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。
 
 OpenMinis brings leading models — Claude, GPT, Gemini and more — into a native
 mobile experience, and gives them a real computer to work with: a full Linux
@@ -75,14 +75,17 @@ references and assets — that the agent loads on demand when a request matches 
 Metadata stays in context for triggering; the body and bundled resources load only
 when the skill is actually used.
 
-Minis has its own tool system, but it does not require skills written specifically
-for it: **skills built for Claude, Codex, OpenClaw or Hermes Agent generally run in
-Minis as-is.** Skills that have been adapted to Minis' tools simply run better —
-they can reach the Linux shell, device integrations and native offloads directly.
+Minis 有自己的工具系统，但不要求技能必须为它而写：**给 Claude、Codex、OpenClaw 或 Hermes Agent 写的技能一般能直接跑。** 针对 Minis 工具适配过的技能会更好用——可以直接打到 Linux shell、设备集成和原生 offload。
 
-**→ [OpenMinis/MinisSkills](https://github.com/OpenMinis/MinisSkills)** — skills
-adapted for Minis alongside ones built for it from scratch, covering TTS, search,
-media downloads, health analysis, cloud APIs and more.
+本分支额外内置 **`android-sdk-mirrors`**：中国大陆镜像、以及「永远不要在 aarch64 客户机上安装 Google linux x86_64 build-tools」。
+
+**→ [OpenMinis/MinisSkills](https://github.com/OpenMinis/MinisSkills)** — 既有为 Minis 适配的技能，也有从零写的，覆盖 TTS、搜索、媒体下载、健康分析、云 API 等。
+
+---
+
+## 多智能体（Minis Ultra）
+
+主会话模型是协调者：拆解任务、用 `run_subagent` 分派队友、验收、汇总。同一回合里相互独立的调用会并行（上限与团队模型池联动，1–8，默认 3）；有依赖的阶段必须验收后再继续。子代理看不到主会话，也不能再开子代理。设置页：`minis://settings/multi-agent`。
 
 ---
 

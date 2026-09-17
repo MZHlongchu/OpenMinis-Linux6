@@ -42,6 +42,9 @@ import com.openminis.app.R
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.data.repository.MemoryRepository
 import com.openminis.app.data.repository.ProviderRepository
+import com.openminis.app.data.repository.MultiAgentSettings
+import com.openminis.app.data.repository.MultiAgentSettingsRepository
+import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.ProviderFactory
@@ -60,6 +63,8 @@ import com.openminis.app.tools.FileWriteTool
 import com.openminis.app.tools.MemoryTools
 import com.openminis.app.tools.ReadImageTool
 import com.openminis.app.tools.ToolExecutionResult
+import com.openminis.app.tools.SubAgentRunner
+import com.openminis.app.MinisApp
 import com.openminis.app.offload.OffloadPermissionManager
 import com.openminis.app.service.SessionActivityTracker
 import com.openminis.app.service.SessionConcurrencyManager
@@ -79,7 +84,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
@@ -1226,6 +1237,7 @@ class ChatViewModel(
                 providerRepository, context,
             ),
             memoryEnabled = _memoryEnabled.value,
+            subAgentEnabled = multiAgentSettings.enabled.value,
         )
 
     /**
@@ -1234,6 +1246,12 @@ class ChatViewModel(
      * can't bleed warnings into a fresh prompt.
      */
     private val toolLoopDetector = ToolLoopDetector()
+
+    private val multiAgentSettings: MultiAgentSettingsRepository
+        get() = (context.applicationContext as MinisApp).multiAgentSettingsRepository
+
+    private val subAgentRoundRobin = AtomicInteger(0)
+    private val subAgentDepth = AtomicInteger(0)
 
     /**
      * Cached reference to the lazily-created [BrowserTabPool] so
@@ -8665,6 +8683,8 @@ class ChatViewModel(
 
             // Execute all tool calls
             val resultParts = mutableListOf<AgentContentPart>()
+            val parallelSubResults = mutableMapOf<String, ToolExecutionResult>()
+            var didFanOutSubAgents = false
             for ((id, name, args) in toolCalls) {
                 // [T-android-overlay-tool-title] Pull tool_title uniformly
                 // from args for ALL tools — without this browser_use's
@@ -8846,7 +8866,28 @@ class ChatViewModel(
                 }
 
                 android.util.Log.d("ToolChain[VM]", "[turn=$turn] executeTool START name=$name args=${argsStr.take(200)}")
-                val result = executeTool(name, argsStr, id, allToolBlocks, assistantId, accumulatedText)
+                if (name == "run_subagent" && !didFanOutSubAgents) {
+                    didFanOutSubAgents = true
+                    val cap = MultiAgentSettings.clampConcurrent(multiAgentSettings.maxConcurrent.value)
+                    val sem = Semaphore(cap)
+                    val peers = toolCalls.filter { it.second == "run_subagent" }
+                    coroutineScope {
+                        peers.map { (peerId, _, peerArgs) ->
+                            async {
+                                val peerStr = peerArgs.toString()
+                                val peerResult = sem.withPermit {
+                                    executeRunSubAgent(peerStr)
+                                }
+                                synchronized(parallelSubResults) { parallelSubResults[peerId] = peerResult }
+                            }
+                        }.awaitAll()
+                    }
+                }
+                val result = if (name == "run_subagent") {
+                    parallelSubResults[id] ?: executeTool(name, argsStr, id, allToolBlocks, assistantId, accumulatedText)
+                } else {
+                    executeTool(name, argsStr, id, allToolBlocks, assistantId, accumulatedText)
+                }
                 android.util.Log.d("ToolChain[VM]", "[turn=$turn] executeTool END name=$name success=${result.success} title=${result.toolTitle} outputLen=${result.output.length} output=${result.output.take(200)}")
 
                 // Record post-execution. WARNING text is appended to the tool
@@ -9177,6 +9218,7 @@ class ChatViewModel(
             "browser_use" -> executeBrowserUseTool(argsJson)
             "memory_write" -> executeMemoryWriteTool(argsJson)
             "memory_get" -> executeMemoryGetTool(argsJson)
+            "run_subagent" -> executeRunSubAgent(argsJson)
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
     }
@@ -10098,6 +10140,21 @@ class ChatViewModel(
             // tools it can't actually call.
             ""
         }
+        val toolListSubAgentBullet = if (multiAgentSettings.enabled.value) {
+            val pool = multiAgentSettings.selectedModelEntryIds.value
+            val names = if (pool.isEmpty()) {
+                "the main session model"
+            } else {
+                val cfg = providerRepository.config.value
+                pool.map { id ->
+                    cfg.modelEntries.find { it.id == id }?.model?.displayName ?: id
+                }.joinToString(", ")
+            }
+            val cap = multiAgentSettings.maxConcurrent.value
+            "\n- run_subagent: Dispatch a teammate. You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Each prompt MUST be self-contained (goal, workspace paths, relevant files, constraints, acceptance criteria) because sub-agents cannot see this conversation. Note the member role and skills to read. Independent work: emit multiple run_subagent calls in ONE turn (they run in parallel, cap=" + cap + "). Dependent phases: finish and accept before starting the next. After a teammate returns, verify against acceptance criteria; if it fails, name the gap and re-dispatch. Each member may only change their assigned files. Team models: " + names + ". Settings: minis://settings/multi-agent"
+        } else {
+            ""
+        }
         val memorySystemSection = if (memoryOn) {
             """
 
@@ -10126,7 +10183,7 @@ Available tools:
 - file_write: Create new files or overwrite existing files (faster than echo/tee).
 - file_edit: Edit existing files with exact string replacement (old_string → new_string). Preferred over file_write for modifications — always file_read first.
 - browser_use: Web browsing (navigate, screenshot, click, type, get_text, scroll, scroll_and_collect, get_readable, get_backbone, fetch, etc.). Starts with a desktop Chrome user agent. Use screenshot to see the page.
-  当 browser_use 触达 Google 登录 / OAuth 页（accounts.google.com、signin.google.com、myaccount.google.com、oauth2.googleapis.com 等）或网页返回 "disallowed_useragent" / 403 包含 "browser is not secure" 字样时，**不要重试或尝试登录** — Google 永久禁止 in-app WebView 完成登录，重试只会浪费 turn。改为告诉用户："此页面需要在系统 Chrome 完成登录" 并给出可点击的 Markdown link [在 Chrome 中打开](https://accounts.google.com/...)。点该 link 时 app 会跳出 Custom Tab；用户在 Chrome 完成操作后，请他**把所需结果（邮件正文 / 文档摘要 / 表格数据）粘贴回 chat**，你再继续帮他处理。这是 Android 平台限制，不是 bug。${toolListMemoryBullets}
+  当 browser_use 触达 Google 登录 / OAuth 页（accounts.google.com、signin.google.com、myaccount.google.com、oauth2.googleapis.com 等）或网页返回 "disallowed_useragent" / 403 包含 "browser is not secure" 字样时，**不要重试或尝试登录** — Google 永久禁止 in-app WebView 完成登录，重试只会浪费 turn。改为告诉用户："此页面需要在系统 Chrome 完成登录" 并给出可点击的 Markdown link [在 Chrome 中打开](https://accounts.google.com/...)。点该 link 时 app 会跳出 Custom Tab；用户在 Chrome 完成操作后，请他**把所需结果（邮件正文 / 文档摘要 / 表格数据）粘贴回 chat**，你再继续帮他处理。这是 Android 平台限制，不是 bug。${toolListMemoryBullets}${toolListSubAgentBullet}
 
 Shared directory /var/minis/ (bidirectional read/write between shell and app):
   /var/minis/attachments/ — Media files (images, audio, video). Display inline with ![desc](minis://attachments/filename).
@@ -12338,6 +12395,82 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             .replace("\\/", "/")
             .replace("\\\\", "\\")
 
+    private suspend fun executeRunSubAgent(argsJson: String): ToolExecutionResult {
+        if (!multiAgentSettings.enabled.value) {
+            return ToolExecutionResult("Multi-agent dispatch is disabled in Settings → Multi-agent.", false)
+        }
+        if (subAgentDepth.get() > 0) {
+            return ToolExecutionResult("Error: sub-agents cannot spawn further sub-agents.", false)
+        }
+        val args = try { JSONObject(argsJson) } catch (_: Exception) {
+            return ToolExecutionResult("Error: invalid run_subagent arguments", false)
+        }
+        val prompt = args.optString("prompt", "").trim()
+        if (prompt.isEmpty()) {
+            return ToolExecutionResult("Error: prompt is required for run_subagent", false)
+        }
+        val role = args.optString("role", "").trim().ifEmpty { null }
+        val skills = args.optString("skills", "").trim().ifEmpty { null }
+        val requested = args.optString("model", "").trim().ifEmpty { null }
+        val title = args.optString("tool_title", "").trim()
+        val pool = multiAgentSettings.selectedModelEntryIds.value
+        val pickedId = MultiAgentSettings.pickModelId(pool, requested, subAgentRoundRobin.getAndIncrement())
+        val config = providerRepository.config.value
+        val entry = when {
+            pickedId != null -> config.modelEntries.find {
+                it.id == pickedId ||
+                    it.model.id.equals(pickedId, ignoreCase = true) ||
+                    it.model.displayName.equals(pickedId, ignoreCase = true)
+            }
+            else -> _activeEntryId.value?.let { id -> config.modelEntries.find { it.id == id } }
+        } ?: return ToolExecutionResult(
+            "No model available for sub-agent. Select models under Settings → Multi-agent, or keep the main session model selected.",
+            false,
+        )
+        val provider = providerForModelEntry(entry)
+            ?: return ToolExecutionResult("Failed to create provider for ${entry.model.displayName}", false)
+        subAgentDepth.incrementAndGet()
+        return try {
+            SubAgentRunner.run(
+                provider = provider,
+                modelDisplayName = entry.model.displayName,
+                userPrompt = prompt,
+                role = role,
+                skillsHint = skills,
+                tools = AgentTools.makeAgentTools(
+                    supportsImageInput = entry.model.hasImageInput,
+                    visionGroupConfigured = false,
+                    memoryEnabled = false,
+                    subAgentEnabled = false,
+                ),
+                maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 8192),
+                executeTool = { name, json ->
+                    executeTool(name, json, "", mutableListOf(), "", "")
+                },
+            ).copy(toolTitle = title.ifEmpty { "Sub-agent · ${entry.model.displayName}" })
+        } finally {
+            subAgentDepth.decrementAndGet()
+        }
+    }
+
+    private fun providerForModelEntry(entry: ModelEntry): LLMProvider? {
+        val instance = providerRepository.instance(entry.providerInstanceId) ?: return null
+        var apiKey = providerRepository.usableApiKey(instance) ?: return null
+        if (instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth) {
+            try {
+                val manager = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
+                val freshToken = kotlinx.coroutines.runBlocking { manager?.validAccessToken() }
+                if (freshToken != null && freshToken != apiKey) {
+                    providerRepository.saveApiKey(instance.id, freshToken)
+                    apiKey = freshToken
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Sub-agent OAuth refresh failed: ${e.message}")
+            }
+        }
+        return ProviderFactory.create(instance, apiKey, entry.model, context)
+    }
+
     /**
      * Humanize a snake_case tool name into a Title-Case label for pill headers
      * while the model's own `tool_title` arg has not yet streamed in.
@@ -12353,6 +12486,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         "memory_write" -> "Write Memory"
         "memory_get" -> "Read Memory"
         "web_search" -> "Search Web"
+        "run_subagent" -> "Sub-agent"
         else -> toolName
             .split('_')
             .filter { it.isNotEmpty() }

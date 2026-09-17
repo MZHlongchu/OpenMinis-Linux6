@@ -1136,16 +1136,16 @@ class SkillRepository(private val context: Context) {
     // -- Bundled Skills --
 
     private fun installBundledSkills() {
-        val bundledId = "skill-creator"
-        val bundledVersion = "2.0.0"
-        val existing = _skills.value.find { it.id == bundledId }
+        installOrUpgradeBundled("skill-creator", "2.0.0", SKILL_CREATOR_CONTENT)
+        installOrUpgradeBundled("android-sdk-mirrors", "1.0.0", ANDROID_SDK_MIRRORS_CONTENT)
+    }
 
-        // Skip if local version is same or newer
+    private fun installOrUpgradeBundled(bundledId: String, bundledVersion: String, content: String) {
+        val existing = _skills.value.find { it.id == bundledId }
         if (existing != null && existing.version >= bundledVersion) return
 
-        val parsed = parseSkillMd(SKILL_CREATOR_CONTENT) ?: return
+        val parsed = parseSkillMd(content) ?: return
         if (existing != null) {
-            // Upgrade existing
             val updated = existing.copy(
                 description = parsed.description,
                 version = bundledVersion,
@@ -1160,11 +1160,11 @@ class SkillRepository(private val context: Context) {
             _skills.value = _skills.value.map { if (it.id == bundledId) updated else it }
             Log.i(TAG, "Upgraded bundled skill: $bundledId → v$bundledVersion")
         } else {
-            // Fresh install
             add(
                 name = parsed.name,
                 description = parsed.description,
                 body = parsed.body,
+                version = bundledVersion,
                 source = ImportSource.BUNDLED,
             )
             Log.i(TAG, "Installed bundled skill: $bundledId (v$bundledVersion)")
@@ -1668,4 +1668,110 @@ Skills use three loading levels:
 ### What NOT to Include
 
 Do not create extraneous files: README.md, INSTALLATION_GUIDE.md, CHANGELOG.md, etc. The skill should only contain what an AI agent needs to do the job.
+""".trimIndent()
+
+private val ANDROID_SDK_MIRRORS_CONTENT = """
+---
+name: android-sdk-mirrors
+version: 1.0.0
+description: Android SDK 在中国大陆的下载、镜像源与 aarch64 aapt2 注意事项。当用户需要安装 Android SDK、sdkmanager、build-tools、platforms，或遇到 Google dl.google.com 无法访问、aapt2 被 x86_64 覆盖时使用本技能。
+---
+
+# Android SDK（中国大陆网络）
+
+本技能面向 **Minis Ultra** 的 Ubuntu 24.04 arm64 PRoot 客户机，以及在中国大陆编译本仓库 APK 的开发者。
+
+## 先用内置工具，不要重装整套 Google SDK
+
+客户机里已经有：
+
+- `minis-android-sdk-setup`：解压 APK 内置的 **aarch64 aapt2 / zipalign / adb**，以及精简版 Java `sdkmanager`
+- SDK 根目录默认 `/opt/android-sdk`
+- `sdkmanager` **只用来拉** `platforms;android-35`（android.jar）
+
+```
+minis-android-sdk-setup
+echo "${'$'}ANDROID_SDK_ROOT"
+ls /opt/android-sdk/build-tools
+```
+
+## 严禁安装 Google 的 linux build-tools
+
+Google cmdline-tools 里的 `build-tools;<version>` 是 **linux x86_64** 包。
+
+在 aarch64 客户机上执行：
+
+```
+sdkmanager "build-tools;35.0.0"
+```
+
+会把 `/opt/android-sdk/build-tools/.../aapt2` **覆盖成 x86_64 ELF**，之后所有 Android 资源编译直接失败。
+
+**正确做法：**
+
+- 继续用 APK 捆绑的 aarch64 `android-sdk-tools-aarch64.zip`
+- 需要新版 aapt2 时，从 [lzhiyong/android-sdk-tools](https://github.com/lzhiyong/android-sdk-tools/releases) 下载 **aarch64** 包
+- 不要用 `sdkmanager "build-tools;…"`，也不要解压 Google 的 `build-tools_r*-linux.zip`
+
+`platform-tools` 同样以 x86_64 为主，客户机请用捆绑的 aarch64 `adb`。
+
+## 中国大陆访问 Google 仓库
+
+`https://dl.google.com/android/repository/` 在境内经常超时或被重置。优先走镜像。
+
+### 内置镜像（按可用性尝试）
+
+| 镜像 | repository 根 |
+|---|---|
+| 腾讯云 | https://mirrors.cloud.tencent.com/android/repository/ |
+| 清华 TUNA | https://mirrors.tuna.tsinghua.edu.cn/android/repository/ |
+| 中科大 USTC | https://mirrors.ustc.edu.cn/android/repository/ |
+| 华为云 | https://mirrors.huaweicloud.com/repository/android/repository/ |
+| 阿里云（文档入口） | https://developer.aliyun.com/mirror/ |
+
+仓库内开发机 / CI 若直连 `dl.google.com` 失败，把 URL 里的 host 换成上表对应路径即可，例如：
+
+```
+# Google 原址
+https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+https://dl.google.com/android/repository/platform-35_r02.zip
+
+# 腾讯云镜像示例
+https://mirrors.cloud.tencent.com/android/repository/commandlinetools-linux-11076708_latest.zip
+```
+
+客户机里给 sdkmanager 指定镜像（不同版本参数略有差异，先 `--help`）：
+
+```
+export SDK_MIRROR=https://mirrors.cloud.tencent.com/android/repository
+sdkmanager --sdk_root="${'$'}{ANDROID_SDK_ROOT:-/opt/android-sdk}" \
+  --no_https \
+  "platforms;android-35"
+```
+
+若 sdkmanager 仍打到 google：先用 `curl -I` 从镜像拉 zip，再手动解压到 `${'$'}ANDROID_SDK_ROOT/platforms/android-35`。
+
+## 如何自己找镜像
+
+1. 打开高校镜像站首页，搜索 `android` / `android-sdk` / `google android`
+2. 常用入口：
+   - https://mirrors.tuna.tsinghua.edu.cn/help/android-sdk/
+   - https://mirrors.cloud.tencent.com/help/android-sdk.html
+   - https://mirrors.ustc.edu.cn/help/android-sdk.html
+3. 用浏览器或 `curl -I` 探测 `…/android/repository/repository2-1.xml` 是否 200
+4. 镜像滞后时对照 Google 的 `repository2-1.xml` 文件名，不要混用不同日期的 platform zip
+5. GitHub Release（如 lzhiyong/android-sdk-tools）可用 ghproxy 等加速；不要把它们当成 Google SDK 仓库
+
+## 本仓库云构建注意
+
+- `ubuntu-base.tar.gz` 太大，不进 git；CI 必须现拉
+- 不要 vendor 完整 Google cmdline-tools（约 146MB）；只要精简 sdkmanager
+- NDK / CMake / platforms 在 **x86_64 的 GitHub-hosted runner** 上用官方 sdkmanager 安装是安全的（那是编译主机，不是 aarch64 客户机）
+- 客户机里永远不要装 Google linux build-tools
+
+## 验收
+
+- `file $(which aapt2)` 或 `file /opt/android-sdk/build-tools/*/aapt2` 必须是 **ARM aarch64**，不是 x86-64
+- `aapt2 version` 能运行
+- 只有在镜像或直连成功后才去拉 `android.jar` / platforms
 """.trimIndent()
