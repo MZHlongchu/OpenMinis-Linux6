@@ -12,3 +12,7 @@
 4. **修复 1.20-linux 构建** — crash_handler 不再链 NDK 主机 `libunwind.so`；固定 NDK r28 + aarch64 `libunwind.a`，并用 `-Wl,--no-dependent-libraries` 避开 Bionic 没有的 `libpthread`。
 
 安装：允许「安装未知应用」。可与官方 OpenMinis 并排安装。
+
+完整 changelog（含历史版本）：[docs/RELEASE-NOTES.zh.md](https://github.com/tall-1997/OpenMinis-Linux/blob/main/docs/RELEASE-NOTES.zh.md)
+
+滚动构建（main）：[`android-latest`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest)

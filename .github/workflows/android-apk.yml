@@ -198,6 +198,26 @@ jobs:
             - versionCode: ${{ steps.appver.outputs.code }}
             - signing: see docs/SIGNING.md
 
+      - name: Select versioned release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        id: notes
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          SHORT="${TAG%-linux}"
+          OUT="${RUNNER_TEMP}/RELEASE-BODY.md"
+          for f in "docs/github-release-${TAG}.md" "docs/github-release-${SHORT}.md"; do
+            if [ -f "$f" ]; then
+              cp "$f" "$OUT"
+              echo "path=$OUT" >> "$GITHUB_OUTPUT"
+              echo "release body: $f"
+              exit 0
+            fi
+          done
+          # RELEASE-NOTES.zh.md is the full changelog; never paste it wholesale.
+          awk 'BEGIN{p=1} /^---[[:space:]]*$/{exit} {print}' docs/RELEASE-NOTES.zh.md > "$OUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+          echo "release body: first section of docs/RELEASE-NOTES.zh.md"
+
       - name: Publish versioned release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -205,4 +225,4 @@ jobs:
           generate_release_notes: false
           prerelease: false
           files: dist/*
-          body_path: docs/RELEASE-NOTES.zh.md
+          body_path: ${{ steps.notes.outputs.path }}
