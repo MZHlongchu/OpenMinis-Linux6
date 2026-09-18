@@ -1,6 +1,6 @@
 # OpenMinis-Linux 对照路线图
 
-对照对象：Operit、Operit2、Eta、shiyi-agent、OmniBot。原则：**吸收产品能力，不复制其源码**；不引入 Xposed/LSPosed 系统注入；不捆绑 Shizuku APK；不在 APK 内塞本地 LLM 权重。
+对照对象：Operit、Operit2、Eta、shiyi-agent、OmniBot、[metano](https://github.com/qqzijin/metano)。原则：**吸收产品能力，不复制其源码**；不引入 Xposed/LSPosed 系统注入；不捆绑 Shizuku APK；不在 APK 内塞本地 LLM 权重。进化层专文见 [METANO-EVOLUTION.md](METANO-EVOLUTION.md)。
 
 ---
 
@@ -28,6 +28,7 @@
 | 无障碍场景录制 | OmniBot | 1.15：用户录制成 skill，无预置黑产脚本 |
 | 国内镜像 | 国内使用场景 | SDK / 下载镜像 |
 | 滚动预发布 APK | 自身 CI | `android-latest`；tag `v*` 出正式版说明 |
+| 原生进化层 LEARNED.md | metano 闭环 | 1.25：提案审批、Be-ACTIVE、闲时收割、技能补丁、信念衰减/周反思/场景注入；默认关。见 [METANO-EVOLUTION.md](METANO-EVOLUTION.md) |
 
 ---
 
@@ -45,6 +46,8 @@
 | APK 内捆绑 Shizuku 或 Magisk 模块 | 许可与分发风险；用户应自行从官方渠道装 |
 | 设备端 MNN / llama 权重打进包 | 体积爆炸、电量与发热、与云端模型产品定位冲突 |
 | 复制 Operit / Operit2 源码或技能包 | LGPL / AGPL 会污染本仓库许可 |
+| vendor metano 源码 / FastAPI 面板 / 消息网关进 APK | 那是 Claude Code 常驻网关，不是手机 Agent；进化层只吸收闭环，见 [METANO-EVOLUTION.md](METANO-EVOLUTION.md) |
+| 进化进程自改 APK / Kotlin | 等于关掉验证门；PRoot 只允许改客户文件 |
 | 静默无障碍连点、抢红包、刷量 | 恶意软件形态，拒绝 |
 | 读取短信/通话记录/通知内容默认全开 | 隐私越权；除非用户当轮明确要求且已授权 |
 | Google 结果页爬虫 | ToS；用 DDG / 自建 SearXNG 即可 |
@@ -59,3 +62,4 @@
 - **Eta**：深度系统改机（LSPosed），我们不走。
 - **shiyi-agent**：工程向长任务；我们用 spill / 沙箱对齐其「别卡死」而不是对齐其全部工具链。
 - **OmniBot**：无障碍 GUI 机器人；我们有 a11y，但不当成默认人格。
+- **metano**：Claude Code 的 Python 进化网关；我们只把 Observe→Act 做成 Kotlin 提案层，不搬其进程。见 [METANO-EVOLUTION.md](METANO-EVOLUTION.md)。

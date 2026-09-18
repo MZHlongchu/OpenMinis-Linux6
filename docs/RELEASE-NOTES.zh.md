@@ -1,3 +1,47 @@
+# OpenMinis-Linux 1.25-linux
+
+- versionCode **37**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a；有 `MINIS_UPLOAD_*` 则用上传证书，否则仍为 debug-signed）
+- 签名说明：[docs/SIGNING.md](SIGNING.md)；一键编译：`scripts/build_apk_aarch64.sh`
+
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本。
+
+## 本版
+
+原生 Kotlin **进化层**（对照 [metano](https://github.com/qqzijin/metano) 的 Observe→提案→审批闭环，**不 vendor** 其 Python 运行时 / FastAPI / 消息网关）。入口在设置 → 进化，**默认关闭**。打开后也只生成待审提案；用户批准前不改系统提示。永远不写 `SOUL.md` / `GLOBAL.md`。设计见 [METANO-EVOLUTION.md](METANO-EVOLUTION.md)。
+
+### P1 提案脊柱
+
+1. **骨架**  
+   `Proposal`（学习规则 / 技能补丁 / 撤回）+ 设置页批准 / 拒绝 / 推迟 / 回滚。批准的规则写入 `minis-global/memory/LEARNED.md` 标记区（`<!-- LEARNED-PREFS-START/END -->`），注入系统提示，上限 12 条 / 2KB。回滚恢复标记区快照。
+
+2. **Be-ACTIVE**  
+   会话正常结束时扫描最近用户句：`不对` / `错了` / `不要再` / `必须` / `记住` / `don't` / `never` / `remember` 等。命中则生成 **1 条**待审规则，证据带原句。不当场改 prompt。
+
+3. **闲时收割**  
+   充电（或电量状态未知）且距上次收割 ≥30 分钟，最多扫 12 个会话、处理 3 个。同一信念至少命中 2 次才升级成提案。输入截断，禁止全文 Matcher。含「任务 / 调研 / 继续 / TODO」等任务日记用词的用户句跳过，避免把待办当成偏好。
+
+4. **技能补丁**  
+   同一 skill 路径连续工具失败 3 次才提案，补丁是 SKILL.md 追加而不是整份重写。内置 bundled 技能不改原文件，改写落到 LEARNED（「使用该技能时：…」）。
+
+LLM 提炼日额度 8 次；连续失败 3 次熔断，改用启发式原文。
+
+### P2 信念、周反思、场景
+
+5. **信念生命周期**  
+   `draft → established → core`。近义摘要合并（token 重叠）。21 天未命中变陈旧，42 天衰减。Core 只在用户批准「撤回」后降级。注入超额时先留 `[core]`，再留较新条目。
+
+6. **周反思**  
+   闲时收割顺带，最多每周一次。对照 LEARNED 与后来用户句：打脸则提案 **撤回**；能抽出不同规则则再提案 **收紧**。42 天未命中的已批准规则提案「撤回闲置」。启发式为空且当日额度未满时，才打一次 LLM 复核。全部待审，不自动落地。
+
+7. **场景 tag**  
+   子弹可带 `[backend]` / `[workflow]` / `[writing]`；无标签规则始终注入。场景由会话分类（如 `code`→backend、`productivity`→workflow）、标题和最近用户原文判定，**不占用** `session.category` 存储字段。设置页预览展示全部场景。
+
+---
+
 # OpenMinis-Linux 1.24-linux
 
 - versionCode **36**

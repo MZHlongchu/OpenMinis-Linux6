@@ -9339,7 +9339,7 @@ class ChatViewModel(
         // bridge, which is now where checkPermission runs.
         val toolTitle = try { JSONObject(argsJson).optString("tool_title", name) } catch (_: Exception) { name }
 
-        return when (name) {
+        val result = when (name) {
             FileReadTool.NAME -> {
                 val result = FileReadTool.execute(argsJson, activeSessionId, context)
                 // Record skill usage when SKILL.md under /var/minis/skills/<id>/ is read.
@@ -9380,6 +9380,12 @@ class ChatViewModel(
             com.openminis.app.tools.AskUserQuestion.NAME, com.openminis.app.tools.AskUserQuestion.ALIAS -> executeAskUserQuestion(argsJson)
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
+        if (!result.success) {
+            com.openminis.app.evolution.EvolutionHooks.onToolFailure(
+                activeSessionId, name, argsJson, result.output,
+            )
+        }
+        return result
     }
 
     /**
@@ -10459,6 +10465,14 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         // to the memory feature.
         val globalMemoryFragment = if (memoryOn) memoryRepository?.loadGlobalMemoryFragment() else null
         val dailyMemoryFragment = if (memoryOn) memoryRepository?.loadRecentDailyMemoryFragment() else null
+        // Standing, user-approved evolution rules. Not gated by memoryOn (same as SOUL.md).
+        val learnedSample = _messages.value.lastOrNull { it.role == "user" }?.content
+        val learnedScene = com.openminis.app.evolution.SceneClassifier.classify(
+            _sessionCategory.value,
+            _sessionTitle.value,
+            learnedSample,
+        )
+        val learnedPrefsFragment = memoryRepository?.loadLearnedPrefsFragment(learnedScene)
         // [XSessionDiag] Hypothesis 3: ties the memory-injection sizes to a
         // SESSION id. MemoryRepository itself has no session context, so its own
         // `memory/daily-inject` line (which names the source files) cannot say who
@@ -10489,6 +10503,10 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             if (dailyMemoryFragment != null) {
                 append("\n\n")
                 append(dailyMemoryFragment)
+            }
+            if (learnedPrefsFragment != null) {
+                append("\n\n")
+                append(learnedPrefsFragment)
             }
             // Runtime context goes last so the prefix above stays byte-stable
             // across requests within the same day. Keep ordering deterministic

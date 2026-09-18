@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.BatteryFull
 import androidx.compose.material.icons.outlined.BugReport
@@ -93,6 +94,7 @@ fun SettingsScreen(
     // Agent Runtime section; default no-op for callers that haven't wired
     // the route yet.
     onSoulClick: () -> Unit = {},
+    onEvolutionClick: () -> Unit = {},
     onPermissionsClick: () -> Unit = {},
     onUsageClick: () -> Unit = {},
     onAppearanceClick: () -> Unit = {},
@@ -211,6 +213,13 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_memory),
                     subtitle = stringResource(R.string.settings_memory_subtitle),
                     onClick = onMemoryClick,
+                )
+                SettingsItem(
+                    icon = Icons.Outlined.Bolt,
+                    iconColor = Color(0xFFAF52DE),
+                    title = stringResource(R.string.settings_evolution),
+                    subtitle = stringResource(R.string.settings_evolution_subtitle),
+                    onClick = onEvolutionClick,
                 )
                 // [T-mcp-integration-android] MCP Integrations — directly below Memory.
                 // [T-android-mcp-icon-distinct] Dashboard (2x2 block grid) instead of

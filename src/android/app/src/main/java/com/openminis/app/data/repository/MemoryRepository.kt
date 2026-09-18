@@ -1,6 +1,9 @@
 package com.openminis.app.data.repository
 
 import android.util.Log
+import com.openminis.app.evolution.LearnedPrefsStore
+import com.openminis.app.evolution.SceneTag
+import com.openminis.app.text.BoundedText
 import com.openminis.app.logging.AppLogger
 import java.io.File
 import com.openminis.app.util.IsoTime
@@ -15,6 +18,8 @@ import com.openminis.app.util.IsoTime
  *     two separate text blocks for the system prompt (mirrors iOS exactly)
  */
 class MemoryRepository(private val memoryDir: File) {
+
+    val learnedPrefs = LearnedPrefsStore(File(memoryDir, LearnedPrefsStore.FILE_NAME))
 
     companion object {
         private const val TAG = "MemoryRepository"
@@ -37,10 +42,15 @@ class MemoryRepository(private val memoryDir: File) {
          * log tag — nothing branches on it, and both languages are listed because
          * the reported incidents were Chinese-language sessions.
          */
-        private val DIAG_TASK_KEYWORDS = listOf(
+        val DIAG_TASK_KEYWORDS = listOf(
             "任务", "调研", "继续", "接着", "未完成", "下一步",
             "task", "continue", "resume", "TODO",
         )
+
+        fun looksLikeTaskDiary(text: String): Boolean {
+            val window = BoundedText.icuWindow(text).toString()
+            return DIAG_TASK_KEYWORDS.any { window.contains(it, ignoreCase = true) }
+        }
         // [T-memory-get-truncate-android] Hard byte ceiling on memory_get
         // output. Line caps alone (MAX_DUMP_LINES / MAX_SEARCH_LINES) don't
         // bound bandwidth when a single matched line is itself huge — TG
@@ -110,7 +120,7 @@ class MemoryRepository(private val memoryDir: File) {
 
         // Daily logs sorted descending
         val dailyFiles = memoryDir.listFiles()
-            ?.filter { it.extension == "md" && it.name != GLOBAL_FILE }
+            ?.filter { it.extension == "md" && it.name != GLOBAL_FILE && it.name != LearnedPrefsStore.FILE_NAME }
             ?.sortedByDescending { it.name }
             ?: emptyList()
 
@@ -263,6 +273,13 @@ class MemoryRepository(private val memoryDir: File) {
     }
 
     /**
+     * User-approved evolution rules. Not gated by the session memory toggle —
+     * they are standing instructions, like SOUL.md. Never writes SOUL.md/GLOBAL.md.
+     */
+    fun loadLearnedPrefsFragment(scene: SceneTag = SceneTag.GENERAL): String? =
+        learnedPrefs.promptFragment(scene)
+
+    /**
      * Loads up to 3 most recent non-empty daily logs (within a 30-day window)
      * for system-prompt injection. Mirrors iOS
      * `AIChatViewModel.loadRecentDailyMemoryFragment()` exactly: same header,
@@ -363,7 +380,7 @@ class MemoryRepository(private val memoryDir: File) {
 
         // Daily logs sorted descending
         val dailyFiles = memoryDir.listFiles()
-            ?.filter { it.extension == "md" && it.name != GLOBAL_FILE }
+            ?.filter { it.extension == "md" && it.name != GLOBAL_FILE && it.name != LearnedPrefsStore.FILE_NAME }
             ?.sortedByDescending { it.name }
             ?: emptyList()
 
@@ -396,11 +413,13 @@ class MemoryRepository(private val memoryDir: File) {
     }
 
     fun saveFile(name: String, content: String) {
+        if (name == LearnedPrefsStore.FILE_NAME) return
         File(memoryDir, name).writeText(content)
     }
 
     fun deleteFile(name: String): Boolean {
         if (name == GLOBAL_FILE) return false // Cannot delete GLOBAL.md
+        if (name == LearnedPrefsStore.FILE_NAME) return false
         return File(memoryDir, name).delete()
     }
 

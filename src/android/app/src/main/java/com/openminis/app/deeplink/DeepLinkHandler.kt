@@ -179,6 +179,7 @@ object DeepLinkHandler {
             "skills" -> DeepLinkAction.OpenSettingsScreen(Routes.SKILLS)
             "multi-agent", "multi_agent", "subagents" -> DeepLinkAction.OpenSettingsScreen(Routes.MULTI_AGENT)
             "memory" -> DeepLinkAction.OpenSettingsScreen(Routes.MEMORY)
+            "evolution" -> DeepLinkAction.OpenSettingsScreen(Routes.EVOLUTION)
             "storage" -> DeepLinkAction.OpenSettingsScreen(Routes.STORAGE)
             "mount-external", "mount_external", "mounts", "mounted-folders", "mounted_folders" ->
                 DeepLinkAction.OpenSettingsScreen(Routes.MOUNTED_FOLDERS)

@@ -42,6 +42,8 @@ class SkillRepository(private val context: Context) {
 
     companion object {
         private const val TAG = "SkillRepository"
+        private const val LEARNED_SKILL_START = "<!-- LEARNED-SKILL-START -->"
+        private const val LEARNED_SKILL_END = "<!-- LEARNED-SKILL-END -->"
         private const val DB_NAME = "skills.db"
         private const val DB_VERSION = 3
         private const val MAX_SKILLS_IN_PROMPT = 20
@@ -178,6 +180,28 @@ class SkillRepository(private val context: Context) {
         writeSkillMd(updated)
         _skills.value = _skills.value.map { if (it.id == id) updated else it }
         return true
+    }
+
+    /**
+     * Append or replace the machine-managed learned section on a **user** skill.
+     * Bundled skills must not be mutated — callers should fall back to LEARNED.md.
+     */
+    fun appendLearnedSection(id: String, section: String): Boolean {
+        val current = _skills.value.find { it.id == id } ?: return false
+        if (current.importSource == ImportSource.BUNDLED) return false
+        val addition = section.trim()
+        if (addition.isBlank()) return false
+        val start = LEARNED_SKILL_START
+        val end = LEARNED_SKILL_END
+        val newBody = if (current.body.contains(start) && current.body.contains(end)) {
+            val i = current.body.indexOf(start)
+            val j = current.body.indexOf(end)
+            if (j <= i) return false
+            current.body.substring(0, i + start.length) + "\n" + addition + "\n" + current.body.substring(j)
+        } else {
+            current.body.trimEnd() + "\n\n## Learned adjustments\n$start\n$addition\n$end\n"
+        }
+        return update(id, body = newBody)
     }
 
     fun delete(id: String) {

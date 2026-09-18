@@ -301,6 +301,25 @@
     <!-- T-soul-md — SOUL.md personality / identity settings -->
     <string name="settings_soul">Soul</string>
     <string name="settings_soul_subtitle">Persistent personality and identity (SOUL.md)</string>
+    <string name="settings_evolution">Evolution</string>
+    <string name="settings_evolution_subtitle">Learn preferences from corrections (off by default)</string>
+    <string name="evolution_title">Evolution</string>
+    <string name="evolution_section_master">Learning</string>
+    <string name="evolution_enable_title">Enable evolution</string>
+    <string name="evolution_enable_subtitle">Propose standing rules after corrections. Never writes SOUL.md or GLOBAL.md.</string>
+    <string name="evolution_enable_footer">Off by default. Proposals need your approval before they enter LEARNED.md or a user skill. Bundled skills are never edited.</string>
+    <string name="evolution_pending_header">Pending proposals</string>
+    <string name="evolution_accepted_header">Accepted</string>
+    <string name="evolution_empty_pending">No pending proposals.</string>
+    <string name="evolution_accept">Accept</string>
+    <string name="evolution_reject">Reject</string>
+    <string name="evolution_defer">Later</string>
+    <string name="evolution_rollback">Roll back</string>
+    <string name="evolution_type_rule">Learned rule</string>
+    <string name="evolution_type_skill">Skill patch</string>
+    <string name="evolution_type_retract">Retract rule</string>
+    <string name="evolution_learned_preview">LEARNED.md preview</string>
+    <string name="evolution_unavailable">Evolution is unavailable in this session.</string>
     <string name="soul_settings_title">Soul</string>
     <string name="soul_section_preview">Preview</string>
     <string name="soul_section_identity">Identity</string>

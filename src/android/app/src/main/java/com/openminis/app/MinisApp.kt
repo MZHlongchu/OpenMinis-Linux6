@@ -28,6 +28,8 @@ import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.data.repository.WebAppShortcutRepository
 import com.openminis.app.data.repository.MCPRepository
 import com.openminis.app.data.repository.SkillRepository
+import com.openminis.app.evolution.EvolutionEngine
+import com.openminis.app.evolution.EvolutionHooks
 import com.openminis.app.notification.BackgroundTaskNotifier
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.network.NetworkMonitor
@@ -167,6 +169,8 @@ class MinisApp : Application(), ImageLoaderFactory {
     lateinit var mcpRepository: MCPRepository
         private set
     lateinit var memoryRepository: MemoryRepository
+        private set
+    var evolutionEngine: EvolutionEngine? = null
         private set
     lateinit var webAppShortcutRepository: WebAppShortcutRepository
         private set
@@ -446,6 +450,17 @@ class MinisApp : Application(), ImageLoaderFactory {
         skillRepository = SkillRepository(this)
         mcpRepository = MCPRepository(this)
         memoryRepository = MemoryRepository(java.io.File(filesDir, "minis-global/memory"))
+        evolutionEngine = runCatching {
+            EvolutionEngine(
+                context = this,
+                memoryRepository = memoryRepository,
+                evolutionDir = java.io.File(filesDir, "minis-global/evolution"),
+                chatRepository = chatRepository,
+                providerRepository = providerRepository,
+                skillRepository = skillRepository,
+            )
+        }.onFailure { Log.e("MinisApp", "evolution init failed", it) }.getOrNull()
+        EvolutionHooks.engine = evolutionEngine
         webAppShortcutRepository = WebAppShortcutRepository(database.webAppShortcutDao())
 
         // T-android-safemode-lateinit-crash: every repository the UI layer
@@ -685,6 +700,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         )
         SessionActivityTracker.setCompletionListener { sessionId, isError ->
             backgroundTaskNotifier.notifyTaskCompleted(sessionId, isError)
+            EvolutionHooks.onSessionFinished(sessionId, isError)
         }
 
         // [T-android-config-confirm-timeout] Wire the config-confirm background
@@ -767,6 +783,7 @@ class MinisApp : Application(), ImageLoaderFactory {
                     // while a config-confirm dialog may still be showing — nudge
                     // them so they can come back before the 120s timeout.
                     com.openminis.app.config.confirm.ConfigConfirmationGate.notifyPending()
+                    EvolutionHooks.maybeHarvestIdle()
                 }
             }
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}

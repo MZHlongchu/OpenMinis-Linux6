@@ -38,6 +38,8 @@ class ChatRepository(internal val dao: ChatDao) {
 
     suspend fun getSession(id: String): ChatSessionEntity? = dao.getSession(id)
 
+    suspend fun listSessions(): List<ChatSessionEntity> = dao.listSessions()
+
     /** All persisted token_usage JSON strings for a session (one per LLM call). */
     suspend fun sessionTokenUsages(sessionId: String): List<String> = dao.tokenUsages(sessionId)
 
