@@ -17,6 +17,7 @@ import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
 import com.openminis.app.util.IsoTime
 import java.util.Date
+import java.util.Locale
 import java.util.UUID
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
