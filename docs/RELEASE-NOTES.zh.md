@@ -1,43 +1,39 @@
-# OpenMinis-Linux 1.14-linux
+# OpenMinis-Linux 1.15-linux
 
-`versionCode` 26 · `applicationId` `com.openminis.linux` · 启动器名 **Minis Ultra**
+- versionCode **27**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
 
-对照 Operit / Operit2 / Eta / shiyi-agent / OmniBot 后，本版落地的是**不抄代码、不越权注入、立刻能用**的能力。许可证：不移植 Operit（LGPL）与 Operit2（AGPL）源码。
+## 本版新能力
 
-## 本版新功能
+1. **子 Agent 实时状态条**  
+   多个 `run_subagent` 并行时，聊天页顶栏下方显示 running / done / fail 胶囊。
 
-### 1. `web_search` 联网搜索（无 API Key）
-浮窗文案里早就有 Search，但 Agent 工具表没有这个工具。现在模型可以直接搜索（DuckDuckGo HTML），返回标题 / 链接 / 摘要。查资料优先用搜索，只有需要点页面时才 `browser_use`。
+2. **可配置网络搜索**  
+   设置 → 网络搜索：DuckDuckGo（默认、无密钥）、SearXNG 实例、Bing Web Search API。失败可回退 DDG，仍空则提示用 `browser_use` 打开具体网址。
 
-### 2. 超长工具输出外溢到工作区
-`shell_execute` 等工具一旦吐出超过约 16KB 的文本，不再整段塞进模型上下文（这是聊天卡死、上下文爆掉的常见原因）。全文写入：
+3. **对话卡片模板**  
+   分享前可选深色 / 浅色 / 纸张、隐藏工具输出、长对话分页成多张图。
 
-`/var/minis/workspace/tool-spill/<toolId>.txt`
+4. **浮窗迷你对话**  
+   后台胶囊可展开输入框，把消息注入当前会话（运行中则排队），不必先点回 App。
 
-模型会看到头尾预览，并可用 `file_read` 续读。
+5. **技能订阅源**  
+   技能页可订阅 SKILL.md URL 或 `{ "skills":[{ "url", "sha256" }] }` 目录；可选 SHA-256 校验；启动后自动更新。这是完整性校验，不是 PKI 签名。
 
-### 3. 后台浮窗：运行中可停止
-以前任务跑着时浮窗没有关闭/停止按钮。现在运行中点胶囊上的按钮会取消当前 Agent 循环并停掉正在跑的命令（与通知栏 Stop 同一条路径）；结束后仍是关闭浮窗。点胶囊本体仍会 `minis://session/<id>` 回到对应会话。
+6. **无障碍场景录制**  
+   技能「+」菜单可把用户点击/输入录成 skill（`android-a11y-cli` 回放）。**不是**预置抢红包脚本。
 
-### 4. 分享对话卡片
-聊天菜单新增「分享对话卡片」：把最近对话渲成一张图片（JPEG），并附带 Markdown 文本，可发到微信 / 相册 / 任意分享目标。
+7. **工具 spill 一键打开**  
+   超长工具输出预览含 `minis://workspace/tool-spill/…` 链接；工具详情页可直接打开完整文件。
 
-### 5. 内置技能 `android-device-ops`
-首次启动写入技能库。教模型按阶梯使用**已经存在**的能力：PRoot → `minis-su-cli` → 用户自备的 Shizuku → 无障碍 → 通知。明确不包含 LSPosed、不捆绑 Shizuku APK。
+## 明确不做
 
-## 此前 Linux fork 已带上、本仓库一并发布的能力
+- 不移植 Operit（LGPL）/ Operit2（AGPL）源码
+- 不引入 LSPosed / 不捆绑 Shizuku APK / 不内置本地 LLM 权重
+- 不预置抢红包等恶意无障碍脚本
+- 正式签名密钥仍待配置（CI 仍为 debug-signed release）
 
-- 国内镜像 / SDK 镜像技能
-- 人设（persona）
-- Host su（`minis-su-cli`）与 Shizuku 后端（需用户自行安装授权）
-- 通知相关能力
-- 计划讨论（Plan discussion）
-- 沙箱门闸
-- About 指向 OpenMinis-Linux
-- rclone 在缺 aar 时的安全降级，避免整包编不过
+## 许可
 
-## 安装注意
-
-- 仅 arm64-v8a
-- 若已安装旧包，直接覆盖安装即可（同 `applicationId`）
-- 首次打开仍需完成 PRoot 根文件系统准备
+本 fork 保持 OpenMinis 原许可证。不要把 Operit / Operit2 源码拷进本仓库。

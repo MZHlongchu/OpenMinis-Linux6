@@ -281,6 +281,7 @@ internal fun ToolDetailSheet(
     onDismiss: () -> Unit,
     onOpenTerminalWithCommand: (String) -> Unit = {},
     onOpenBrowserForUrl: (String) -> Unit = {},
+    onOpenSpillPath: (String) -> Unit = {},
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var currentIdx by remember { mutableStateOf(initialIndex.coerceIn(0, toolBlocks.lastIndex.coerceAtLeast(0))) }
@@ -390,6 +391,28 @@ internal fun ToolDetailSheet(
                     }
                 }
                 val hasBrowserUrl = isBrowserTool && browserActionUrl.isNotEmpty()
+                val spillPath = remember(block.content) {
+                    com.openminis.app.tools.ToolOutputSpill.parseGuestPath(block.content)
+                }
+                if (spillPath != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .background(ChatColors.secondaryBg, CircleShape)
+                            .border(0.5.dp, ChatColors.inputIconBorder, CircleShape)
+                            .clip(CircleShape)
+                            .clickable { onOpenSpillPath(spillPath) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Default.Description,
+                            contentDescription = "Open full output",
+                            tint = ChatColors.primaryText,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
                 Box(
                     modifier = Modifier
                         .size(32.dp)

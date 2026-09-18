@@ -195,6 +195,7 @@ object DeepLinkHandler {
             }
             "appearance" -> DeepLinkAction.OpenSettingsScreen(Routes.APPEARANCE)
             "background" -> DeepLinkAction.OpenSettingsScreen(Routes.BACKGROUND)
+            "search", "web-search", "web_search" -> DeepLinkAction.OpenSettingsScreen(Routes.WEB_SEARCH)
             "about" -> DeepLinkAction.OpenSettingsScreen(Routes.ABOUT)
             "permissions" -> DeepLinkAction.OpenPermissionSettings
             "shizuku" -> DeepLinkAction.OpenSettingsScreen(Routes.SHIZUKU)

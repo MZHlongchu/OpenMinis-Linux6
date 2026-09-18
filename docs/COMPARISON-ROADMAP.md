@@ -4,7 +4,7 @@
 
 ---
 
-## 已实现（含 1.14-linux 及本 fork 已有能力）
+## 已实现（含 1.15-linux 及本 fork 已有能力）
 
 | 能力 | 来源启发 | OpenMinis-Linux 落地 |
 | --- | --- | --- |
@@ -19,26 +19,21 @@
 | Host su | 各 Root 助手 | `minis-su-cli`，设置里显式开关 |
 | Shizuku 后端 | Operit / Eta | 检测并使用**用户已装**的 Shizuku，不随包分发 |
 | 无障碍 GUI 自动化 | OmniBot / Operit | 已有 a11y 服务与修复引导 |
-| 联网搜索 | Operit / shiyi | 1.14：`web_search`（DuckDuckGo，无 Key） |
-| 大输出不炸上下文 | shiyi 长任务 | 1.14：tool-spill 到 workspace |
-| 对话分享为图 | Operit2 分享卡片 | 1.14：聊天菜单「分享对话卡片」 |
+| 联网搜索 | Operit / shiyi | 1.15：可配 DDG / SearXNG / Bing，失败回退 |
+| 大输出不炸上下文 | shiyi 长任务 | 1.14 spill；1.15 UI 打开 spill 文件 |
+| 对话分享为图 | Operit2 分享卡片 | 1.15：深色/浅色/纸张、隐藏工具、分页 |
+| 子 Agent 状态条 | Operit 多 Agent 面板 | 1.15：聊天顶栏胶囊 |
+| 浮窗迷你聊天 | Operit 悬浮窗 | 1.15：胶囊展开输入并注入会话 |
+| 技能订阅 | Eta 远程源 | 1.15：URL/目录 + SHA-256 + 自动更新 |
+| 无障碍场景录制 | OmniBot | 1.15：用户录制成 skill，无预置黑产脚本 |
 | 国内镜像 | 国内使用场景 | SDK / 下载镜像 |
 | 滚动预发布 APK | 自身 CI | `android-latest`；tag `v*` 出正式版说明 |
 
 ---
 
-## 待实现（值得做，但本轮没塞进 1.14）
+## 待实现
 
-按性价比大致排序：
-
-1. **子 Agent 实时状态条** — 多个 `run_subagent` 时在聊天顶栏显示各成员 running/done（Operit 多 Agent 面板的轻量版）。数据已在 tracker 里，缺 UI。
-2. **搜索引擎可配** — 目前写死 DDG HTML；可加 SearXNG / 用户 Bing key，失败自动降级到 `browser_use`。
-3. **对话卡片模板** — 浅色/深色、隐藏工具块、导出长图分页。
-4. **浮窗展开成迷你聊天** — 现在只能回 App；半屏输入框工作量较大。
-5. **技能市场订阅** — Eta 有远程技能源；我们已有导入 URL，缺签名与自动更新。
-6. **无障碍「场景脚本」录制** — OmniBot 强项；应做成用户录制的 skill，而不是预置抢红包一类脚本。
-7. **工具结果在 UI 里一键打开 spill 文件** — 模型已能 `file_read`，用户气泡还没入口。
-8. **正式签名密钥** — CI 仍是 debug-signed release，上架/覆盖旁路包会受影响。
+1. **正式签名密钥** — CI 仍是 debug-signed release，上架/覆盖旁路包会受影响。
 
 ---
 

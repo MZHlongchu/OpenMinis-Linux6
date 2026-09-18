@@ -1,5 +1,6 @@
 package com.openminis.app.tools
 
+import android.content.Context
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.AgentToolParam
 import org.json.JSONObject
@@ -32,7 +33,8 @@ object WebSearchTool {
         description = "Search the public web and return titles, URLs, and snippets. " +
             "Use this for facts, docs, news, and package versions instead of opening a browser. " +
             "Follow up with browser_use only when you need to interact with a specific page. " +
-            "Does not require an API key.",
+            "Uses Settings → Web search (DuckDuckGo by default; optional SearXNG or Bing). " +
+            "Falls back to DuckDuckGo, then suggest browser_use for a specific URL.",
         parameters = mapOf(
             "tool_title" to AgentToolParam(
                 "string",
@@ -45,7 +47,7 @@ object WebSearchTool {
         propertyOrdering = listOf("tool_title", "query", "max_results"),
     )
 
-    fun execute(argsJson: String): ToolExecutionResult {
+    fun execute(argsJson: String, context: Context? = null): ToolExecutionResult {
         return try {
             val args = JSONObject(argsJson)
             val query = args.optString("query", "").trim()
@@ -54,23 +56,111 @@ object WebSearchTool {
             if (query.isEmpty()) {
                 return ToolExecutionResult("query is required", success = false, toolTitle = toolTitle)
             }
-            val html = fetch(query) ?: return ToolExecutionResult(
-                "web_search failed: empty response from DuckDuckGo. Try browser_use on a specific URL.",
-                success = false,
-                toolTitle = toolTitle,
-            )
-            val results = parseHtml(html, max)
+            val preferred = context?.let { WebSearchSettings.engine(it) } ?: WebSearchSettings.Engine.DDG
+            val allowFallback = context?.let { WebSearchSettings.fallbackEnabled(it) } ?: true
+            val engines = mutableListOf(preferred)
+            if (allowFallback && preferred != WebSearchSettings.Engine.DDG) {
+                engines += WebSearchSettings.Engine.DDG
+            }
+            var lastError: String? = null
+            var used = preferred
+            var results: List<Result> = emptyList()
+            for (engine in engines) {
+                used = engine
+                val attempt = search(engine, query, max, context)
+                if (attempt.results.isNotEmpty()) {
+                    results = attempt.results
+                    lastError = null
+                    break
+                }
+                lastError = attempt.error
+            }
             if (results.isEmpty()) {
                 return ToolExecutionResult(
-                    "No results for \"$query\". Try a shorter query or open a known URL with browser_use.",
-                    success = true,
+                    "web_search failed for \"$query\" via ${preferred.id}: ${lastError ?: "no results"}. " +
+                        "Try a shorter query or open a known URL with browser_use.",
+                    success = false,
                     toolTitle = toolTitle,
                 )
             }
-            ToolExecutionResult(format(query, results), success = true, toolTitle = toolTitle)
+            ToolExecutionResult(format(query, results, used.id), success = true, toolTitle = toolTitle)
         } catch (e: Exception) {
             ToolExecutionResult("web_search failed: ${e.message}", success = false)
         }
+    }
+
+    private data class Attempt(val results: List<Result>, val error: String?)
+
+    private fun search(
+        engine: WebSearchSettings.Engine,
+        query: String,
+        max: Int,
+        context: Context?,
+    ): Attempt {
+        return try {
+            when (engine) {
+                WebSearchSettings.Engine.DDG -> {
+                    val html = fetchUrl("https://html.duckduckgo.com/html/?q=${enc(query)}")
+                        ?: return Attempt(emptyList(), "empty response from DuckDuckGo")
+                    val parsed = parseHtml(html, max)
+                    Attempt(parsed, if (parsed.isEmpty()) "DuckDuckGo returned no cards" else null)
+                }
+                WebSearchSettings.Engine.SEARXNG -> {
+                    val base = context?.let { WebSearchSettings.searxngUrl(it) }.orEmpty().trimEnd('/')
+                    if (base.isEmpty()) return Attempt(emptyList(), "SearXNG URL is not configured")
+                    val endpoint = if (base.endsWith("/search")) base else "$base/search"
+                    val body = fetchUrl("$endpoint?q=${enc(query)}&format=json")
+                        ?: return Attempt(emptyList(), "empty response from SearXNG")
+                    val parsed = parseSearxJson(body, max)
+                    Attempt(parsed, if (parsed.isEmpty()) "SearXNG returned no results" else null)
+                }
+                WebSearchSettings.Engine.BING -> {
+                    val key = context?.let { WebSearchSettings.bingKey(it) }.orEmpty()
+                    if (key.isEmpty()) return Attempt(emptyList(), "Bing API key is not configured")
+                    val body = fetchUrl(
+                        "https://api.bing.microsoft.com/v7.0/search?q=${enc(query)}&count=$max",
+                        extraHeaders = mapOf(
+                            "Ocp-Apim-Subscription-Key" to key,
+                            "Accept" to "application/json",
+                        ),
+                    ) ?: return Attempt(emptyList(), "empty response from Bing")
+                    val parsed = parseBingJson(body, max)
+                    Attempt(parsed, if (parsed.isEmpty()) "Bing returned no results" else null)
+                }
+            }
+        } catch (e: Exception) {
+            Attempt(emptyList(), e.message ?: engine.id)
+        }
+    }
+
+    internal fun parseSearxJson(json: String, max: Int = MAX_RESULTS): List<Result> {
+        val out = ArrayList<Result>(max)
+        val root = JSONObject(json)
+        val arr = root.optJSONArray("results") ?: return out
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val url = o.optString("url").trim()
+            val title = o.optString("title").trim()
+            if (url.isBlank() || title.isBlank()) continue
+            out += Result(title, url, o.optString("content").trim())
+            if (out.size >= max) break
+        }
+        return out
+    }
+
+    internal fun parseBingJson(json: String, max: Int = MAX_RESULTS): List<Result> {
+        val out = ArrayList<Result>(max)
+        val pages = JSONObject(json).optJSONObject("webPages") ?: return out
+        val arr = pages.optJSONArray("value") ?: return out
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val url = o.optString("url").trim()
+            val title = o.optString("name").trim()
+            if (url.isBlank() || title.isBlank()) continue
+            out += Result(title, url, o.optString("snippet").trim())
+            if (out.size >= max) break
+        }
+        return out
     }
 
     internal fun parseHtml(html: String, max: Int = MAX_RESULTS): List<Result> {
@@ -126,8 +216,8 @@ object WebSearchTool {
         return normalized
     }
 
-    private fun format(query: String, results: List<Result>): String = buildString {
-        appendLine("web_search results for \"$query\" (${results.size}):")
+    private fun format(query: String, results: List<Result>, engine: String = "ddg"): String = buildString {
+        appendLine("web_search ($engine) results for \"$query\" (${results.size}):")
         results.forEachIndexed { i, r ->
             appendLine()
             appendLine("${i + 1}. ${r.title}")
@@ -136,9 +226,11 @@ object WebSearchTool {
         }
     }
 
-    private fun fetch(query: String): String? {
-        val q = URLEncoder.encode(query, StandardCharsets.UTF_8.name())
-        val url = URL("https://html.duckduckgo.com/html/?q=$q")
+    private fun enc(query: String): String =
+        URLEncoder.encode(query, StandardCharsets.UTF_8.name())
+
+    private fun fetchUrl(urlString: String, extraHeaders: Map<String, String> = emptyMap()): String? {
+        val url = URL(urlString)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = true
             connectTimeout = TIMEOUT_MS
@@ -148,8 +240,9 @@ object WebSearchTool {
                 "User-Agent",
                 "Mozilla/5.0 (Linux; Android 14; OpenMinis-Linux) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
             )
-            setRequestProperty("Accept", "text/html,application/xhtml+xml")
+            setRequestProperty("Accept", extraHeaders["Accept"] ?: "text/html,application/xhtml+xml,application/json")
             setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            extraHeaders.forEach { (k, v) -> setRequestProperty(k, v) }
         }
         return try {
             val code = conn.responseCode

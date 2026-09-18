@@ -466,6 +466,16 @@ class MinisApp : Application(), ImageLoaderFactory {
         com.openminis.app.agent.SoulStore.ensureExists(this)
         com.openminis.app.agent.SoulStore.refreshCache(this)
 
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            kotlinx.coroutines.delay(5_000)
+            runCatching {
+                com.openminis.app.data.repository.SkillSubscriptionSync.refreshAuto(
+                    this@MinisApp,
+                    skillRepository,
+                )
+            }
+        }
+
         // T-config: minis-config CLI surface — registry / audit log /
         // master-switch store. Initialized eagerly here so
         // ConfigRegistry.get() is safe from any thread for the rest of

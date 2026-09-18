@@ -48,6 +48,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.ChatBubble
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.FiberManualRecord
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -122,6 +123,7 @@ fun SkillsManagementScreen(
     var showImportSheet by remember { mutableStateOf(false) }
     var deleteSkillId by remember { mutableStateOf<String?>(null) }
     var showAddMenu by remember { mutableStateOf(false) }
+    var showA11yRecord by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     val context = LocalContext.current
 
@@ -240,6 +242,8 @@ fun SkillsManagementScreen(
             )
         }
 
+        SkillFeedsSection(skillRepository = skillRepository)
+
         SettingsSection(
             header = stringResource(R.string.skill_section_installed),
             footer = stringResource(R.string.skill_section_footer),
@@ -348,6 +352,21 @@ fun SkillsManagementScreen(
                     Spacer(Modifier.width(16.dp))
                     Text(stringResource(R.string.skill_minis_skills_modal), style = MaterialTheme.typography.bodyLarge)
                 }
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 20.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            showAddMenu = false
+                            showA11yRecord = true
+                        }
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Outlined.FiberManualRecord, contentDescription = null, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(16.dp))
+                    Text(stringResource(R.string.a11y_record_title), style = MaterialTheme.typography.bodyLarge)
+                }
             }
         }
     }
@@ -356,6 +375,12 @@ fun SkillsManagementScreen(
         SkillImportSheet(
             skillRepository = skillRepository,
             onDismiss = { showImportSheet = false },
+        )
+    }
+    if (showA11yRecord) {
+        A11yRecordDialog(
+            skillRepository = skillRepository,
+            onDismiss = { showA11yRecord = false },
         )
     }
 

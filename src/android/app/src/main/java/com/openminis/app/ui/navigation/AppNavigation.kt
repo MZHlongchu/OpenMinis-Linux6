@@ -131,6 +131,7 @@ object Routes {
     const val SKILL_DETAIL = "skill/{skillId}"
     const val SKILL_FILE = "skill_file/{skillId}/{relativePath}"
     const val MINIS_SKILLS_BROWSER = "minis_skills_browser"
+    const val WEB_SEARCH = "web_search"
 
     fun skillDetail(skillId: String) = "skill/$skillId"
     fun skillFile(skillId: String, relativePath: String = "SKILL.md"): String {
@@ -601,6 +602,7 @@ fun AppNavigation(
                 onUsageClick = { navController.safeNavigate(Routes.USAGE_STATS) },
                 onAppearanceClick = { navController.safeNavigate(Routes.APPEARANCE) },
                 onBackgroundClick = { navController.safeNavigate(Routes.BACKGROUND) },
+                onWebSearchClick = { navController.safeNavigate(Routes.WEB_SEARCH) },
                 onLogsClick = { navController.safeNavigate(Routes.LOGS) },
                 onAboutClick = { navController.safeNavigate(Routes.ABOUT) },
                 onMountedFoldersClick = { navController.safeNavigate(Routes.MOUNTED_FOLDERS) },
@@ -1365,6 +1367,12 @@ fun AppNavigation(
 
         composable(Routes.BACKGROUND) {
             BackgroundSettingsScreen(
+                onBack = { navController.safePopBackStack() },
+            )
+        }
+
+        composable(Routes.WEB_SEARCH) {
+            com.openminis.app.ui.settings.WebSearchSettingsScreen(
                 onBack = { navController.safePopBackStack() },
             )
         }

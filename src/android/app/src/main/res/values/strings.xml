@@ -1994,4 +1994,39 @@
     <!-- [T-android-compact-progress] Live status while a compaction runs. -->
     <string name="compact_progress">Compacting… %1$d s elapsed</string>
     <string name="compact_progress_split">Compacting… %1$d s · summarizing in segments (%2$d/%3$d)</string>
+<!-- 1.15-linux -->
+    <string name="settings_web_search">Web search</string>
+    <string name="settings_web_search_subtitle">DuckDuckGo, SearXNG, or Bing</string>
+    <string name="web_search_engine_header">Engine</string>
+    <string name="web_search_engine_footer">DuckDuckGo needs no key. SearXNG needs an instance URL. Bing needs an API key. Failed searches fall back to DuckDuckGo, then suggest browser_use.</string>
+    <string name="web_search_engine_ddg">DuckDuckGo HTML</string>
+    <string name="web_search_engine_searxng">SearXNG</string>
+    <string name="web_search_engine_bing">Bing Web Search API</string>
+    <string name="web_search_credentials_header">Endpoints</string>
+    <string name="web_search_searxng_url">SearXNG URL</string>
+    <string name="web_search_bing_key">Bing subscription key</string>
+    <string name="web_search_fallback">Fallback to DuckDuckGo</string>
+    <string name="web_search_fallback_sub">If the selected engine fails, retry DuckDuckGo</string>
+    <string name="web_search_fallback_footer">Empty results still recommend browser_use on a known URL.</string>
+    <string name="chat_card_share_title">Share conversation card</string>
+    <string name="chat_card_theme_dark">Dark</string>
+    <string name="chat_card_theme_light">Light</string>
+    <string name="chat_card_theme_paper">Paper</string>
+    <string name="chat_card_hide_tools">Hide tool output</string>
+    <string name="chat_card_paginate">Split long chats into pages</string>
+    <string name="overlay_expand">Expand mini chat</string>
+    <string name="overlay_compose_hint">Message Minis…</string>
+    <string name="overlay_send">Send</string>
+    <string name="skill_feeds_header">Subscriptions</string>
+    <string name="skill_feeds_footer">Pin a SHA-256 of SKILL.md or a catalog JSON to refuse unexpected updates. Auto-update runs shortly after launch.</string>
+    <string name="skill_feeds_empty">No feeds yet. Add a SKILL.md URL or a catalog JSON.</string>
+    <string name="skill_feeds_add">Add skill feed</string>
+    <string name="skill_feeds_sha256">Optional SHA-256 pin</string>
+    <string name="skill_feeds_auto">Auto-update</string>
+    <string name="a11y_record_title">Record accessibility scene</string>
+    <string name="a11y_record_body">Records your taps and typing as a user skill for android-a11y-cli. Not a malware preset. Enable the Minis accessibility service first.</string>
+    <string name="a11y_record_start">Start</string>
+    <string name="a11y_record_stop">Stop</string>
+    <string name="a11y_record_save">Save as skill</string>
+    <string name="a11y_record_count">%1$d step(s)</string>
 </resources>

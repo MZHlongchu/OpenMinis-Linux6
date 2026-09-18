@@ -28,6 +28,9 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.EditText
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import com.openminis.app.MinisApp
 import com.openminis.app.R
 import kotlin.math.abs
@@ -119,6 +122,10 @@ class ToolOverlayController(private val context: Context) {
     private var replyView: TextView? = null
     private var statusIconView: StatusGlyphView? = null
     private var closeView: View? = null
+    private var capsuleRow: View? = null
+    private var composeRow: LinearLayout? = null
+    private var composeInput: EditText? = null
+    private var expandedComposer = false
     private var lastIsRunning: Boolean = false
     private var layoutParams: WindowManager.LayoutParams? = null
     // [T-android-overlay-reply-status-34599] Session ID associated with
@@ -211,6 +218,10 @@ class ToolOverlayController(private val context: Context) {
             replyView = null
             statusIconView = null
             closeView = null
+            capsuleRow = null
+            composeRow = null
+            composeInput = null
+            expandedComposer = false
             layoutParams = null
             isShown = false
         }
@@ -263,7 +274,7 @@ class ToolOverlayController(private val context: Context) {
             }
         }
         layoutParams = params
-        attachTouchListener(container, params)
+        attachTouchListener(capsuleRow ?: container, params)
         windowManager.addView(container, params)
         view = container
         isShown = true
@@ -446,7 +457,96 @@ class ToolOverlayController(private val context: Context) {
         closeView = closeBtn
         container.addView(closeBtn)
 
-        return container
+        val expandBtn = ExpandGlyphView(context).apply {
+            val s = dpToPx(14)
+            layoutParams = LinearLayout.LayoutParams(s, s).apply {
+                leftMargin = dpToPx(8)
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            setOnClickListener { setComposerExpanded(!expandedComposer) }
+            contentDescription = context.getString(R.string.overlay_expand)
+        }
+        container.addView(expandBtn, container.indexOfChild(closeBtn))
+
+        val input = EditText(context).apply {
+            hint = context.getString(R.string.overlay_compose_hint)
+            setHintTextColor(Color.argb(140, 200, 200, 200))
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            setBackgroundColor(Color.TRANSPARENT)
+            isSingleLine = true
+            imeOptions = EditorInfo.IME_ACTION_SEND
+            setPadding(dpToPx(8), dpToPx(6), dpToPx(8), dpToPx(6))
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_SEND) {
+                    sendOverlayPrompt()
+                    true
+                } else false
+            }
+        }
+        composeInput = input
+        val sendBtn = TextView(context).apply {
+            text = context.getString(R.string.overlay_send)
+            setTextColor(Color.rgb(90, 200, 250))
+            textSize = 13f
+            setPadding(dpToPx(8), dpToPx(6), dpToPx(8), dpToPx(6))
+            setOnClickListener { sendOverlayPrompt() }
+        }
+        val compose = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            visibility = View.GONE
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dpToPx(8), 0, dpToPx(8), dpToPx(6))
+            addView(input, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(sendBtn)
+        }
+        composeRow = compose
+
+        val root = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.TRANSPARENT)
+        }
+        // Move capsule background onto the inner row; root stays wrap.
+        root.addView(container, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dpToPx(CAPSULE_HEIGHT_DP),
+        ))
+        root.addView(compose, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ))
+        capsuleRow = container
+        return root
+    }
+
+    private fun sendOverlayPrompt() {
+        val text = composeInput?.text?.toString().orEmpty()
+        val sid = pendingSessionId
+        if (sid.isNullOrBlank()) return
+        OverlayComposeBus.submit(sid, text)
+        composeInput?.setText("")
+    }
+
+    private fun setComposerExpanded(expand: Boolean) {
+        expandedComposer = expand
+        composeRow?.visibility = if (expand) View.VISIBLE else View.GONE
+        val p = layoutParams ?: return
+        val v = view ?: return
+        if (expand) {
+            p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+            p.height = WindowManager.LayoutParams.WRAP_CONTENT
+        } else {
+            p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            p.height = dpToPx(CAPSULE_HEIGHT_DP)
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            imm?.hideSoftInputFromWindow(composeInput?.windowToken, 0)
+        }
+        try {
+            windowManager.updateViewLayout(v, p)
+        } catch (e: Throwable) {
+            Log.w(TAG, "update overlay flags: ${e.message}")
+        }
+        if (expand) composeInput?.requestFocus()
     }
 
     private fun updateContent(
@@ -804,6 +904,26 @@ class ToolOverlayController(private val context: Context) {
      * drawable resource needed) and uses a lighter color so the user
      * reads it as a chrome control rather than a status indicator.
      */
+    private class ExpandGlyphView(context: Context) : View(context) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            color = Color.argb(220, 200, 200, 200)
+        }
+        private val path = Path()
+        override fun onDraw(canvas: Canvas) {
+            val w = width.toFloat()
+            val h = height.toFloat()
+            if (w <= 0f || h <= 0f) return
+            paint.strokeWidth = (w * 0.14f).coerceAtLeast(2f)
+            path.reset()
+            path.moveTo(w * 0.22f, h * 0.62f)
+            path.lineTo(w * 0.50f, h * 0.32f)
+            path.lineTo(w * 0.78f, h * 0.62f)
+            canvas.drawPath(path, paint)
+        }
+    }
+
     private class CloseGlyphView(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE

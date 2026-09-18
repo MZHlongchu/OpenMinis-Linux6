@@ -885,6 +885,7 @@ fun ChatScreen(
     // backing state without needing fragile scope wiring.
     var showMoveSheet by remember { mutableStateOf(false) }
     var showClearChatDialog by remember { mutableStateOf(false) }
+    var showCardShareDialog by remember { mutableStateOf(false) }
     // [T-android-delete-from-here] Id of the message a pending "Delete From
     // Here" would cut at, or null when no confirmation is open. Holding the
     // id (rather than a boolean plus a separate field) keeps the dialog and
@@ -2951,7 +2952,7 @@ fun ChatScreen(
                                 text = { Text(stringResource(R.string.chat_menu_share_card)) },
                                 onClick = {
                                     showChatMenu = false
-                                    viewModel.shareConversationCard()
+                                    showCardShareDialog = true
                                 },
                                 leadingIcon = {
                                     Icon(Icons.Default.Share, contentDescription = null)
@@ -3179,6 +3180,7 @@ fun ChatScreen(
         Column(
             modifier = Modifier.fillMaxSize(),
         ) {
+            SubAgentLiveBar(sessionId = sessionId)
             // Dismiss keyboard when the USER scrolls the messages. Gated on
             // `isUserDragging` (a real finger drag) rather than
             // `listState.isScrollInProgress` — the latter is also true during
@@ -4521,6 +4523,23 @@ fun ChatScreen(
                         onOpenBrowserForUrl = { url ->
                             viewModel.closeToolDetail()
                             viewModel.openBrowserSheetForUrl(url)
+                        },
+                        onOpenSpillPath = { guest ->
+                            val sid = viewModel.realSessionId.ifBlank { sessionId }
+                            val file = com.openminis.app.tools.ToolOutputSpill.hostFile(context, sid, guest)
+                            if (file != null) {
+                                viewModel.closeToolDetail()
+                                onPreviewAttachment(
+                                    com.openminis.app.ui.sandbox.FileItem(
+                                        file = file,
+                                        name = file.name,
+                                        isDirectory = false,
+                                        isSymlink = false,
+                                        size = file.length(),
+                                        modifiedMs = file.lastModified(),
+                                    )
+                                )
+                            }
                         },
                     )
                 }
@@ -6733,6 +6752,15 @@ fun ChatScreen(
             // T137: Clear Chat confirmation. Wipes messages + agent history +
             // compact markers; the session row, workspace files, attachments,
             // and offload payloads are intentionally preserved (iOS parity).
+            if (showCardShareDialog) {
+                com.openminis.app.share.ConversationCardShareDialog(
+                    onDismiss = { showCardShareDialog = false },
+                    onShare = { options ->
+                        showCardShareDialog = false
+                        viewModel.shareConversationCard(options)
+                    },
+                )
+            }
             if (showClearChatDialog) {
                 MinisAlertDialog(
                     onDismissRequest = { showClearChatDialog = false },

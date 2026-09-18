@@ -3703,6 +3703,23 @@ class ChatViewModel(
         // glanced at but didn't resume keeps its badge, and a running/resolved
         // session never shows one.
         viewModelScope.launch {
+            com.openminis.app.service.OverlayComposeBus.pending.collect { req ->
+                val sid = realSessionId.ifBlank { sessionId }
+                if (req.sessionId != sessionId && req.sessionId != sid) return@collect
+                com.openminis.app.service.OverlayComposeBus.consumeSticky(req.sessionId)
+                if (_isStreaming.value) enqueuePrompt(req.text) else sendMessage(req.text)
+            }
+        }
+        viewModelScope.launch {
+            sessionLoaded.first { it }
+            val sid = realSessionId.ifBlank { sessionId }
+            val sticky = com.openminis.app.service.OverlayComposeBus.consumeSticky(sid)
+                ?: com.openminis.app.service.OverlayComposeBus.consumeSticky(sessionId)
+            if (!sticky.isNullOrBlank()) {
+                if (_isStreaming.value) enqueuePrompt(sticky) else sendMessage(sticky)
+            }
+        }
+        viewModelScope.launch {
             canResume.collect { interrupted ->
                 if (interrupted) {
                     // [T-android-group-pause-badge-restamp] Only a REAL
@@ -9311,7 +9328,7 @@ class ChatViewModel(
             "memory_write" -> executeMemoryWriteTool(argsJson)
             "memory_get" -> executeMemoryGetTool(argsJson)
             "run_subagent" -> executeRunSubAgent(argsJson)
-            com.openminis.app.tools.WebSearchTool.NAME -> com.openminis.app.tools.WebSearchTool.execute(argsJson)
+            com.openminis.app.tools.WebSearchTool.NAME -> com.openminis.app.tools.WebSearchTool.execute(argsJson, context)
             com.openminis.app.tools.AskUserQuestion.NAME, com.openminis.app.tools.AskUserQuestion.ALIAS -> executeAskUserQuestion(argsJson)
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
@@ -11461,13 +11478,14 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         SessionActivityTracker.publishLastReply(sessionId, text)
     }
 
-    fun shareConversationCard() {
+    fun shareConversationCard(options: com.openminis.app.share.ConversationCardOptions = com.openminis.app.share.ConversationCardOptions()) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 com.openminis.app.share.ConversationCardShare.share(
                     context = context,
                     title = _sessionTitle.value,
                     messages = uiMessages.value,
+                    options = options,
                 )
             }.onFailure {
                 AppLogger.warning(TAG, "shareConversationCard failed: ${it.message}")
@@ -12639,8 +12657,14 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         val provider = providerForModelEntry(entry)
             ?: return ToolExecutionResult("Failed to create provider for ${entry.model.displayName}", false)
         subAgentDepth.incrementAndGet()
+        val trackerId = com.openminis.app.service.SubAgentActivityTracker.start(
+            parentSessionId = realSessionId.ifBlank { sessionId },
+            title = title.ifEmpty { "Sub-agent" },
+            role = role,
+            model = entry.model.displayName,
+        )
         return try {
-            SubAgentRunner.run(
+            val result = SubAgentRunner.run(
                 provider = provider,
                 modelDisplayName = entry.model.displayName,
                 userPrompt = prompt,
@@ -12656,7 +12680,12 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 executeTool = { name, json ->
                     executeTool(name, json, "", mutableListOf(), "", "")
                 },
-            ).copy(toolTitle = title.ifEmpty { "Sub-agent · ${entry.model.displayName}" })
+            )
+            com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, result.success)
+            result.copy(toolTitle = title.ifEmpty { "Sub-agent · ${entry.model.displayName}" })
+        } catch (e: Exception) {
+            com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, false, e.message)
+            throw e
         } finally {
             subAgentDepth.decrementAndGet()
         }

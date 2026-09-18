@@ -17,6 +17,14 @@ import com.openminis.app.ui.chat.ChatMessage
 import java.io.File
 import java.io.FileOutputStream
 
+data class ConversationCardOptions(
+    val theme: Theme = Theme.DARK,
+    val hideTools: Boolean = true,
+    val paginate: Boolean = false,
+) {
+    enum class Theme { DARK, LIGHT, PAPER }
+}
+
 /**
  * Render the current chat as a shareable image card (WeChat / Moments style),
  * plus a short markdown transcript in EXTRA_TEXT.
@@ -27,28 +35,41 @@ object ConversationCardShare {
     private const val MAX_MESSAGES = 12
     private const val MAX_CHARS = 420
 
-    fun share(context: Context, title: String, messages: List<ChatMessage>) {
-        val visible = messages.filter { msg ->
-            !msg.isQueued &&
-                msg.role != "system" &&
-                msg.content.isNotBlank() &&
-                !ChatMessage.isInternalBridgeText(msg.content)
-        }.takeLast(MAX_MESSAGES)
-        val bitmap = render(title.ifBlank { "OpenMinis-Linux" }, visible)
+    fun share(
+        context: Context,
+        title: String,
+        messages: List<ChatMessage>,
+        options: ConversationCardOptions = ConversationCardOptions(),
+    ) {
+        val visible = selectVisible(messages, options)
+        val pages = paginate(visible, options.paginate)
         val dir = File(context.cacheDir, "shared").apply { mkdirs() }
-        val file = File(dir, "conversation-card.jpg")
-        FileOutputStream(file).use { out ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
+        val uris = ArrayList<android.net.Uri>()
+        pages.forEachIndexed { i, page ->
+            val bitmap = render(title.ifBlank { "OpenMinis-Linux" }, page, options.theme)
+            val file = File(dir, if (pages.size == 1) "conversation-card.jpg" else "conversation-card-$i.jpg")
+            FileOutputStream(file).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
+            }
+            bitmap.recycle()
+            uris += FileProvider.getUriForFile(
+                context,
+                context.packageName + ".fileprovider",
+                file,
+            )
         }
-        bitmap.recycle()
-        val uri = FileProvider.getUriForFile(
-            context,
-            context.packageName + ".fileprovider",
-            file,
-        )
-        val send = Intent(Intent.ACTION_SEND).apply {
-            type = "image/jpeg"
-            putExtra(Intent.EXTRA_STREAM, uri)
+        if (uris.isEmpty()) return
+        val send = if (uris.size == 1) {
+            Intent(Intent.ACTION_SEND).apply {
+                type = "image/jpeg"
+                putExtra(Intent.EXTRA_STREAM, uris[0])
+            }
+        } else {
+            Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                type = "image/jpeg"
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            }
+        }.apply {
             putExtra(Intent.EXTRA_SUBJECT, title)
             putExtra(Intent.EXTRA_TEXT, transcript(title, visible))
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -60,6 +81,37 @@ object ConversationCardShare {
         Handler(Looper.getMainLooper()).post {
             context.startActivity(chooser)
         }
+    }
+
+    internal fun selectVisible(
+        messages: List<ChatMessage>,
+        options: ConversationCardOptions = ConversationCardOptions(),
+    ): List<ChatMessage> {
+        val base = messages.filter { msg ->
+            !msg.isQueued &&
+                msg.role != "system" &&
+                !ChatMessage.isInternalBridgeText(msg.content)
+        }
+        val mapped = base.mapNotNull { msg ->
+            val content = if (options.hideTools) stripToolSections(msg.content) else msg.content
+            if (content.isBlank()) null
+            else msg.copy(content = content, toolBlocks = if (options.hideTools) emptyList() else msg.toolBlocks)
+        }
+        return mapped.takeLast(MAX_MESSAGES)
+    }
+
+    internal fun stripToolSections(content: String): String {
+        var s = content
+        s = s.replace(Regex("(?s)\\[tool-output-spill\\].*?(?=\\n\\n|$)"), "")
+        s = s.replace(Regex("(?m)^\\s*Running:.*$"), "")
+        s = s.replace(Regex("(?s)```tool[\\s\\S]*?```"), "")
+        return s.replace(Regex("\\n{3,}"), "\n\n").trim()
+    }
+
+    internal fun paginate(messages: List<ChatMessage>, paginate: Boolean): List<List<ChatMessage>> {
+        if (messages.isEmpty()) return emptyList()
+        if (!paginate || messages.size <= 6) return listOf(messages)
+        return messages.chunked(6)
     }
 
     internal fun transcript(title: String, messages: List<ChatMessage>): String = buildString {
@@ -74,22 +126,67 @@ object ConversationCardShare {
         appendLine("— OpenMinis-Linux")
     }
 
-    private fun render(title: String, messages: List<ChatMessage>): Bitmap {
+    private data class Palette(
+        val bg: Int,
+        val title: Int,
+        val brand: Int,
+        val body: Int,
+        val userText: Int,
+        val userBubble: Int,
+        val assistantBubble: Int,
+    )
+
+    private fun palette(theme: ConversationCardOptions.Theme): Palette = when (theme) {
+        ConversationCardOptions.Theme.DARK -> Palette(
+            bg = 0xFF0B1220.toInt(),
+            title = 0xFFE8EEFF.toInt(),
+            brand = 0xFF8BA3C7.toInt(),
+            body = 0xFFD5DFF0.toInt(),
+            userText = 0xFFF4F7FF.toInt(),
+            userBubble = 0xFF1F4B8F.toInt(),
+            assistantBubble = 0xFF162033.toInt(),
+        )
+        ConversationCardOptions.Theme.LIGHT -> Palette(
+            bg = 0xFFF6F7FB.toInt(),
+            title = 0xFF111827.toInt(),
+            brand = 0xFF6B7280.toInt(),
+            body = 0xFF1F2937.toInt(),
+            userText = 0xFF111827.toInt(),
+            userBubble = 0xFFDCEBFF.toInt(),
+            assistantBubble = 0xFFE8E8EE.toInt(),
+        )
+        ConversationCardOptions.Theme.PAPER -> Palette(
+            bg = 0xFFF4EBD0.toInt(),
+            title = 0xFF3B2F1A.toInt(),
+            brand = 0xFF8A7048.toInt(),
+            body = 0xFF3B2F1A.toInt(),
+            userText = 0xFF2C2114.toInt(),
+            userBubble = 0xFFE7D3A1.toInt(),
+            assistantBubble = 0xFFEDE0C0.toInt(),
+        )
+    }
+
+    private fun render(
+        title: String,
+        messages: List<ChatMessage>,
+        theme: ConversationCardOptions.Theme = ConversationCardOptions.Theme.DARK,
+    ): Bitmap {
+        val pal = palette(theme)
         val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFE8EEFF.toInt()
+            color = pal.title
             textSize = 42f
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
         }
         val brandPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFF8BA3C7.toInt()
+            color = pal.brand
             textSize = 28f
         }
         val bodyPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFD5DFF0.toInt()
+            color = pal.body
             textSize = 32f
         }
         val userPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFF4F7FF.toInt()
+            color = pal.userText
             textSize = 32f
         }
         val inner = (WIDTH - PAD * 2).toInt()
@@ -109,7 +206,7 @@ object ConversationCardShare {
         val height = (PAD * 2 + contentH).toInt().coerceIn(640, 4096)
         val bmp = Bitmap.createBitmap(WIDTH, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
-        canvas.drawColor(0xFF0B1220.toInt())
+        canvas.drawColor(pal.bg)
         var y = PAD
         titleLayout.draw(canvas, PAD, y)
         y += titleLayout.height + 8
@@ -120,7 +217,7 @@ object ConversationCardShare {
             val bw = layout.width.toFloat() + 36f
             val bh = layout.height.toFloat() + 28f
             val left = if (isUser) WIDTH - PAD - bw else PAD
-            bubblePaint.color = if (isUser) 0xFF1F4B8F.toInt() else 0xFF162033.toInt()
+            bubblePaint.color = if (isUser) pal.userBubble else pal.assistantBubble
             canvas.drawRoundRect(RectF(left, y, left + bw, y + bh), 28f, 28f, bubblePaint)
             layout.draw(canvas, left + 18f, y + 14f)
             y += bh + 20f

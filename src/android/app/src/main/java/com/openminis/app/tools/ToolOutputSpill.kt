@@ -45,12 +45,27 @@ object ToolOutputSpill {
         val tail = if (output.length > HEAD + TAIL) output.takeLast(TAIL) else ""
         return buildString {
             append("[tool-output-spill] $toolName produced ${output.length} chars. ")
-            append("Full output saved to $guestPath — use file_read if you need more.\n\n")
+            append("Full output saved to $guestPath — use file_read if you need more.\n")
+            append("Open in app: minis://workspace/tool-spill/${guestPath.substringAfterLast('/')}\n\n")
             append(head)
             if (tail.isNotEmpty()) {
                 append("\n\n…(${output.length - HEAD - TAIL} chars omitted)…\n\n")
                 append(tail)
             }
         }
+    }
+
+    private val GUEST_PATH = Regex("/var/minis/workspace/tool-spill/([A-Za-z0-9._-]+)")
+
+    fun parseGuestPath(content: String): String? {
+        val m = GUEST_PATH.find(content) ?: return null
+        return "/var/minis/workspace/tool-spill/${m.groupValues[1]}"
+    }
+
+    fun hostFile(context: Context, sessionId: String, guestPath: String): File? {
+        val name = parseGuestPath(guestPath)?.substringAfterLast('/') ?: return null
+        if (sessionId.isBlank() || name.isBlank()) return null
+        val file = File(context.filesDir, "minis-sessions/$sessionId/workspace/tool-spill/$name")
+        return file.takeIf { it.isFile }
     }
 }

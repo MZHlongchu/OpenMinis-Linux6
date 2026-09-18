@@ -40,6 +40,7 @@ import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.TravelExplore
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
@@ -106,6 +107,7 @@ fun SettingsScreen(
     // OEM autostart guidance). Default no-op so older callers/tests
     // don't need to be retrofitted.
     onBackgroundClick: () -> Unit = {},
+    onWebSearchClick: () -> Unit = {},
     // Hook accepted for forward-compat with AppNavigation's About route. The
     // About row below still has a TODO onClick in HEAD; future settings-bucket
     // work will wire this through.
@@ -190,6 +192,13 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_skills),
                     subtitle = stringResource(R.string.settings_skills_subtitle),
                     onClick = onSkillsClick,
+                )
+                SettingsItem(
+                    icon = Icons.Outlined.TravelExplore,
+                    iconColor = Color(0xFF34C759),
+                    title = stringResource(R.string.settings_web_search),
+                    subtitle = stringResource(R.string.settings_web_search_subtitle),
+                    onClick = onWebSearchClick,
                 )
                 // [T-soul-md] insertion between Skills and Memory per spec.
                 SettingsItem(
