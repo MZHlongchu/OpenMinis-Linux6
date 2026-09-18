@@ -38,6 +38,8 @@ object AgentTools {
         }
         add(browserUseDefinition())
         add(WebSearchTool.definition())
+        add(SessionLookupTool.searchDefinition())
+        add(SessionLookupTool.readDefinition())
         add(AskUserQuestion.definition())
         if (memoryEnabled) {
             add(memoryWriteDefinition())
@@ -54,15 +56,19 @@ object AgentTools {
 
 Each call MUST include a self-contained prompt (sub-agents cannot see this conversation): goal, workspace paths, relevant files, constraints, acceptance criteria. Note the member role and which skills to read.
 
-Independent slices: emit multiple run_subagent calls in ONE turn (they run in parallel up to the configured cap). Dependent phases: wait for results, verify against acceptance criteria, then dispatch the next phase. If a result fails acceptance, point out the gap and re-dispatch. Each member may only change their assigned files.""",
+kind: worker (default, can write), explore (read-only research), plan (read-only design). write_paths: comma-separated Linux prefixes the worker may file_write/file_edit. Independent slices: emit multiple run_subagent calls in ONE turn (they run in parallel up to the configured cap). Dependent phases: wait for results, verify against acceptance criteria, then dispatch the next phase. If a result fails acceptance, point out the gap and re-dispatch.""",
         parameters = mapOf(
             "tool_title" to AgentToolParam("string", "Short live-status title, e.g. 'Review RootfsManager'."),
             "prompt" to AgentToolParam("string", "Complete self-contained task prompt for the sub-agent."),
             "role" to AgentToolParam("string", "Member role, e.g. 'Android reviewer', 'docs writer'."),
             "skills" to AgentToolParam("string", "Comma-separated skill ids the worker should read first."),
             "model" to AgentToolParam("string", "Optional model-entry id from the configured sub-agent pool. Omit to round-robin."),
+            "kind" to AgentToolParam("string", "worker (default), explore (read-only), or plan (read-only)."),
+            "write_paths" to AgentToolParam("string", "Comma-separated Linux path prefixes this worker may modify. Empty = unrestricted (worker only)."),
+            "max_turns" to AgentToolParam("integer", "Max tool-loop turns for this sub-agent (default 12)."),
         ),
         required = listOf("prompt"),
+        propertyOrdering = listOf("tool_title", "prompt", "kind", "write_paths", "role", "skills", "model", "max_turns"),
     )
 
     // Aligned with iOS AIChatViewModel.swift:4982-4993

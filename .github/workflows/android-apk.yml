@@ -45,7 +45,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y curl tar unzip make gawk sed file python3
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y curl tar unzip make gawk sed file python3 cmake ninja-build g++ git
 
       - name: Install Android SDK commandline tools
         run: |
@@ -118,6 +118,15 @@ jobs:
             echo "No MINIS_UPLOAD_KEYSTORE_BASE64 — APK will be debug-signed (cannot replace a differently signed install)"
           fi
 
+      - name: Cross-compile libunwind.a for aarch64
+        env:
+          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/${{ env.ANDROID_NDK }}
+          LLVM_SRC: ${{ github.workspace }}/.llvm-libunwind
+          LIBUNWIND_BUILD: ${{ runner.temp }}/libunwind-build
+        run: |
+          chmod +x scripts/build_libunwind_aarch64.sh
+          bash scripts/build_libunwind_aarch64.sh "$ANDROID_NDK_HOME"
+
       - name: Assemble release APK
         working-directory: src/android
         env:
@@ -136,12 +145,18 @@ jobs:
           cp "$SRC" dist/minis-ultra-com.openminis.linux.apk
           unzip -l "$SRC" | grep -E "libproot|proot-aarch64|ubuntu-base|android-sdk-tools|android-cmdline-tools" || true
           NDK="/usr/local/lib/android/sdk/ndk/${ANDROID_NDK}"
-          UNWIND=$(find "$NDK" -path '*aarch64-linux-android*' -name libunwind.so 2>/dev/null | head -n 1 || true)
-          if [ -n "$UNWIND" ]; then
-            cp "$UNWIND" dist/libunwind.so
-            echo "staged libunwind.so from $UNWIND"
-          else
-            echo "libunwind.so not in NDK — not attaching (see docs/SIGNING.md)"
+          UNWIND_SO=$(find "$NDK" -path '*aarch64-linux-android*' -name libunwind.so 2>/dev/null | head -n 1 || true)
+          UNWIND_A=$(find "$NDK" -path '*aarch64-linux-android*' -name libunwind.a 2>/dev/null | head -n 1 || true)
+          if [ -n "$UNWIND_SO" ]; then
+            cp "$UNWIND_SO" dist/libunwind.so
+            echo "staged libunwind.so from $UNWIND_SO"
+          fi
+          if [ -n "$UNWIND_A" ]; then
+            cp "$UNWIND_A" dist/libunwind.a
+            echo "staged libunwind.a from $UNWIND_A"
+          fi
+          if [ -z "$UNWIND_SO" ] && [ -z "$UNWIND_A" ]; then
+            echo "libunwind not in NDK sysroot — see docs/SIGNING.md"
           fi
           ls -lh dist/
 

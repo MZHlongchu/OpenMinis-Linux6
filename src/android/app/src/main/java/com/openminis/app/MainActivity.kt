@@ -499,7 +499,11 @@ class MainActivity : ComponentActivity() {
         // while inside a chat, synthesise an OpenSession deep-link so
         // the navigation stack lands on that chat instead of the
         // sessions list. T166.
-        val explicitDeepLink = DeepLinkHandler.parse(intent?.data)
+        val explicitDeepLink = when {
+            intent?.action == Intent.ACTION_ASSIST || intent?.action == Intent.ACTION_VOICE_COMMAND ->
+                DeepLinkAction.NewChat
+            else -> DeepLinkHandler.parse(intent?.data)
+        }
         val launchDeepLink = if (explicitDeepLink !is DeepLinkAction.Unknown) {
             explicitDeepLink
         } else {
@@ -705,6 +709,10 @@ class MainActivity : ComponentActivity() {
         // touching the deep-link path so the share coordinator sees it.
         if (intent.getBooleanExtra("shared_content", false)) {
             com.openminis.app.share.ShareCoordinator.processPendingShare(this)
+        }
+        if (intent.action == Intent.ACTION_ASSIST || intent.action == Intent.ACTION_VOICE_COMMAND) {
+            handleDeepLink(Uri.parse("minis://action/new_chat"))
+            return
         }
         handleDeepLink(intent.data)
     }

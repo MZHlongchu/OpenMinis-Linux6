@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import com.openminis.app.R
 import com.openminis.app.browser.BrowserTabPool
 import com.openminis.app.browser.UserAgentProfile
+import com.openminis.app.browser.WebViewEngine
 import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.launch
 import com.openminis.app.ui.components.MinisTextButton
@@ -153,6 +154,46 @@ fun BrowserSettingsSheet(
 
             Spacer(Modifier.height(16.dp))
 
+            val engine = remember { WebViewEngine.snapshot(context) }
+            Text(
+                stringResource(R.string.browser_settings_engine_title),
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                stringResource(
+                    R.string.browser_settings_engine_version,
+                    engine.chromeLabel,
+                    WebViewEngine.TARGET_MAJOR.toString(),
+                ),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                stringResource(
+                    when (engine.band) {
+                        WebViewEngine.CompatBand.BELOW_TARGET -> R.string.browser_settings_engine_below
+                        WebViewEngine.CompatBand.AT_TARGET -> R.string.browser_settings_engine_at
+                        WebViewEngine.CompatBand.ABOVE_TARGET -> R.string.browser_settings_engine_above
+                        WebViewEngine.CompatBand.UNKNOWN -> R.string.browser_settings_engine_unknown
+                    },
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                stringResource(R.string.browser_settings_engine_shared),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (engine.band == WebViewEngine.CompatBand.BELOW_TARGET) {
+                MinisTextButton(onClick = { WebViewEngine.openStore(context, engine.packageName) }) {
+                    Text(stringResource(R.string.browser_settings_engine_update))
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
             // ── User Agent ──
             Text(
                 stringResource(R.string.browser_settings_user_agent),
@@ -168,7 +209,7 @@ fun BrowserSettingsSheet(
                     UserAgentProfile.DESKTOP_CHROME -> R.string.browser_settings_ua_desktop_chrome
                     UserAgentProfile.CUSTOM -> R.string.browser_settings_ua_custom
                 })
-                val uaSubtitle = displayUA(profile, customUA, notSetPlaceholder)
+                val uaSubtitle = displayUA(profile, customUA, notSetPlaceholder, engine.chromeLabel)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -444,10 +485,16 @@ private enum class ViewportMode { DEFAULT, CUSTOM }
 /** UA list subtitle: full UA string in monospace, or "Not set" when the
  *  Custom slot is empty. Mirrors the iOS sheet which shows the full UA below
  *  each radio so the user can verify exactly what's being sent. */
-private fun displayUA(profile: UserAgentProfile, customUA: String, notSetPlaceholder: String): String =
+private fun displayUA(
+    profile: UserAgentProfile,
+    customUA: String,
+    notSetPlaceholder: String,
+    chromeLabel: String,
+): String =
     when (profile) {
         UserAgentProfile.CUSTOM -> customUA.ifBlank { notSetPlaceholder }
-        else -> profile.userAgentString.orEmpty()
+        UserAgentProfile.DESKTOP_CHROME -> "Desktop · $chromeLabel"
+        else -> chromeLabel
     }
 
 // ── Viewport ──────────────────────────────────────────────────────────────

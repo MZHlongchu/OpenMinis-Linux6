@@ -490,6 +490,7 @@ class WebAppActivity : ComponentActivity() {
             allowUniversalAccessFromFileURLs = false
             mediaPlaybackRequiresUserGesture = false
         }
+        com.openminis.app.browser.WebViewEngine.applyCompat(webView)
     }
 
     private fun loadHtml(webView: WebView, file: File) {

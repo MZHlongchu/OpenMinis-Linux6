@@ -2,6 +2,7 @@ package com.openminis.app.ui.sandbox
 
 import com.openminis.app.R
 import androidx.compose.ui.res.stringResource
+import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -461,14 +462,20 @@ private fun MarkdownPreview(item: FileItem) {
 
 // ==================== HTML Preview (WebView) ====================
 
+@SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun HtmlPreview(item: FileItem) {
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
             WebView(ctx).apply {
-                settings.javaScriptEnabled = false
+                setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
                 settings.allowFileAccess = true
+                @Suppress("DEPRECATION")
+                settings.allowFileAccessFromFileURLs = true
+                settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 // T-webview-popup-d3c6e10f: mirror ffc85ad's WebPreviewBottomSheet
                 // fix. Pages using `height: 100vh` + `overflow: hidden` were
                 // collapsing to a 0-height clipped box (white screen) on first
@@ -480,6 +487,7 @@ private fun HtmlPreview(item: FileItem) {
                 // viewport units.
                 settings.useWideViewPort = true
                 settings.loadWithOverviewMode = true
+                com.openminis.app.browser.WebViewEngine.applyCompat(this)
                 webViewClient = WebViewClient()
                 val targetUrl = "file://${item.file.absolutePath}"
                 post { loadUrl(targetUrl) }

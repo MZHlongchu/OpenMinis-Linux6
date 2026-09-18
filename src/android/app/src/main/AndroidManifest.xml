@@ -207,6 +207,11 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="minis" />
             </intent-filter>
+            <!-- Default assistant entry (Operit/Eta-style, no LSPosed). -->
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
 
         <!-- T-android-dynamic-app-icon: launcher-icon aliases. Exactly
@@ -490,6 +495,18 @@
         <receiver
             android:name=".scheduled.ScheduledTaskAlarmReceiver"
             android:exported="false" />
+
+        <receiver
+            android:name=".widget.MinisChatWidgetProvider"
+            android:exported="true"
+            android:label="@string/widget_minis_chat_description">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/minis_chat_widget_info" />
+        </receiver>
 
         <!-- Notification listener — lets android-notification read active notifications.
              User must enable this manually in Settings → Notifications → Device &

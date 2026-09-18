@@ -60,6 +60,7 @@ internal fun toolAccentColor(toolName: String): Color = when (toolName) {
     "read_image" -> Color(0xFFAF52DE)
     "memory_write", "memory_get" -> Color(0xFFFF2D55)
     "web_search" -> Color(0xFF32ADE6)    // iOS: .cyan for search
+    "search_sessions", "read_session" -> Color(0xFF64D2FF)
     "run_subagent" -> Color(0xFF5856D6)
     else -> Color(0xFF8E8E93)
 }
@@ -74,6 +75,7 @@ internal fun toolIconFor(toolName: String) = when (toolName) {
     "read_image" -> Icons.Default.Image                // iOS: photo
     "memory_write", "memory_get" -> Icons.Default.Psychology // iOS: brain.head.profile
     "web_search" -> Icons.Default.Search               // iOS: magnifyingglass
+    "search_sessions", "read_session" -> Icons.Default.Search
     "run_subagent" -> Icons.Default.Groups
     else -> Icons.Default.Build
 }
@@ -89,6 +91,8 @@ internal fun toolDisplayName(toolName: String): String = when (toolName) {
     "memory_write" -> "memory"
     "memory_get" -> "memory"
     "web_search" -> "search"
+    "search_sessions" -> "session search"
+    "read_session" -> "session reader"
     "run_subagent" -> "sub-agent"
     else -> toolName
 }
@@ -106,6 +110,8 @@ internal fun toolTitleLabel(toolName: String): String = when (toolName) {
     "read_image" -> "Minis is reading Image"
     "memory_write", "memory_get" -> "Minis is using Memory"
     "web_search" -> "Minis is using Search"
+    "search_sessions" -> "Minis is searching Sessions"
+    "read_session" -> "Minis is reading a Session"
     "run_subagent" -> "Minis is coordinating a sub-agent"
     else -> "Minis is using ${toolDisplayName(toolName)}"
 }

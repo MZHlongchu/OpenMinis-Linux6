@@ -12,11 +12,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import com.openminis.app.MinisApp
 import com.openminis.app.deeplink.DeepLinkAction
 import com.openminis.app.deeplink.DeepLinkCoordinator
+import com.openminis.app.ui.browser.BrowserSheet
 import com.openminis.app.ui.settings.KEY_LAUNCH_SESSION
 import com.openminis.app.ui.settings.getAppearancePrefs
 import androidx.navigation.NavHostController
@@ -491,6 +495,7 @@ fun AppNavigation(
         quickActionStart != null -> quickActionStart
         else -> Routes.SESSION_LIST
     }
+    var htmlBrowserUrl by remember { mutableStateOf<String?>(null) }
     NavHost(
         navController = navController,
         startDestination = startDestination,
@@ -1091,8 +1096,12 @@ fun AppNavigation(
                 viewModel = vm,
                 onBack = { navController.safePopBackStack() },
                 onPreviewFile = { item ->
-                    FilePreviewHolder.currentItem = item
-                    navController.safeNavigate(Routes.FILE_PREVIEW)
+                    if (item.isHtmlFile) {
+                        htmlBrowserUrl = "file://${item.file.absolutePath}"
+                    } else {
+                        FilePreviewHolder.currentItem = item
+                        navController.safeNavigate(Routes.FILE_PREVIEW)
+                    }
                 },
             )
         }
@@ -1137,8 +1146,12 @@ fun AppNavigation(
                 viewModel = vm,
                 onBack = { navController.safePopBackStack() },
                 onPreviewFile = { item ->
-                    FilePreviewHolder.currentItem = item
-                    navController.safeNavigate(Routes.FILE_PREVIEW)
+                    if (item.isHtmlFile) {
+                        htmlBrowserUrl = "file://${item.file.absolutePath}"
+                    } else {
+                        FilePreviewHolder.currentItem = item
+                        navController.safeNavigate(Routes.FILE_PREVIEW)
+                    }
                 },
             )
         }
@@ -1456,5 +1469,15 @@ fun AppNavigation(
                 },
             )
         }
+    }
+
+    val pendingHtml = htmlBrowserUrl
+    if (pendingHtml != null) {
+        val pool = (context.applicationContext as MinisApp).sharedBrowserTabPool
+        LaunchedEffect(pendingHtml) { pool.selectOrCreateTabForURL(pendingHtml) }
+        BrowserSheet(
+            tabPool = pool,
+            onDismiss = { htmlBrowserUrl = null },
+        )
     }
 }

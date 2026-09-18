@@ -3,7 +3,9 @@ package com.openminis.app.ui.preview
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
+import android.view.View
 import android.webkit.CookieManager
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.runtime.Composable
@@ -11,6 +13,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import com.openminis.app.browser.ChromeUserAgent
 import com.openminis.app.logging.AppLogger
 
 /**
@@ -48,6 +51,12 @@ class WebViewHolder(
 
     @SuppressLint("SetJavaScriptEnabled")
     val webView: WebView = WebView(appContext).apply {
+        // [T-android-browser-blank] HTML preview lives in a Compose Dialog /
+        // ModalBottomSheet secondary window. On some OEM GPUs the WebView
+        // hardware draw functor fails to composite there — title/URL update
+        // but #root stays blank. Same workaround as
+        // BrowserUseManager.configureWebView: render through a hardware layer.
+        setLayerType(View.LAYER_TYPE_HARDWARE, null)
         settings.javaScriptEnabled = true       // sandbox HTML demos rely on JS
         settings.domStorageEnabled = true
         settings.allowFileAccess = true         // file:// for sandbox previews
@@ -78,6 +87,8 @@ class WebViewHolder(
         // implicitly via WebViewAssetLoader's defaults.
         settings.useWideViewPort = true
         settings.loadWithOverviewMode = true
+        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+        com.openminis.app.browser.WebViewEngine.applyCompat(this)
         mobileUserAgent = settings.userAgentString
         // T-android-webview-v3-port: enable first- + third-party cookies so
         // the in-chat preview matches Chrome cookie semantics. Without
@@ -332,8 +343,8 @@ class WebViewHolder(
     }
 
     /**
-     * Toggle desktop / mobile UA + viewport. Matches the Browser settings'
-     * "Desktop site" behavior: Chrome 134 desktop UA, CSS viewport 1280×800,
+     * Toggle desktop / mobile UA + viewport. Desktop rewrites the platform
+     * but keeps the system WebView Chrome version. CSS viewport 1280×800,
      * with `setInitialScale` shrunk so the 1280-wide CSS viewport fits the
      * physical container width — the same shrink-to-fit math used in
      * `BrowserUseManager.applyShrinkToFit`.
@@ -341,7 +352,7 @@ class WebViewHolder(
     fun toggleDesktopMode() {
         desktopMode = !desktopMode
         if (desktopMode) {
-            webView.settings.userAgentString = DESKTOP_UA
+            webView.settings.userAgentString = ChromeUserAgent.desktop(mobileUserAgent)
             webView.settings.useWideViewPort = true
             webView.settings.loadWithOverviewMode = true
             webView.settings.setSupportZoom(true)
@@ -415,11 +426,6 @@ class WebViewHolder(
 
     companion object {
         private const val TAG = "WebViewHolder"
-        // Match BrowserAction.UserAgentProfile.DESKTOP_CHROME so the in-chat
-        // web preview and the Browser tab desktop modes are identical.
-        private const val DESKTOP_UA =
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
-                "Chrome/134.0.0.0 Safari/537.36"
         // Match UserAgentProfile.DESKTOP_CHROME.viewportSize.
         private const val DESKTOP_VIEWPORT_CSS_WIDTH = 1280
     }

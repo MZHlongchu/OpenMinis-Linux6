@@ -32,7 +32,10 @@ Without them, rolling `android-latest` stays debug-signed.
 
 ## libunwind
 
-`scripts/build_apk_aarch64.sh` and CI copy NDK `libunwind.so` (aarch64) next
-to the APK when present. It is a **release asset**, not packed into the APK.
-If the NDK tree has no shared `libunwind.so`, the script prints a warning
-and continues.
+NDK r28+ no longer ships shared `libunwind.so`. `crash_handler.cpp` still
+calls `_Unwind_Backtrace`, so `scripts/build_libunwind_aarch64.sh` cross-
+compiles LLVM `libunwind.a` into the NDK sysroot. `scripts/build_apk_aarch64.sh`
+and CI run that script before Gradle.
+
+CI also copies `libunwind.a` (and `libunwind.so` if the NDK still has it)
+next to the APK as a **release asset**, not packed into the APK.

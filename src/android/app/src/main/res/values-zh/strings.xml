@@ -538,6 +538,14 @@
     <string name="chat_input_placeholder_hint_4">长按回复的任意位置，可全选并复制</string>
     <string name="browser_takeover">接管</string>
     <string name="browser_settings_done">完成</string>
+    <string name="browser_settings_engine_title">WebView 内核</string>
+    <string name="browser_settings_engine_version">%1$s（目标 Chrome/%2$s）</string>
+    <string name="browser_settings_engine_below">低于 151，仍可兼容。更新系统 WebView 可获得 Blink 151+。</string>
+    <string name="browser_settings_engine_at">当前为目标内核 Chrome/151。</string>
+    <string name="browser_settings_engine_above">高于 151，向前兼容。</string>
+    <string name="browser_settings_engine_unknown">无法识别版本，按特性探测兼容。</string>
+    <string name="browser_settings_engine_update">更新系统 WebView</string>
+    <string name="browser_settings_engine_shared">browser_use 与应用内浏览器共用此内核。</string>
     <string name="browser_settings_user_agent">用户代理</string>
     <string name="browser_settings_ua_mobile_chrome">移动 Chrome (Android)</string>
     <string name="browser_settings_ua_desktop_chrome">桌面 Chrome (Linux)</string>
@@ -1720,6 +1728,8 @@
     <string name="shortcut_voice_chat_long">语音对话</string>
     <string name="shortcut_camera_chat_short">拍照对话</string>
     <string name="shortcut_camera_chat_long">拍照对话</string>
+    <string name="widget_minis_chat_description">打开新的 Minis Ultra 对话</string>
+    <string name="widget_minis_chat_action">新建对话</string>
     <string name="ok">确定</string>
     <string name="sessionlist_scheduled_tasks">定时任务</string>
     <string name="scheduled_tasks_title">定时任务</string>

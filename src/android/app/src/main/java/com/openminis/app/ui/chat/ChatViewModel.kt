@@ -9367,6 +9367,10 @@ class ChatViewModel(
             "memory_get" -> executeMemoryGetTool(argsJson)
             "run_subagent" -> executeRunSubAgent(argsJson, toolId, toolBlocks, assistantId, currentText)
             com.openminis.app.tools.WebSearchTool.NAME -> com.openminis.app.tools.WebSearchTool.execute(argsJson, context)
+            com.openminis.app.tools.SessionLookupTool.SEARCH -> com.openminis.app.tools.SessionLookupTool.executeSearch(
+                argsJson, activeSessionId, context,
+            )
+            com.openminis.app.tools.SessionLookupTool.READ -> com.openminis.app.tools.SessionLookupTool.executeRead(argsJson, context)
             com.openminis.app.tools.AskUserQuestion.NAME, com.openminis.app.tools.AskUserQuestion.ALIAS -> executeAskUserQuestion(argsJson)
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
@@ -10302,7 +10306,7 @@ class ChatViewModel(
                 providerRepository.config.value.modelEntries.associate { it.id to it.model.displayName },
             )
             val cap = multiAgentSettings.maxConcurrent.value
-            "\n- run_subagent: Dispatch a teammate. You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Each prompt MUST be self-contained (goal, workspace paths, relevant files, constraints, acceptance criteria) because sub-agents cannot see this conversation. Note the member role and skills to read. Independent work: emit multiple run_subagent calls in ONE turn (they run in parallel, cap=" + cap + "). Dependent phases: finish and accept before starting the next. After a teammate returns, verify against acceptance criteria; if it fails, name the gap and re-dispatch. Each member may only change their assigned files. Team models: " + names + ". Settings: minis://settings/multi-agent"
+            "\n- run_subagent: Dispatch a teammate. You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Each prompt MUST be self-contained (goal, workspace paths, relevant files, constraints, acceptance criteria) because sub-agents cannot see this conversation. kind=worker|explore|plan; write_paths limits file_write/file_edit. Independent work: emit multiple run_subagent calls in ONE turn (they run in parallel, cap=" + cap + "). Dependent phases: finish and accept before starting the next. After a teammate returns, verify against acceptance criteria; if it fails, name the gap and re-dispatch. Team models: " + names + ". Settings: minis://settings/multi-agent"
         } else {
             ""
         }
@@ -10333,6 +10337,8 @@ Available tools:
 - file_read: Read file contents (faster than cat).
 - file_write: Create new files or overwrite existing files (faster than echo/tee).
 - file_edit: Edit existing files with exact string replacement (old_string → new_string). Preferred over file_write for modifications — always file_read first.
+- search_sessions: Search other chats on this device by keyword (or list recent). Returns session_id; then use read_session. Does not include the current session unless include_current is true.
+- read_session: Load a past session transcript by session_id (paginated, 600 chars/message).
 - ask_user_question: Pose 1–4 structured multiple-choice questions when a choice is genuinely ambiguous. Do not use it to ask permission for routine tool calls.
 - browser_use: Web browsing (navigate, screenshot, click, type, get_text, scroll, scroll_and_collect, get_readable, get_backbone, fetch, etc.). Starts with a desktop Chrome user agent. Use screenshot to see the page.
   当 browser_use 触达 Google 登录 / OAuth 页（accounts.google.com、signin.google.com、myaccount.google.com、oauth2.googleapis.com 等）或网页返回 "disallowed_useragent" / 403 包含 "browser is not secure" 字样时，**不要重试或尝试登录** — Google 永久禁止 in-app WebView 完成登录，重试只会浪费 turn。改为告诉用户："此页面需要在系统 Chrome 完成登录" 并给出可点击的 Markdown link [在 Chrome 中打开](https://accounts.google.com/...)。点该 link 时 app 会跳出 Custom Tab；用户在 Chrome 完成操作后，请他**把所需结果（邮件正文 / 文档摘要 / 表格数据）粘贴回 chat**，你再继续帮他处理。这是 Android 平台限制，不是 bug。${toolListMemoryBullets}${toolListSubAgentBullet}
@@ -12715,6 +12721,12 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         val skills = args.optString("skills", "").trim().ifEmpty { null }
         val requested = args.optString("model", "").trim().ifEmpty { null }
         val title = args.optString("tool_title", "").trim()
+        val kind = com.openminis.app.tools.SubAgentKind.normalize(args.optString("kind", ""))
+        val writePaths = com.openminis.app.tools.WritePathGuard.parse(args.optString("write_paths", ""))
+        val maxTurns = com.openminis.app.tools.SubAgentKind.clampTurns(
+            kind,
+            if (args.has("max_turns")) args.optInt("max_turns") else null,
+        )
         val config = providerRepository.config.value
         val pool = MultiAgentSettings.retainLive(
             multiAgentSettings.selectedModelEntryIds.value,
@@ -12738,7 +12750,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         subAgentDepth.incrementAndGet()
         val trackerId = com.openminis.app.service.SubAgentActivityTracker.start(
             parentSessionId = realSessionId.ifBlank { sessionId },
-            title = title.ifEmpty { "Sub-agent" },
+            title = title.ifEmpty { "Sub-agent ($kind)" },
             role = role,
             model = entry.model.displayName,
         )
@@ -12765,17 +12777,32 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 userPrompt = prompt,
                 role = role,
                 skillsHint = skills,
-                tools = AgentTools.makeAgentTools(
-                    supportsImageInput = entry.model.hasImageInput,
-                    visionGroupConfigured = false,
-                    memoryEnabled = false,
-                    subAgentEnabled = false,
+                tools = com.openminis.app.tools.SubAgentKind.filterTools(
+                    kind,
+                    AgentTools.makeAgentTools(
+                        supportsImageInput = entry.model.hasImageInput,
+                        visionGroupConfigured = false,
+                        memoryEnabled = false,
+                        subAgentEnabled = false,
+                    ),
                 ),
                 maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 8192),
                 executeTool = { name, json ->
-                    executeTool(name, json, "", mutableListOf(), "", "")
+                    if (com.openminis.app.tools.SubAgentKind.blocks(kind, name)) {
+                        ToolExecutionResult("Error: $kind sub-agent cannot use $name.", false)
+                    } else {
+                        val prev = com.openminis.app.tools.WritePathGuard.swap(writePaths)
+                        try {
+                            executeTool(name, json, "", mutableListOf(), "", "")
+                        } finally {
+                            com.openminis.app.tools.WritePathGuard.restore(prev)
+                        }
+                    }
                 },
                 onStep = { onStep(it) },
+                kind = kind,
+                writePaths = writePaths,
+                maxTurns = maxTurns,
             )
             val uiLog = if (liveLog.isNotEmpty()) {
                 liveLog.toString().trimEnd() + "\n---\n" + result.output
@@ -12826,6 +12853,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         "memory_write" -> "Write Memory"
         "memory_get" -> "Read Memory"
         "web_search" -> "Search Web"
+        "search_sessions" -> "Search Sessions"
+        "read_session" -> "Read Session"
         "run_subagent" -> "Sub-agent"
         "ask_user_question", "AskUserQuestion" -> "Ask User"
         else -> toolName

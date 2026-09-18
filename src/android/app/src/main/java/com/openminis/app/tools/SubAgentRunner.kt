@@ -28,16 +28,20 @@ object SubAgentRunner {
         maxTokens: Int,
         executeTool: suspend (name: String, argsJson: String) -> ToolExecutionResult,
         onStep: suspend (String) -> Unit = {},
+        kind: String = SubAgentKind.WORKER,
+        writePaths: List<String> = emptyList(),
+        maxTurns: Int = MAX_TURNS,
     ): ToolExecutionResult {
         val history = mutableListOf(
             LLMMessage(role = LLMMessage.Role.USER, content = userPrompt),
         )
-        val system = workerSystemPrompt(modelDisplayName, role, skillsHint)
+        val turns = maxTurns.coerceIn(1, 24)
+        val system = workerSystemPrompt(modelDisplayName, role, skillsHint, kind, writePaths)
         val report = StringBuilder()
 
         try {
-            repeat(MAX_TURNS) { turnIdx ->
-                runCatching { onStep("turn ${turnIdx + 1}/$MAX_TURNS") }
+            repeat(turns) { turnIdx ->
+                runCatching { onStep("turn ${turnIdx + 1}/$turns") }
                 val textSb = StringBuilder()
                 val toolCalls = mutableListOf<Triple<String, String, JSONObject>>()
                 provider.streamMessage(
@@ -129,7 +133,7 @@ object SubAgentRunner {
                     ),
                 )
             }
-            val out = report.toString().ifBlank { "(sub-agent hit the $MAX_TURNS-turn cap without a final answer)" }
+            val out = report.toString().ifBlank { "(sub-agent hit the $turns-turn cap without a final answer)" }
             return ToolExecutionResult(truncate(out), true)
         } catch (e: CancellationException) {
             throw e
@@ -168,18 +172,35 @@ object SubAgentRunner {
         return "…(truncated)\n" + text.takeLast(MAX_REPORT_CHARS)
     }
 
-    private fun workerSystemPrompt(modelDisplayName: String, role: String?, skillsHint: String?): String {
+    private fun workerSystemPrompt(
+        modelDisplayName: String,
+        role: String?,
+        skillsHint: String?,
+        kind: String,
+        writePaths: List<String>,
+    ): String {
         val roleLine = role?.trim()?.takeIf { it.isNotEmpty() }?.let { "Assigned role: $it.\n" } ?: ""
         val skillsLine = skillsHint?.trim()?.takeIf { it.isNotEmpty() }?.let {
             "Read these skills first (file_read `/var/minis/skills/<id>/SKILL.md`): $it\n"
         } ?: ""
-        return """You are a sub-agent worker, not the session coordinator. Model: $modelDisplayName.
-${roleLine}${skillsLine}You cannot see the parent conversation. Everything you need is in the user prompt: goal, workspace paths, relevant files, constraints, acceptance criteria.
+        val kindLine = "Kind: $kind.\n"
+        val writeLine = if (writePaths.isNotEmpty()) {
+            "You may only file_write/file_edit under: ${writePaths.joinToString()}.\n"
+        } else {
+            ""
+        }
+        val toolLine = if (SubAgentKind.isReadOnly(kind)) {
+            "- Read-only: do not modify files or run shell_execute. Use file_read, search_sessions, read_session, web_search, browser_use."
+        } else {
+            "- Use tools immediately. Prefer file_read / file_edit / file_write / shell_execute."
+        }
+        return """You are a sub-agent ($kind), not the session coordinator. Model: $modelDisplayName.
+${roleLine}${skillsLine}${kindLine}${writeLine}You cannot see the parent conversation. Everything you need is in the user prompt: goal, workspace paths, relevant files, constraints, acceptance criteria.
 
 Rules:
 - Complete ONLY the assigned slice. Do not rewrite unrelated files.
 - Do not spawn further sub-agents.
-- Use tools immediately. Prefer file_read / file_edit / file_write / shell_execute.
+$toolLine
 - When done, return a concise report: what changed, files touched, leftover risks, and whether acceptance criteria passed.
 - If you cannot meet the acceptance criteria, say so explicitly and list what failed.
 """

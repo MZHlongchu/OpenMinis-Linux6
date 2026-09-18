@@ -2305,36 +2305,19 @@ fun ChatScreen(
     val markdownFontScale = com.openminis.app.ui.settings.fontScaleForLevel(messageFontLevel)
     val chatInputFontScale = com.openminis.app.ui.settings.fontScaleForLevel(chatInputLevel)
 
-    var previewUrl by remember { mutableStateOf<String?>(null) }
-    // T146: dedicated state for the immersive HTML preview path. Holding
-    // both a `holder` and `fullscreen` flag (rather than two separate
-    // states) ensures the same WebView survives the sheet→fullscreen
-    // toggle without reloading the page (iOS parity, WebPreviewSheet.swift).
-    var htmlPreviewHolder by remember {
-        mutableStateOf<com.openminis.app.ui.preview.WebViewHolder?>(null)
-    }
-    var htmlPreviewFallbackTitle by remember { mutableStateOf("") }
-    var htmlPreviewFullscreen by remember { mutableStateOf(false) }
-    val appCtx = context.applicationContext
-    val openHtmlPreview = remember<(java.io.File, String) -> Unit>(appCtx) {
-        { file, title ->
-            // Reuse the same WebViewHolder as long as the file path doesn't
-            // change. Tapping the same html link twice should pick up wherever
-            // the user left off rather than reloading from scratch.
-            val url = "file://${file.absolutePath}"
-            val existing = htmlPreviewHolder
-            if (existing == null || existing.currentUrl != url) {
-                existing?.destroy()
-                htmlPreviewHolder = com.openminis.app.ui.preview.WebViewHolder(appCtx, url)
+    val previewFileOrBrowser = remember(viewModel, onPreviewAttachment) {
+        { item: com.openminis.app.ui.sandbox.FileItem ->
+            if (item.isHtmlFile) {
+                viewModel.openBrowserSheetForUrl("file://${item.file.absolutePath}")
+            } else {
+                onPreviewAttachment(item)
             }
-            htmlPreviewFallbackTitle = title
-            htmlPreviewFullscreen = false
         }
     }
     // Pinned-shortcut deep link: minis://session/<id>/<resource-path>
     // consumes here on first composition iff this screen is showing the
-    // matching session; opens fullscreen HTML preview backed by a fresh
-    // holder. Pending state is left untouched when a different chat is on
+    // matching session; opens the HTML in BrowserSheet. Pending state is
+    // left untouched when a different chat is on
     // screen so the right ChatScreen instance still consumes it later.
     LaunchedEffect(sessionId) {
         val pending = com.openminis.app.deeplink.DeepLinkCoordinator
@@ -2350,11 +2333,7 @@ fun ChatScreen(
             )
             return@LaunchedEffect
         }
-        val url = "file://${file.absolutePath}"
-        htmlPreviewHolder?.destroy()
-        htmlPreviewHolder = com.openminis.app.ui.preview.WebViewHolder(appCtx, url)
-        htmlPreviewFallbackTitle = pending.title
-        htmlPreviewFullscreen = true
+        viewModel.openBrowserSheetForUrl("file://${file.absolutePath}")
     }
     // T-imgswipe-4f446d83: replace previous single-image preview state with a
     // gallery (list + start index) so callers can pass sibling images (input
@@ -2397,19 +2376,17 @@ fun ChatScreen(
                             ) to 0
                         }
                         action.item.isVideoFile -> previewVideoFile = action.item.file
-                        // T146: HTML files take the immersive web-preview path
-                        // (iOS-style 90% bottom sheet + fullscreen toggle)
-                        // instead of FilePreviewScreen's plain fullscreen
-                        // Scaffold. snake_game.html and similar generated
-                        // pages need browser controls to feel right.
-                        action.item.isHtmlFile -> openHtmlPreview(action.item.file, action.item.name)
+                        // Sandbox HTML (snake_game.html etc.) opens in
+                        // browser_use / BrowserSheet — same WebView as the agent.
+                        action.item.isHtmlFile ->
+                            viewModel.openBrowserSheetForUrl("file://${action.item.file.absolutePath}")
                         // T279: route through the NavHost FILE_PREVIEW destination
                         // (same path as user-bubble attachments and "Browse Chat Files")
                         // so FilePreviewScreen inherits the Activity's edge-to-edge
                         // window setup. The previous in-place Dialog wrapper had
                         // its own Window without enableEdgeToEdge, painting the
                         // platform default scrim on the status / nav bars.
-                        else -> onPreviewAttachment(action.item)
+                        else -> previewFileOrBrowser(action.item)
                     }
                 }
                 is ChatLinkAction.ExternalApp ->
@@ -2423,7 +2400,8 @@ fun ChatScreen(
                             com.openminis.app.ui.browser.BrowserExternalSchemeHandler
                                 .Origin.USER_INITIATED,
                         )
-                is ChatLinkAction.Web -> previewUrl = action.url
+                // http(s)/about: open in browser_use (BrowserSheet).
+                is ChatLinkAction.Web -> viewModel.openBrowserSheetForUrl(action.url)
             }
         }
     }
@@ -2432,7 +2410,7 @@ fun ChatScreen(
     // OSC MinisOpenURL marker (via /usr/local/bin/minis-open). The broker is
     // populated by ChatViewModel's shell lineCallback; forwarding the URL
     // into `urlClickHandler` routes it exactly like a chat-link tap —
-    // http(s)/about → UrlPreviewSheet, minis:// deep links → DeepLinkHandler,
+    // http(s)/about → BrowserSheet, minis:// deep links → DeepLinkHandler,
     // minis://<host>/<path> → in-app file preview by extension.
     val pendingMinisOpenUrl by com.openminis.app.terminal.MinisOpenUrlBroker.pendingUrl
         .collectAsState()
@@ -4125,7 +4103,7 @@ fun ChatScreen(
                                     // both entry points share one screen.
                                     val file = uri.path?.let { java.io.File(it) }
                                     if (file != null && file.exists()) {
-                                        onPreviewAttachment(
+                                        previewFileOrBrowser(
                                             com.openminis.app.ui.sandbox.FileItem(
                                                 file = file,
                                                 name = name,
@@ -4554,7 +4532,7 @@ fun ChatScreen(
                             val file = com.openminis.app.tools.ToolOutputSpill.hostFile(context, sid, guest)
                             if (file != null) {
                                 viewModel.closeToolDetail()
-                                onPreviewAttachment(
+                                previewFileOrBrowser(
                                     com.openminis.app.ui.sandbox.FileItem(
                                         file = file,
                                         name = file.name,
@@ -5540,7 +5518,7 @@ fun ChatScreen(
                                                 uri.path?.let { java.io.File(it) }
                                             } else null
                                             if (asFile != null && asFile.exists()) {
-                                                onPreviewAttachment(
+                                                previewFileOrBrowser(
                                                     com.openminis.app.ui.sandbox.FileItem(
                                                         file = asFile,
                                                         name = attachment.fileName,
@@ -7056,48 +7034,6 @@ fun ChatScreen(
 
     // Offload permission dialog
     OffloadPermissionDialog()
-
-    // URL preview sheet — shown when a markdown link is tapped
-    previewUrl?.let { url ->
-        com.openminis.app.ui.components.UrlPreviewSheet(
-            url = url,
-            onDismiss = { previewUrl = null },
-        )
-    }
-
-    // T146: immersive HTML preview — bottom sheet (90% height) by default,
-    // with a Fullscreen button that swaps to a Dialog-based fullscreen
-    // surface using the SAME WebViewHolder so the page never reloads.
-    htmlPreviewHolder?.let { holder ->
-        val onFullDismiss = {
-            holder.destroy()
-            htmlPreviewHolder = null
-            htmlPreviewFallbackTitle = ""
-            htmlPreviewFullscreen = false
-        }
-        if (htmlPreviewFullscreen) {
-            com.openminis.app.ui.preview.WebPreviewFullscreenScreen(
-                holder = holder,
-                fallbackTitle = htmlPreviewFallbackTitle,
-                onCollapseToSheet = {
-                    holder.detach()
-                    htmlPreviewFullscreen = false
-                },
-                onDismiss = onFullDismiss,
-            )
-        } else {
-            com.openminis.app.ui.preview.WebPreviewBottomSheet(
-                holder = holder,
-                fallbackTitle = htmlPreviewFallbackTitle,
-                pinSessionId = sessionId,
-                onExpandFullscreen = {
-                    holder.detach()
-                    htmlPreviewFullscreen = true
-                },
-                onDismiss = onFullDismiss,
-            )
-        }
-    }
 
     // T279: sandbox file preview is now routed through the NavHost
     // FILE_PREVIEW destination via onPreviewAttachment (see line ~1103),

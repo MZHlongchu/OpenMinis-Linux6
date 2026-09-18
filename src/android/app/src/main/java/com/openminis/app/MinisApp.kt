@@ -456,6 +456,11 @@ class MinisApp : Application(), ImageLoaderFactory {
         // late, non-UI subsystem from permanently locking the user out
         // of an app whose UI dependencies are in fact ready.
         subsystemsInitialized = true
+            try {
+                Log.i("WebViewEngine", com.openminis.app.browser.WebViewEngine.snapshot(this).summary)
+            } catch (t: Throwable) {
+                Log.w("WebViewEngine", "probe failed", t)
+            }
         } catch (t: Throwable) {
             // subsystemsInitialized stays false — MainActivity will show the
             // crash-share dialog rather than composing against unassigned

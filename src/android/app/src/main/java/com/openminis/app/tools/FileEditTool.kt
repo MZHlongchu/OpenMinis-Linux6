@@ -47,6 +47,9 @@ object FileEditTool {
                     false, toolTitle = toolTitle,
                 )
             }
+            WritePathGuard.denyReason(path)?.let { msg ->
+                return ToolExecutionResult(msg, false, toolTitle = toolTitle)
+            }
 
             // T123: per-session resolver — see FileWriteTool for rationale.
             val file = PRootKernel.resolveSessionHostPath(sessionId, path, context)

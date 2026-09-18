@@ -48,6 +48,9 @@ object FileWriteTool {
                     false, toolTitle = toolTitle,
                 )
             }
+            WritePathGuard.denyReason(path)?.let { msg ->
+                return ToolExecutionResult(msg, false, toolTitle = toolTitle)
+            }
 
             // T123: per-session resolver so /var/minis/workspace/...,
             // /var/minis/attachments/..., /var/minis/offloads/...,

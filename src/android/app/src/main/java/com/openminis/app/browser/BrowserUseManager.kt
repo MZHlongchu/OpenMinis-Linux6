@@ -85,7 +85,12 @@ class BrowserUseManager(
         private const val MAX_DOM_STABLE_TIMEOUT_MS = 60_000
 
         @SuppressLint("SetJavaScriptEnabled")
-        fun configureWebView(webView: WebView, profile: UserAgentProfile, customUA: String? = null) {
+        fun configureWebView(
+            webView: WebView,
+            profile: UserAgentProfile,
+            customUA: String? = null,
+            systemUa: String? = null,
+        ) {
             // [T-android-browser-blank] The browser lives inside a Material3
             // ModalBottomSheet, which hosts content in its own secondary
             // window. On some OEM GPUs the WebView's hardware draw functor
@@ -104,9 +109,16 @@ class BrowserUseManager(
                 builtInZoomControls = false
                 setSupportMultipleWindows(true)
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                val ua = customUA ?: profile.userAgentString
-                if (ua != null) userAgentString = ua
+                allowFileAccess = true
+                allowContentAccess = true
+                @Suppress("DEPRECATION")
+                allowFileAccessFromFileURLs = true
+                @Suppress("DEPRECATION")
+                allowUniversalAccessFromFileURLs = true
+                val seed = systemUa ?: userAgentString
+                userAgentString = ChromeUserAgent.resolve(profile, seed, customUA)
             }
+            WebViewEngine.applyCompat(webView)
             // T-android-webview-v3-port: enable first- + third-party cookies.
             // WebView ships with third-party cookies disabled by default; that
             // breaks hCaptcha / Turnstile / reCAPTCHA flows where the
@@ -148,6 +160,7 @@ class BrowserUseManager(
     val canGoForward: StateFlow<Boolean> = _canGoForward.asStateFlow()
 
     private var currentProfile: UserAgentProfile = profile
+    private val systemUserAgent: String = webView.settings.userAgentString
 
     /** Callback for window.open / target="_blank" — TabPool hooks this. */
     var onNewWindow: ((Message) -> Unit)? = null
@@ -229,7 +242,7 @@ class BrowserUseManager(
     }
 
     init {
-        configureWebView(webView, profile)
+        configureWebView(webView, profile, systemUa = systemUserAgent)
         webView.addJavascriptInterface(jsBridge, "__minis__")
         setupWebViewClient()
         setupWebChromeClient()
@@ -1207,11 +1220,8 @@ class BrowserUseManager(
     /** Set user agent from UI settings (public, non-result). */
     fun setUserAgent(profile: UserAgentProfile, customUA: String? = null) {
         currentProfile = profile
-        val ua = if (profile == UserAgentProfile.CUSTOM && !customUA.isNullOrEmpty()) customUA
-            else profile.userAgentString
-        if (ua != null) {
-            webView.settings.userAgentString = ua
-        }
+        webView.settings.userAgentString =
+            ChromeUserAgent.resolve(profile, systemUserAgent, customUA)
         applyViewport()
         if (_currentURL.value.isNotEmpty()) {
             webView.reload()
@@ -1271,16 +1281,14 @@ class BrowserUseManager(
     private suspend fun setUserAgent(profile: UserAgentProfile?): BrowserActionResult {
         val newProfile = profile ?: UserAgentProfile.MOBILE_CHROME
         currentProfile = newProfile
-        val ua = newProfile.userAgentString
         // Every WebView method must be called on the main thread, but the
         // offload handler's `runBlocking { ... execute(...) }` dispatches on
         // a worker. `applyViewport(...)` measures/layouts the detached
         // WebView; settings / reload likewise. Hop to main so we don't
         // crash with "A WebView method was called on thread 'worker-N'".
         withContext(Dispatchers.Main) {
-            if (ua != null) {
-                webView.settings.userAgentString = ua
-            }
+            webView.settings.userAgentString =
+                ChromeUserAgent.resolve(newProfile, systemUserAgent)
             applyViewport()
             val oldUrl = _currentURL.value
             if (oldUrl.isNotEmpty()) {

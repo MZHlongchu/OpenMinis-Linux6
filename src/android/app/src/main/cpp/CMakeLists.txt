@@ -20,5 +20,13 @@ target_include_directories(jieba_jni PRIVATE
 
 find_library(log-lib log)
 target_link_libraries(pty_bridge ${log-lib})
-target_link_libraries(minis_crash_handler ${log-lib})
+# crash_handler.cpp uses _Unwind_Backtrace. NDK r28+ dropped shared
+# libunwind.so; scripts/build_libunwind_aarch64.sh installs libunwind.a
+# into the sysroot so -lunwind resolves.
+find_library(UNWIND_LIB unwind)
+if(UNWIND_LIB)
+    target_link_libraries(minis_crash_handler ${log-lib} ${UNWIND_LIB})
+else()
+    target_link_libraries(minis_crash_handler ${log-lib} unwind)
+endif()
 target_link_libraries(jieba_jni ${log-lib})

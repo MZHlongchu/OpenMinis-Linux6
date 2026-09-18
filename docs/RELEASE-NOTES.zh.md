@@ -1,3 +1,35 @@
+# OpenMinis-Linux 1.20-linux
+
+- versionCode **32**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a；有 `MINIS_UPLOAD_*` 则用上传证书，否则仍为 debug-signed）
+- 签名说明：[docs/SIGNING.md](SIGNING.md)；一键编译：`scripts/build_apk_aarch64.sh`
+
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本。
+
+## 本版（对照 Operit / 拾忆 / OmniBot / Eta 的首批补齐）
+
+1. **跨会话检索工具**  
+   模型可直接调用 `search_sessions` / `read_session`（底层仍是原有会话库，不必再绕 `minis-sessions-cli`）。默认不包含当前会话；每条消息 600 字截断。
+
+2. **子 Agent 种类与写路径**  
+   `run_subagent` 增加 `kind=worker|explore|plan`、`write_paths`、`max_turns`。explore/plan 只读（无 file_write / file_edit / shell_execute）；worker 的 `write_paths` 限制文件工具前缀。
+
+3. **默认助手入口 + 桌面小组件**  
+   可在系统设置里把 Minis Ultra 设为助手（`ACTION_ASSIST`，无 LSPosed）。主屏小组件一点进入新建对话。
+
+4. **browser_use / 内置浏览器内核**  
+   目标 Chrome/151，实际跟系统 WebView APK；低于/高于 151 均可运行。聊天与文件里的 HTML 走 BrowserSheet，不伪装 UA。
+
+5. **crash_handler 链接 libunwind**  
+   `scripts/build_libunwind_aarch64.sh` 交叉编译 `libunwind.a`，CI 在 assemble 前安装进 NDK sysroot，`_Unwind_Backtrace` 可链接。
+
+未做（下一版或你拍板）：局域网 WebChat、角色卡、本地 MNN/llama、MCP 市场、Operit2 多设备 Space、Eta 的 LSPosed/厂商助手接管。
+
+---
+
 # OpenMinis-Linux 1.19-linux
 
 - versionCode **31**

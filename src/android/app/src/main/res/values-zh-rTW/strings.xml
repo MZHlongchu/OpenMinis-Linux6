@@ -1660,6 +1660,8 @@
     <string name="shortcut_voice_chat_long">語音對話</string>
     <string name="shortcut_camera_chat_short">相機對話</string>
     <string name="shortcut_camera_chat_long">相機對話</string>
+    <string name="widget_minis_chat_description">開啟新的 Minis Ultra 對話</string>
+    <string name="widget_minis_chat_action">新建對話</string>
     <string name="ok">確定</string>
     <string name="sessionlist_scheduled_tasks">排程工作</string>
     <string name="scheduled_tasks_title">排程工作</string>

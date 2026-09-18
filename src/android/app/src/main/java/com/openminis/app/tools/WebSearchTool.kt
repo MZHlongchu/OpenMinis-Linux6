@@ -100,7 +100,7 @@ object WebSearchTool {
         return try {
             when (engine) {
                 WebSearchSettings.Engine.DDG -> {
-                    val html = fetchUrl("https://html.duckduckgo.com/html/?q=${enc(query)}")
+                    val html = fetchUrl("https://html.duckduckgo.com/html/?q=${enc(query)}", context = context)
                         ?: return Attempt(emptyList(), "empty response from DuckDuckGo")
                     val parsed = parseHtml(html, max)
                     Attempt(parsed, if (parsed.isEmpty()) "DuckDuckGo returned no cards" else null)
@@ -109,7 +109,7 @@ object WebSearchTool {
                     val base = context?.let { WebSearchSettings.searxngUrl(it) }.orEmpty().trimEnd('/')
                     if (base.isEmpty()) return Attempt(emptyList(), "SearXNG URL is not configured")
                     val endpoint = if (base.endsWith("/search")) base else "$base/search"
-                    val body = fetchUrl("$endpoint?q=${enc(query)}&format=json")
+                    val body = fetchUrl("$endpoint?q=${enc(query)}&format=json", context = context)
                         ?: return Attempt(emptyList(), "empty response from SearXNG")
                     val parsed = parseSearxJson(body, max)
                     Attempt(parsed, if (parsed.isEmpty()) "SearXNG returned no results" else null)
@@ -123,6 +123,7 @@ object WebSearchTool {
                             "Ocp-Apim-Subscription-Key" to key,
                             "Accept" to "application/json",
                         ),
+                        context = context,
                     ) ?: return Attempt(emptyList(), "empty response from Bing")
                     val parsed = parseBingJson(body, max)
                     Attempt(parsed, if (parsed.isEmpty()) "Bing returned no results" else null)
@@ -229,17 +230,28 @@ object WebSearchTool {
     private fun enc(query: String): String =
         URLEncoder.encode(query, StandardCharsets.UTF_8.name())
 
-    private fun fetchUrl(urlString: String, extraHeaders: Map<String, String> = emptyMap()): String? {
+    private fun httpUserAgent(context: Context?): String {
+        val major = context?.let {
+            runCatching { com.openminis.app.browser.WebViewEngine.snapshot(it).major }.getOrNull()
+        }
+        val chrome = major?.let { "Chrome/$it.0.0.0" }
+            ?: "Chrome/${com.openminis.app.browser.WebViewEngine.TARGET_MAJOR}.0.0.0"
+        return "Mozilla/5.0 (Linux; Android ${android.os.Build.VERSION.RELEASE}; OpenMinis-Linux) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) $chrome Mobile Safari/537.36"
+    }
+
+    private fun fetchUrl(
+        urlString: String,
+        extraHeaders: Map<String, String> = emptyMap(),
+        context: Context? = null,
+    ): String? {
         val url = URL(urlString)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = true
             connectTimeout = TIMEOUT_MS
             readTimeout = TIMEOUT_MS
             requestMethod = "GET"
-            setRequestProperty(
-                "User-Agent",
-                "Mozilla/5.0 (Linux; Android 14; OpenMinis-Linux) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-            )
+            setRequestProperty("User-Agent", httpUserAgent(context))
             setRequestProperty("Accept", extraHeaders["Accept"] ?: "text/html,application/xhtml+xml,application/json")
             setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
             extraHeaders.forEach { (k, v) -> setRequestProperty(k, v) }
