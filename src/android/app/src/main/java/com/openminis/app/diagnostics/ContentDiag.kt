@@ -1,5 +1,6 @@
 package com.openminis.app.diagnostics
 
+import com.openminis.app.text.BoundedText
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -15,6 +16,9 @@ import java.util.concurrent.atomic.AtomicReference
  *  - HangDetector — attaches the currently-rendering message's fingerprint to
  *    each JankDiag stall sample (via [currentRender]) so a Matcher/Pattern
  *    stack maps straight to "this message, this structure" from the log alone.
+ *
+ * Regex fingerprints run only on a bounded head+tail window. A 36 MB log or a
+ * 5 MB tool dump must never reach `Matcher.reset` (2026-09-18 Scudo OOM).
  */
 /** Below this length a message never drives a render hang, so skip the summary. */
 const val CONTENT_DIAG_MIN_CHARS = 5_000
@@ -54,24 +58,21 @@ object ContentDiag {
     private val INLINE_MATH_PAREN = Regex("""\\\(""")
 
     /**
-     * Compute the structural summary. O(n) over the text with a handful of
-     * regex scans — cheap enough to call on the cold-open path, but callers
-     * should still gate on a size threshold to avoid summarizing tiny bodies.
+     * Compute the structural summary. Length / line count walk the full string
+     * (O(n) Java, no ICU). Regex fingerprints run only on a bounded head+tail
+     * window.
      */
     fun summarize(text: String): Summary {
         if (text.isEmpty()) return Summary(0, 0, 0, 0, 0, 0)
         val lines = text.count { it == '\n' } + 1
-        // Paragraphs: runs separated by one-or-more blank lines.
-        val paragraphs = text.split(Regex("\\n\\s*\\n"))
-            .count { it.isNotBlank() }
-            .coerceAtLeast(1)
-        // Fenced code blocks = fence markers / 2 (round up an unclosed trailing fence).
-        val fenceMarkers = FENCE.findAll(text).count()
+        val scan = BoundedText.scanWindow(text)
+        val paragraphs = countParagraphs(scan)
+        val fenceMarkers = FENCE.findAll(scan).count()
         val codeBlockCount = (fenceMarkers + 1) / 2
-        val tableCount = TABLE_SEP.findAll(text).count()
-        val displayDollar = DISPLAY_MATH_DOLLAR.findAll(text).count() / 2
-        val displayBracket = DISPLAY_MATH_BRACKET.findAll(text).count()
-        val inlineParen = INLINE_MATH_PAREN.findAll(text).count()
+        val tableCount = TABLE_SEP.findAll(scan).count()
+        val displayDollar = DISPLAY_MATH_DOLLAR.findAll(scan).count() / 2
+        val displayBracket = DISPLAY_MATH_BRACKET.findAll(scan).count()
+        val inlineParen = INLINE_MATH_PAREN.findAll(scan).count()
         val mathCount = displayDollar + displayBracket + inlineParen
         return Summary(
             chars = text.length,
@@ -81,6 +82,38 @@ object ContentDiag {
             codeBlockCount = codeBlockCount,
             mathCount = mathCount,
         )
+    }
+
+    /** Blank-line-separated paragraphs without compiling a Regex on the body. */
+    internal fun countParagraphs(text: String): Int {
+        var n = 0
+        var inPara = false
+        var atLineStart = true
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (c == '\n') {
+                if (atLineStart) {
+                    if (inPara) {
+                        n++
+                        inPara = false
+                    }
+                } else {
+                    atLineStart = true
+                }
+                i++
+                continue
+            }
+            if (atLineStart && (c == ' ' || c == '\t')) {
+                i++
+                continue
+            }
+            inPara = true
+            atLineStart = false
+            i++
+        }
+        if (inPara) n++
+        return n.coerceAtLeast(1)
     }
 
     // ─── Current-render fingerprint for HangDetector correlation ───────────────

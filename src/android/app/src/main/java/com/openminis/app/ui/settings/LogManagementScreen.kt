@@ -1,6 +1,7 @@
 package com.openminis.app.ui.settings
 
 import com.openminis.app.R
+import com.openminis.app.text.BoundedText
 import com.openminis.app.ui.components.MinisTextButton
 
 import android.content.Context
@@ -551,7 +552,7 @@ private fun shareLogFile(context: Context, file: File) {
             "LogShare",
             "FileProvider share failed for ${file.name}: ${e.message} — falling back to EXTRA_TEXT",
         )
-        val text = try { file.readText().take(100_000) } catch (_: Exception) { return }
+        val text = try { BoundedText.readFileTail(file, 100_000) } catch (_: Exception) { return }
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_TEXT, text)

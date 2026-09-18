@@ -1,0 +1,109 @@
+package com.openminis.app.text
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.io.File
+
+class BoundedTextTest {
+
+    @Test
+    fun `icuWindow does not expose more than the cap`() {
+        val huge = "x".repeat(BoundedText.MAX_ICU_INPUT_CHARS + 50_000)
+        val window = BoundedText.icuWindow(huge)
+        assertEquals(BoundedText.MAX_ICU_INPUT_CHARS, window.length)
+        assertEquals('x', window[0])
+    }
+
+    @Test
+    fun `markdownParseInput truncates at the parse cap`() {
+        val huge = "hello\n" + "y".repeat(100_000)
+        val parsed = BoundedText.markdownParseInput(huge)
+        assertEquals(BoundedText.MAX_MARKDOWN_PARSE_CHARS, parsed.length)
+        assertTrue(parsed.startsWith("hello\n"))
+    }
+
+    @Test
+    fun `scanWindow keeps head and tail of a huge buffer`() {
+        val head = "```kotlin\n"
+        val tail = "\n| --- | --- |\n"
+        val marker = "UNIQUE_MID_MARKER"
+        val text = head + "Z".repeat(40_000) + marker + "Z".repeat(40_000) + tail
+        val window = BoundedText.scanWindow(text)
+        assertEquals(BoundedText.MAX_CONTENT_DIAG_SCAN_CHARS, window.length)
+        assertTrue(window.startsWith("```"))
+        assertTrue(window.contains("| --- | --- |"))
+        assertFalse(window.contains(marker))
+    }
+
+    @Test
+    fun `clampLogLine keeps a short line intact`() {
+        assertEquals("ok", BoundedText.clampLogLine("ok"))
+    }
+
+    @Test
+    fun `clampLogLine truncates a megabyte dump`() {
+        val line = "A".repeat(20_000)
+        val clamped = BoundedText.clampLogLine(line)
+        assertTrue(clamped.length < line.length)
+        assertTrue(clamped.startsWith("A".repeat(32)))
+        assertTrue(clamped.contains("truncated"))
+        assertTrue(clamped.length <= BoundedText.MAX_LOG_LINE_CHARS + 40)
+    }
+
+    @Test
+    fun `canAppendLog refuses a file already at the cap`() {
+        assertFalse(BoundedText.canAppendLog(BoundedText.MAX_LOG_FILE_BYTES, 10))
+        assertTrue(BoundedText.canAppendLog(0, 10))
+        assertFalse(
+            BoundedText.canAppendLog(
+                BoundedText.MAX_LOG_FILE_BYTES - 4,
+                16,
+            ),
+        )
+    }
+
+    @Test
+    fun `selectPrewarmFragments never adds a giant fragment`() {
+        val giant = "G".repeat(BoundedText.MAX_PREWARM_FRAGMENT_CHARS + 1)
+        val small = "ok"
+        val picked = BoundedText.selectPrewarmFragments(
+            newestFirst = listOf(giant, small, "also"),
+            rowLimit = 16,
+            charBudget = 96_000,
+        )
+        assertEquals(listOf("ok", "also"), picked)
+        assertFalse(picked.any { it.length > BoundedText.MAX_PREWARM_FRAGMENT_CHARS })
+    }
+
+    @Test
+    fun `selectPrewarmFragments does not let one fragment blow the budget`() {
+        // Old ChatScreen loop added first, then checked the budget — a 5 MB
+        // fence became the sole prewarm target on DefaultDispatcher.
+        val almost = "a".repeat(90_000)
+        val picked = BoundedText.selectPrewarmFragments(
+            newestFirst = listOf(almost, "tiny"),
+            rowLimit = 16,
+            charBudget = 8_000,
+        )
+        assertEquals(listOf("tiny"), picked)
+    }
+
+    @Test
+    fun `readFileRange never materializes the whole file`() {
+        val dir = File.createTempFile("bounded-text", "dir").apply {
+            delete()
+            mkdirs()
+            deleteOnExit()
+        }
+        val file = File(dir, "minis-test.log")
+        file.writeText("HEAD" + "m".repeat(50_000) + "TAIL")
+        val slice = BoundedText.readFileRange(file, 0, 8)
+        assertEquals("HEAD" + "m".repeat(4), slice)
+        val tail = BoundedText.readFileTail(file, 4)
+        assertEquals("TAIL", tail)
+        file.delete()
+        dir.delete()
+    }
+}

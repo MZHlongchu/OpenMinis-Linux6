@@ -5,6 +5,7 @@ import android.content.Intent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.R
+import com.openminis.app.text.BoundedText
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
@@ -1170,6 +1171,9 @@ private fun isBlockquoteLine(trimmed: String): Boolean {
  * `[alt]` link — no preview card, no tap-to-play.
  */
 private fun splitParagraphOnInlineMedia(text: String): List<MdBlock> {
+    if (text.length > BoundedText.MAX_ICU_INPUT_CHARS) {
+        return listOf(MdBlock.Paragraph(text))
+    }
     val matches = inlineMediaRegex.findAll(text).toList()
     if (matches.isEmpty()) return listOf(MdBlock.Paragraph(text))
 
@@ -1350,8 +1354,9 @@ private fun findDisplayMathClose(lines: List<String>, from: Int): Int? {
 }
 
 private suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
+    val src = BoundedText.markdownParseInput(content)
     val blocks = mutableListOf<MdBlock>()
-    val lines = content.lines()
+    val lines = src.lines()
     var i = 0
     // Counter so we don't query coroutineContext on EVERY line (small but
     // measurable allocation overhead at ~thousands of lines per pass).
@@ -1364,6 +1369,11 @@ private suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
         }
         sinceLastCheck++
         val line = lines[i]
+        if (line.length > BoundedText.MAX_ICU_INPUT_CHARS) {
+            blocks.add(MdBlock.Paragraph(line))
+            i++
+            continue
+        }
         val trimmed = line.trimStart()
 
         when {
@@ -3097,6 +3107,7 @@ private object MarkdownParseCaches {
      *  migration) instead of flashing the plain-text preview while an
      *  off-main re-parse runs. */
     fun putBlocks(raw: String, blocks: List<MdBlock>) {
+        if (raw.length > BoundedText.MAX_MARKDOWN_PARSE_CHARS) return
         synchronized(blocksLru) { blocksLru[raw] = blocks }
     }
 
@@ -3104,14 +3115,19 @@ private object MarkdownParseCaches {
      *  caller's thread (once per distinct fragment text process-wide); scroll
      *  away/return and session re-entry are hits. */
     fun blocks(raw: String): List<MdBlock> {
-        synchronized(blocksLru) { blocksLru[raw] }?.let { return it }
+        val cacheable = raw.length <= BoundedText.MAX_MARKDOWN_PARSE_CHARS
+        if (cacheable) {
+            synchronized(blocksLru) { blocksLru[raw] }?.let { return it }
+        }
         val t0 = System.nanoTime()
         val computed = parseMarkdownBlocksBlocking(raw)
         maybeLogSlowParse(
             "blocks", raw.length, (System.nanoTime() - t0) / 1_000_000,
             extra = " blocks=${computed.size}",
         )
-        synchronized(blocksLru) { blocksLru[raw] = computed }
+        if (cacheable) {
+            synchronized(blocksLru) { blocksLru[raw] = computed }
+        }
         return computed
     }
 

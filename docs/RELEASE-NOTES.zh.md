@@ -1,3 +1,27 @@
+# OpenMinis-Linux 1.24-linux
+
+- versionCode **36**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a；有 `MINIS_UPLOAD_*` 则用上传证书，否则仍为 debug-signed）
+- 签名说明：[docs/SIGNING.md](SIGNING.md)；一键编译：`scripts/build_apk_aarch64.sh`
+
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本。
+
+## 本版
+
+1. **超长文本不再送进 ICU Matcher**  
+   2026-09-18 子代理压力测试闪退：`DefaultDispatcher` 上 `Regex` → `Matcher.reset` → `utext_openUChars`，Scudo `internal map failure (Out of memory)`。设备 RAM 充足，是进程 native 地址空间被整段 markdown/日志撑爆。ContentDiag 只扫描头尾 8k 窗口；markdown 解析硬顶 32k；超长行当纯段落；代码高亮只正则前 16k。
+
+2. **冷启动 prewarm 不再吞下整段超大碎片**  
+   原先「先加入再看 96k 预算」，一条 5MB fence 仍会被送去 DefaultDispatcher 解析。现在跳过超过 32k 的碎片。
+
+3. **日日志封顶**  
+   `minis-yyyy-MM-dd.log` 8MB 后停写；单行 4k；`readLog` / 调试 RPC / 分享兜底不再 `file.readText()` 整文件进堆。
+
+---
+
 # OpenMinis-Linux 1.23-linux
 
 - versionCode **35**

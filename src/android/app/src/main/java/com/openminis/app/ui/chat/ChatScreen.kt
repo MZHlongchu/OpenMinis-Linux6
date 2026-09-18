@@ -147,6 +147,7 @@ import com.openminis.app.BuildConfig
 import com.openminis.app.R
 import com.openminis.app.data.FileMentionIndex
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.text.BoundedText
 import com.openminis.app.ui.components.MinisAlertDialog
 import com.openminis.app.ui.components.MinisMenu
 import com.openminis.app.ui.components.MinisMenuDivider
@@ -3480,14 +3481,16 @@ fun ChatScreen(
                                 if (stream.isEmpty() && rows.isNotEmpty()) {
                                     val prewarmRowLimit = 16
                                     val prewarmCharBudget = 96_000
-                                    val raws = mutableListOf<String>()
-                                    var charSum = 0
+                                    val newestFirst = ArrayList<String>()
                                     for (item in rows.asReversed()) {
-                                        if (raws.size >= prewarmRowLimit || charSum >= prewarmCharBudget) break
                                         val raw = (item as? FlatChatItem.AssistantMarkdownBlock)?.rawText ?: continue
-                                        raws.add(raw)
-                                        charSum += raw.length
+                                        newestFirst.add(raw)
                                     }
+                                    val raws = BoundedText.selectPrewarmFragments(
+                                        newestFirst = newestFirst,
+                                        rowLimit = prewarmRowLimit,
+                                        charBudget = prewarmCharBudget,
+                                    )
                                     if (raws.isNotEmpty()) {
                                         launch(Dispatchers.Default) {
                                             val tPrewarmNs = System.nanoTime()
@@ -3497,7 +3500,7 @@ fun ChatScreen(
                                             com.openminis.app.diagnostics.PerfLongCtx.step(
                                                 sessionId,
                                                 "coldPrewarm.done",
-                                                "rows=${raws.size} chars=$charSum prewarmMs=$prewarmMs",
+                                                "rows=${raws.size} chars=${raws.sumOf { it.length }} prewarmMs=$prewarmMs",
                                             )
                                         }
                                     }

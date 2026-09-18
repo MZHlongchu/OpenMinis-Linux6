@@ -11,6 +11,7 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import com.openminis.app.BuildConfig
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.text.BoundedText
 import com.openminis.app.sandbox.ExecutionCoordinator
 import com.openminis.app.sandbox.PRootKernel
 import kotlinx.coroutines.Dispatchers
@@ -438,22 +439,21 @@ class DebugRPCHandler(private val context: Context) {
             throw RPCException(-32602, "Invalid params: 'name' must be a filename")
         }
 
-        val content = AppLogger.readLog(name)
-            ?: throw RPCException(-32602, "Log file not found: $name")
+        val size = AppLogger.logFileSize(name)
+        if (size < 0) throw RPCException(-32602, "Log file not found: $name")
 
-        val offset = params.optInt("offset", 0)
-        val limit = params.optInt("limit", 524_288)
-        val sliced = content.substring(
-            offset.coerceAtMost(content.length),
-            (offset + limit).coerceAtMost(content.length),
-        )
+        val offset = params.optInt("offset", 0).coerceAtLeast(0)
+        val limit = params.optInt("limit", BoundedText.MAX_LOG_READ_BYTES)
+            .coerceIn(1, BoundedText.MAX_LOG_READ_BYTES)
+        val content = AppLogger.readLog(name, offset, limit)
+            ?: throw RPCException(-32602, "Log file not found: $name")
 
         return JSONObject().apply {
             put("name", name)
-            put("size", content.length)
-            put("content", sliced)
-            put("bytesRead", sliced.length)
-            if (sliced.length < content.length - offset) put("truncated", true)
+            put("size", size)
+            put("content", content)
+            put("bytesRead", content.length)
+            if (offset + content.length < size) put("truncated", true)
         }
     }
 

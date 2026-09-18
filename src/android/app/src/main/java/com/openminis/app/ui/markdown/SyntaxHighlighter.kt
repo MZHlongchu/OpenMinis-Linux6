@@ -1,5 +1,7 @@
 package com.openminis.app.ui.markdown
 
+import com.openminis.app.text.BoundedText
+
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -49,7 +51,9 @@ object SyntaxHighlighter {
             return@buildAnnotatedString
         }
 
-        for (match in TOKEN_REGEX.findAll(code)) {
+        val scan = if (code.length <= BoundedText.MAX_ICU_INPUT_CHARS) code
+            else code.substring(0, BoundedText.MAX_ICU_INPUT_CHARS)
+        for (match in TOKEN_REGEX.findAll(scan)) {
             val comment = match.groups[1]?.value
             val string = match.groups[2]?.value
             val number = match.groups[3]?.value
@@ -89,6 +93,11 @@ object SyntaxHighlighter {
                     pop()
                 }
             }
+        }
+        if (code.length > BoundedText.MAX_ICU_INPUT_CHARS) {
+            pushStyle(SpanStyle(color = defaultColor))
+            append(code.substring(BoundedText.MAX_ICU_INPUT_CHARS))
+            pop()
         }
     }
 }

@@ -8,6 +8,7 @@ import java.io.FileWriter
 import java.io.OutputStream
 import java.io.PrintStream
 import java.io.PrintWriter
+import com.openminis.app.text.BoundedText
 import com.openminis.app.util.IsoTime
 
 /**
@@ -68,6 +69,8 @@ object AppLogger {
 
     private var currentDate: String = ""
     private var writer: PrintWriter? = null
+    private var currentFile: File? = null
+    private var logFileCapped: Boolean = false
     private var enabled: Boolean = false
 
     // Saved references to the JVM's original stdout/stderr. Captured on the
@@ -159,6 +162,8 @@ object AppLogger {
             writer?.close()
         } catch (_: Exception) {}
         writer = null
+        currentFile = null
+        logFileCapped = false
         currentDate = ""
     }
 
@@ -306,8 +311,20 @@ object AppLogger {
     private fun appendFileLine(today: String, line: String, quiet: Boolean = false) {
         if (!enabled) return
         try {
+            val clipped = BoundedText.clampLogLine(line)
             val w = getWriter(today)
-            w.println(line)
+            val file = currentFile
+            val size = file?.length() ?: 0L
+            val lineBytes = clipped.toByteArray(Charsets.UTF_8).size + 1
+            if (!BoundedText.canAppendLog(size, lineBytes)) {
+                if (!logFileCapped) {
+                    logFileCapped = true
+                    w.println("[AppLogger] daily log reached ${BoundedText.MAX_LOG_FILE_BYTES} bytes; further writes dropped")
+                    w.flush()
+                }
+                return
+            }
+            w.println(clipped)
             w.flush()
         } catch (e: Exception) {
             if (!quiet) Log.w(TAG, "Failed to write log: ${e.message}")
@@ -320,6 +337,8 @@ object AppLogger {
             writer?.close()
             val dir = logDir ?: throw IllegalStateException("AppLogger not initialized")
             val file = File(dir, "minis-$date.log")
+            currentFile = file
+            logFileCapped = file.length() >= BoundedText.MAX_LOG_FILE_BYTES
             writer = PrintWriter(FileWriter(file, true))
             currentDate = date
         }
@@ -383,10 +402,25 @@ object AppLogger {
     /**
      * Read content of a specific log file.
      */
-    fun readLog(filename: String): String? {
+    fun readLog(
+        filename: String,
+        offset: Int = 0,
+        limit: Int = BoundedText.MAX_LOG_READ_BYTES,
+    ): String? {
         val dir = resolveLogDir() ?: return null
         val file = File(dir, filename)
-        return if (file.exists()) file.readText() else null
+        if (!file.exists()) return null
+        return BoundedText.readFileRange(
+            file,
+            offset.coerceAtLeast(0).toLong(),
+            limit.coerceAtMost(BoundedText.MAX_LOG_READ_BYTES),
+        )
+    }
+
+    fun logFileSize(filename: String): Long {
+        val dir = resolveLogDir() ?: return -1L
+        val file = File(dir, filename)
+        return if (file.exists()) file.length() else -1L
     }
 
     /**
@@ -403,6 +437,8 @@ object AppLogger {
         // @Synchronized shares getWriter()'s monitor so this can't race a write.
         writer?.close()
         writer = null
+        currentFile = null
+        logFileCapped = false
         currentDate = ""
     }
 
