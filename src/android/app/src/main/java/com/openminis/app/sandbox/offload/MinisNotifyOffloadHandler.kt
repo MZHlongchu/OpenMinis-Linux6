@@ -17,6 +17,7 @@ import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * minis-notify — guest-facing notification with optional action buttons.
@@ -60,7 +61,7 @@ class MinisNotifyOffloadHandler(private val context: Context) : NativeOffloadHan
             .setContentText(body.take(240))
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-        for ((i, act) in actions.withIndex()) {
+        for (act in actions) {
             val intent = Intent(context, SandboxNotifyActionReceiver::class.java).apply {
                 this.action = SandboxNotifyActions.ACTION
                 putExtra(SandboxNotifyActions.EXTRA_ACTION, act.token)
@@ -68,13 +69,13 @@ class MinisNotifyOffloadHandler(private val context: Context) : NativeOffloadHan
             }
             val pi = PendingIntent.getBroadcast(
                 context,
-                (System.currentTimeMillis() % Int.MAX_VALUE).toInt() + i,
+                seq.incrementAndGet(),
                 intent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
             builder.addAction(0, act.label.take(24), pi)
         }
-        val id = (System.currentTimeMillis() % 1_000_000).toInt() + 4100
+        val id = 4100 + seq.incrementAndGet() % 1_000_000
         nm.notify(id, builder.build())
         val json = JSONObject()
             .put("ok", true)
@@ -118,6 +119,7 @@ class MinisNotifyOffloadHandler(private val context: Context) : NativeOffloadHan
     }
 
     companion object {
+        private val seq = AtomicInteger(0)
         private const val CHANNEL = "minis_sandbox_notify"
         private const val HELP = """minis-notify — post a notification with optional action buttons
 

@@ -65,7 +65,7 @@ kind: worker (default, can write), explore (read-only research), plan (read-only
             "model" to AgentToolParam("string", "Optional model-entry id from the configured sub-agent pool. Omit to round-robin."),
             "kind" to AgentToolParam("string", "worker (default), explore (read-only), or plan (read-only)."),
             "write_paths" to AgentToolParam("string", "Comma-separated Linux path prefixes this worker may modify. Empty = unrestricted (worker only)."),
-            "max_turns" to AgentToolParam("integer", "Max tool-loop turns for this sub-agent (default 12)."),
+            "max_turns" to AgentToolParam("integer", "Max tool-loop turns for this sub-agent (default and cap from Settings → Multi-agent, default 12)."),
         ),
         required = listOf("prompt"),
         propertyOrdering = listOf("tool_title", "prompt", "kind", "write_paths", "role", "skills", "model", "max_turns"),

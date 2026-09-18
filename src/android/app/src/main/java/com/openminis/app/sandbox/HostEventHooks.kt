@@ -24,6 +24,7 @@ object HostEventHooks {
         app = context.applicationContext
     }
 
+    @Synchronized
     fun list(): Map<String, List<String>> {
         val ctx = app ?: return emptyMap()
         val raw = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, "{}") ?: "{}"
@@ -36,6 +37,7 @@ object HostEventHooks {
         }.getOrDefault(emptyMap())
     }
 
+    @Synchronized
     fun register(event: String, command: String): Boolean {
         val ctx = app ?: return false
         val ev = event.trim()
@@ -51,6 +53,7 @@ object HostEventHooks {
         return true
     }
 
+    @Synchronized
     fun unregister(event: String, command: String?): Boolean {
         val ctx = app ?: return false
         val next = list().toMutableMap()

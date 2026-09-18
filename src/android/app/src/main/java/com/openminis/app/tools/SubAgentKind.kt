@@ -1,6 +1,7 @@
 package com.openminis.app.tools
 
 import com.openminis.app.data.model.AgentToolDefinition
+import com.openminis.app.data.repository.MultiAgentSettings
 
 /**
  * 拾忆 `spawn_agent` kinds, mapped onto OpenMinis `run_subagent`.
@@ -43,9 +44,13 @@ object SubAgentKind {
         }
     }
 
-    fun clampTurns(kind: String, requested: Int?): Int {
-        val cap = if (isReadOnly(kind)) 16 else 20
-        val n = requested ?: SubAgentRunner.MAX_TURNS
+    fun clampTurns(
+        kind: String,
+        requested: Int?,
+        defaultCap: Int = SubAgentRunner.MAX_TURNS,
+    ): Int {
+        val cap = MultiAgentSettings.clampTurns(defaultCap)
+        val n = requested ?: cap
         return n.coerceIn(1, cap)
     }
 }

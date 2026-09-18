@@ -10,6 +10,7 @@
 # Usage:
 #   ./scripts/prepare_android_sandbox.sh
 set -euo pipefail
+[ -d "${TMPDIR:-}" ] || export TMPDIR=/tmp
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ASSETS="$ROOT/src/android/app/src/main/assets"

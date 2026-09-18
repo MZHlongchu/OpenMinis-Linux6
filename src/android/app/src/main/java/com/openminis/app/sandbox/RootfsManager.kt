@@ -200,6 +200,7 @@ class RootfsManager private constructor(private val context: Context) {
             }
         }
 
+        HostStatusPublisher.stop()
         rootfsDir.deleteRecursively()
         installIfNeeded()
 
@@ -397,11 +398,14 @@ class RootfsManager private constructor(private val context: Context) {
             val override =
                 "android.aapt2FromMavenOverride=/opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV/aapt2"
             val existing = if (gradleProps.exists()) gradleProps.readText() else ""
-            if (!existing.contains("android.aapt2FromMavenOverride")) {
-                gradleProps.appendText(
-                    if (existing.isEmpty() || existing.endsWith("\n")) "$override\n" else "\n$override\n",
-                )
+            val next = if (existing.contains("android.aapt2FromMavenOverride")) {
+                existing.replace(Regex("""(?m)^android\.aapt2FromMavenOverride=.*$"""), override)
+            } else if (existing.isEmpty() || existing.endsWith("\n")) {
+                existing + "$override\n"
+            } else {
+                existing + "\n$override\n"
             }
+            gradleProps.writeText(next)
             marker.parentFile?.mkdirs()
             marker.writeText("$SDK_BUILD_TOOLS_REV\n")
             Log.i(TAG, "Installed bundled aarch64 SDK tools $SDK_BUILD_TOOLS_REV")

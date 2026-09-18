@@ -1,3 +1,33 @@
+# OpenMinis-Linux 1.22-linux
+
+- versionCode **34**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a；有 `MINIS_UPLOAD_*` 则用上传证书，否则仍为 debug-signed）
+- 签名说明：[docs/SIGNING.md](SIGNING.md)；一键编译：`scripts/build_apk_aarch64.sh`
+
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本。
+
+## 本版
+
+1. **子代理轮次可配置**  
+   设置 → 多智能体增加步进器，默认 12 轮，范围 1–48。未传 `max_turns` 时用该值；传入则夹在 1…上限。
+
+2. **Android 14 广播注册**  
+   `HostEventBridge` / `MinisApp` 改用 `ContextCompat.registerReceiver(..., RECEIVER_NOT_EXPORTED)`，避免 targetSdk 35 启动崩溃。粘性 `registerReceiver(null, …)` 未改。
+
+3. **机内自构建**  
+   `build_apk_aarch64.sh` / `prepare_android_sandbox.sh` / `deps/build_proot.sh`：`TMPDIR` 无效则落到 `/tmp`。`minis-android-sdk-setup` 与 `RootfsManager` 用替换而不是只追加 `android.aapt2FromMavenOverride`。
+
+4. **沙箱代理与主机事件**  
+   netlog 超 5MB 轮转；先 bind 再 `running=true`；CONNECT 隧道等双向结束再关 socket。电池 ≤15% 进 low、≥20% 才 ok。通知 ID / requestCode 用原子序号。`HostEventBridge.stop()` 注销 receiver；rootfs reset 时调用。`HostEventHooks` 读写同一把锁。
+
+5. **检查更新**  
+   同 versionName / versionCode 仅刷新时间戳不再提示升级；`pickUpgrade` 主键为 versionName。
+
+---
+
 # OpenMinis-Linux 1.21-linux
 
 - versionCode **33**

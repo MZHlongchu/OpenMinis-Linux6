@@ -36,10 +36,12 @@ object HostStatusPublisher {
 
     private val started = AtomicBoolean(false)
     private var job: Job? = null
+    @Volatile private var currentRootfs: File? = null
 
     fun guestPath(): String = "/$RELATIVE_PATH"
 
     fun start(context: Context, rootfsDir: File) {
+        currentRootfs = rootfsDir
         writeOnce(context, rootfsDir)
         HostEventHooks.init(context)
         HostEventBridge.start(context, rootfsDir)
@@ -50,9 +52,19 @@ object HostStatusPublisher {
         job = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             while (isActive) {
                 delay(INTERVAL_MS)
-                writeOnce(app, rootfsDir)
+                val r = currentRootfs ?: continue
+                writeOnce(app, r)
             }
         }
+    }
+
+    /** Process-lifetime in production; used when the live rootfs is torn down. */
+    fun stop() {
+        job?.cancel()
+        job = null
+        started.set(false)
+        currentRootfs = null
+        HostEventBridge.stop()
     }
 
     fun writeOnce(context: Context, rootfsDir: File) {

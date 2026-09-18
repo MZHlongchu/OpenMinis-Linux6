@@ -74,18 +74,38 @@ class UpdateVersionLogicTest {
     }
 
     @Test
-    fun `rolling rebuilt APK with same versionCode is an upgrade by updated_at`() {
+    fun `rolling rebuilt APK with same versionCode is not an upgrade`() {
         val c = rolling(code = 28, name = "1.16-linux", updatedAt = 10_000_000L)
-        assertTrue(
+        assertFalse(
             UpdateVersionLogic.isNewerThanLocal(
                 c, "1.16", 28, localLastUpdateMs = 1_000_000L,
             ),
         )
+    }
+
+    @Test
+    fun `rolling without bodyCode needs newer versionName not just timestamp`() {
+        val same = rolling(code = null, name = "1.16-linux", updatedAt = 10_000_000L)
         assertFalse(
-            UpdateVersionLogic.isNewerThanLocal(
-                c, "1.16", 28, localLastUpdateMs = 10_000_000L,
-            ),
+            UpdateVersionLogic.isNewerThanLocal(same, "1.16", 28, localLastUpdateMs = 1_000_000L),
         )
+        val newerName = rolling(code = null, name = "1.17-linux", updatedAt = 10_000_000L)
+        assertTrue(
+            UpdateVersionLogic.isNewerThanLocal(newerName, "1.16", 28, localLastUpdateMs = 1_000_000L),
+        )
+    }
+
+    @Test
+    fun `pickUpgrade prefers semver name over rolling bodyCode`() {
+        val rollingLow = rolling(code = 20, name = "1.19-linux")
+        val semver = tagged("2.0-linux")
+        val picked = UpdateVersionLogic.pickUpgrade(
+            listOf(rollingLow, semver),
+            "1.0",
+            1,
+            0L,
+        )
+        assertEquals("2.0-linux", picked?.tagName)
     }
 
     @Test

@@ -10308,7 +10308,8 @@ class ChatViewModel(
                 providerRepository.config.value.modelEntries.associate { it.id to it.model.displayName },
             )
             val cap = multiAgentSettings.maxConcurrent.value
-            "\n- run_subagent: Dispatch a teammate. You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Each prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration because sub-agents cannot see this conversation and cannot call run_subagent. kind=worker|explore|plan; write_paths limits file_write/file_edit. Independent work: emit multiple run_subagent calls in ONE turn (they run in parallel, cap=" + cap + "). Dependent phases: finish and accept before starting the next. After a teammate returns, verify against Expected result; if it fails, name the gap and re-dispatch. Team models: " + names + ". Settings: minis://settings/multi-agent"
+            val turns = multiAgentSettings.subagentMaxTurns.value
+            "\n- run_subagent: Dispatch a teammate. You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Each prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration because sub-agents cannot see this conversation and cannot call run_subagent. kind=worker|explore|plan; write_paths limits file_write/file_edit. Independent work: emit multiple run_subagent calls in ONE turn (they run in parallel, cap=" + cap + "). max_turns default/cap=" + turns + ". Dependent phases: finish and accept before starting the next. After a teammate returns, verify against Expected result; if it fails, name the gap and re-dispatch. Team models: " + names + ". Settings: minis://settings/multi-agent"
         } else {
             ""
         }
@@ -12726,6 +12727,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         val maxTurns = com.openminis.app.tools.SubAgentKind.clampTurns(
             kind,
             if (args.has("max_turns")) args.optInt("max_turns") else null,
+            multiAgentSettings.subagentMaxTurns.value,
         )
         val config = providerRepository.config.value
         val pool = MultiAgentSettings.retainLive(

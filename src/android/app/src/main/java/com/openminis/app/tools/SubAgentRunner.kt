@@ -36,7 +36,10 @@ object SubAgentRunner {
         val history = mutableListOf(
             LLMMessage(role = LLMMessage.Role.USER, content = briefed),
         )
-        val turns = maxTurns.coerceIn(1, 24)
+        val turns = maxTurns.coerceIn(
+            com.openminis.app.data.repository.MultiAgentSettings.MIN_SUBAGENT_TURNS,
+            com.openminis.app.data.repository.MultiAgentSettings.MAX_SUBAGENT_TURNS,
+        )
         val system = workerSystemPrompt(modelDisplayName, role, skillsHint, kind, writePaths)
         val report = StringBuilder()
 

@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Bundle
 import android.util.Log
+import androidx.core.content.ContextCompat
 import org.acra.ACRA
 import org.acra.ReportField
 import org.acra.config.CoreConfigurationBuilder
@@ -810,12 +811,14 @@ class MinisApp : Application(), ImageLoaderFactory {
                 }
             }
         }
-        registerReceiver(
+        ContextCompat.registerReceiver(
+            this,
             sandboxSystemReceiver,
             IntentFilter().apply {
                 addAction(Intent.ACTION_TIMEZONE_CHANGED)
                 addAction(android.net.Proxy.PROXY_CHANGE_ACTION)
             },
+            ContextCompat.RECEIVER_NOT_EXPORTED,
         )
 
         // Debug server: only start in debug builds (NEVER in release)

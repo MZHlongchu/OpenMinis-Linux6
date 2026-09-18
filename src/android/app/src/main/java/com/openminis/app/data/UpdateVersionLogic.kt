@@ -96,12 +96,15 @@ object UpdateVersionLogic {
             val bodyVer = c.bodyVersionName?.let { normalizeTag(it) }
             if (bodyCode != null && bodyCode > localCode) return true
             if (bodyVer != null && compareVersions(bodyVer, localVer) > 0) return true
-            if (c.apkUpdatedAtMs > 0L &&
-                localLastUpdateMs > 0L &&
-                c.apkUpdatedAtMs > localLastUpdateMs + ROLLING_SLOP_MS &&
-                (bodyCode == null || bodyCode >= localCode)
-            ) {
-                return true
+            if (bodyCode == null) {
+                val apkName = bodyVer ?: normalizeTag(c.versionName)
+                if (c.apkUpdatedAtMs > 0L &&
+                    localLastUpdateMs > 0L &&
+                    c.apkUpdatedAtMs > localLastUpdateMs + ROLLING_SLOP_MS &&
+                    compareVersions(apkName, localVer) > 0
+                ) {
+                    return true
+                }
             }
             return false
         }
@@ -119,8 +122,8 @@ object UpdateVersionLogic {
         }
         if (newer.isEmpty()) return null
         return newer.maxWithOrNull(
-            compareBy<ReleaseCandidate> { it.bodyVersionCode ?: -1 }
-                .thenBy { compareVersions(displayVersion(it), "0") }
+            compareBy<ReleaseCandidate> { compareVersions(displayVersion(it), "0") }
+                .thenBy { it.bodyVersionCode ?: -1 }
                 .thenBy { it.apkUpdatedAtMs },
         )
     }

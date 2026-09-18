@@ -32,6 +32,13 @@ class MultiAgentSettingsRepository(context: Context) {
     private val _selectedModelEntryIds = MutableStateFlow(readSelectedIds())
     val selectedModelEntryIds: StateFlow<List<String>> = _selectedModelEntryIds.asStateFlow()
 
+    private val _subagentMaxTurns = MutableStateFlow(
+        MultiAgentSettings.clampTurns(
+            prefs.getInt(KEY_SUBAGENT_MAX_TURNS, MultiAgentSettings.DEFAULT_SUBAGENT_TURNS),
+        ),
+    )
+    val subagentMaxTurns: StateFlow<Int> = _subagentMaxTurns.asStateFlow()
+
     fun setEnabled(value: Boolean) {
         prefs.edit().putBoolean(KEY_ENABLED, value).apply()
         _enabled.value = value
@@ -45,6 +52,12 @@ class MultiAgentSettingsRepository(context: Context) {
         if (trimmed != _selectedModelEntryIds.value) {
             writeSelectedIds(trimmed)
         }
+    }
+
+    fun setSubagentMaxTurns(value: Int) {
+        val clamped = MultiAgentSettings.clampTurns(value)
+        prefs.edit().putInt(KEY_SUBAGENT_MAX_TURNS, clamped).apply()
+        _subagentMaxTurns.value = clamped
     }
 
     fun setSelectedModelEntryIds(ids: List<String>) {
@@ -105,6 +118,7 @@ class MultiAgentSettingsRepository(context: Context) {
         private const val KEY_ENABLED = "enabled"
         private const val KEY_MAX_CONCURRENT = "max_concurrent"
         private const val KEY_MODEL_IDS = "model_entry_ids"
+        private const val KEY_SUBAGENT_MAX_TURNS = "subagent_max_turns"
         private const val DEFAULT_ENABLED = true
     }
 }
@@ -113,8 +127,13 @@ object MultiAgentSettings {
     const val MIN_CONCURRENT = 1
     const val MAX_CONCURRENT = 8
     const val DEFAULT_CONCURRENT = 3
+    const val MIN_SUBAGENT_TURNS = 1
+    const val MAX_SUBAGENT_TURNS = 48
+    const val DEFAULT_SUBAGENT_TURNS = 12
 
     fun clampConcurrent(n: Int): Int = n.coerceIn(MIN_CONCURRENT, MAX_CONCURRENT)
+
+    fun clampTurns(n: Int): Int = n.coerceIn(MIN_SUBAGENT_TURNS, MAX_SUBAGENT_TURNS)
 
     fun trimSelected(ids: List<String>, max: Int): List<String> {
         val cap = clampConcurrent(max)

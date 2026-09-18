@@ -377,8 +377,13 @@ ndk_ok=1
 install_ndk || ndk_ok=0
 
 mkdir -p /root/.gradle
-if ! grep -q 'android.aapt2FromMavenOverride' /root/.gradle/gradle.properties 2>/dev/null; then
-  echo "android.aapt2FromMavenOverride=$SDK_ROOT/build-tools/$BUILD_TOOLS_REV/aapt2" >> /root/.gradle/gradle.properties
+PROP=/root/.gradle/gradle.properties
+LINE="android.aapt2FromMavenOverride=$SDK_ROOT/build-tools/$BUILD_TOOLS_REV/aapt2"
+touch "$PROP"
+if grep -q '^android.aapt2FromMavenOverride=' "$PROP" 2>/dev/null; then
+  sed -i "s|^android.aapt2FromMavenOverride=.*|$LINE|" "$PROP"
+else
+  echo "$LINE" >> "$PROP"
 fi
 
 NDK_HOME_NOW=$(find_aarch64_ndk || true)

@@ -8,7 +8,9 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.ArrayDeque
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /**
@@ -22,6 +24,8 @@ object SandboxHttpProxy {
     private val running = AtomicBoolean(false)
     private val denyAll = AtomicBoolean(false)
     private val recent = ArrayDeque<JSONObject>()
+    private val logHits = AtomicInteger(0)
+    private val logLock = Any()
     @Volatile private var server: ServerSocket? = null
     @Volatile private var logFile: File? = null
 
@@ -48,15 +52,21 @@ object SandboxHttpProxy {
         return arr
     }
 
+    @Synchronized
     fun start(rootfsDir: File?, deny: Boolean) {
         denyAll.set(deny)
         logFile = rootfsDir?.let { File(File(it, "run").also { d -> d.mkdirs() }, "minis-netlog.jsonl") }
         if (running.get()) return
+        val ss = try {
+            ServerSocket(PORT, 32, InetAddress.getByName("127.0.0.1"))
+        } catch (t: Throwable) {
+            Log.w(TAG, "proxy bind failed: ${t.message}")
+            return
+        }
+        server = ss
         running.set(true)
         thread(name = "minis-http-proxy", isDaemon = true) {
             try {
-                val ss = ServerSocket(PORT, 32, InetAddress.getByName("127.0.0.1"))
-                server = ss
                 Log.i(TAG, "listening 127.0.0.1:$PORT deny=$deny")
                 while (running.get()) {
                     val client = try {
@@ -69,13 +79,16 @@ object SandboxHttpProxy {
             } catch (t: Throwable) {
                 Log.w(TAG, "proxy failed: ${t.message}")
             } finally {
-                running.set(false)
-                runCatching { server?.close() }
-                server = null
+                if (server === ss) {
+                    running.set(false)
+                    runCatching { ss.close() }
+                    server = null
+                }
             }
         }
     }
 
+    @Synchronized
     fun stop() {
         running.set(false)
         denyAll.set(false)
@@ -142,11 +155,24 @@ object SandboxHttpProxy {
     }
 
     private fun tunnel(a: Socket, b: Socket) {
-        val t = thread(isDaemon = true) {
-            runCatching { a.getInputStream().copyTo(b.getOutputStream()) }
+        val done = CountDownLatch(2)
+        thread(isDaemon = true) {
+            try {
+                a.getInputStream().copyTo(b.getOutputStream())
+            } catch (_: Throwable) {
+            } finally {
+                done.countDown()
+            }
         }
-        runCatching { b.getInputStream().copyTo(a.getOutputStream()) }
-        t.join(1_000)
+        thread(isDaemon = true) {
+            try {
+                b.getInputStream().copyTo(a.getOutputStream())
+            } catch (_: Throwable) {
+            } finally {
+                done.countDown()
+            }
+        }
+        done.await()
     }
 
     private fun logHit(method: String, host: String, denied: Boolean) {
@@ -159,8 +185,18 @@ object SandboxHttpProxy {
             if (recent.size >= 200) recent.removeFirst()
             recent.addLast(obj)
         }
+        val f = logFile ?: return
         try {
-            logFile?.appendText(obj.toString() + "\n")
+            synchronized(logLock) {
+                if (logHits.incrementAndGet() % 256 == 0 && f.length() > 5L * 1024 * 1024) {
+                    val bak = File(f.parentFile, "minis-netlog.jsonl.1")
+                    bak.delete()
+                    if (!f.renameTo(bak)) {
+                        f.writeText("")
+                    }
+                }
+                f.appendText(obj.toString() + "\n")
+            }
         } catch (_: Throwable) {
         }
     }

@@ -9,6 +9,7 @@ import android.net.Network
 import android.os.BatteryManager
 import android.os.PowerManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,6 +24,10 @@ import java.util.concurrent.atomic.AtomicReference
  * Reverse host→sandbox event channel. Complements [HostStatusPublisher]:
  * status JSON is the snapshot; `/run/android-events.jsonl` is the live feed
  * plus optional `minis-on-event` hooks.
+ *
+ * [stop] unregisters receivers. Production callers ([HostStatusPublisher.start])
+ * keep the bridge for process lifetime; [start] with a new rootfs stops and
+ * restarts so events follow the live sandbox.
  */
 object HostEventBridge {
 
@@ -34,21 +39,55 @@ object HostEventBridge {
     private val lastBattery = AtomicInteger(-1)
     private val lastOnline = AtomicReference<Boolean?>(null)
     private val lastIdle = AtomicReference<Boolean?>(null)
-    private var rootfsDir: File? = null
-    private var app: Context? = null
+    @Volatile private var inLowState = false
+    @Volatile private var rootfsDir: File? = null
+    @Volatile private var app: Context? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun start(context: Context, rootfs: File) {
-        rootfsDir = rootfs
-        app = context.applicationContext
+        val appCtx = context.applicationContext
+        if (started.get()) {
+            if (rootfsDir?.absolutePath == rootfs.absolutePath) return
+            stop()
+        }
         if (!started.compareAndSet(false, true)) return
-        val app = this.app ?: return
+        app = appCtx
+        rootfsDir = rootfs
+        lastBattery.set(-1)
+        lastOnline.set(null)
+        lastIdle.set(null)
+        inLowState = false
         val batteryFilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-        val sticky = app.registerReceiver(batteryReceiver, batteryFilter)
-        sticky?.let { onBattery(app, it, heartbeat = true) }
-        app.registerReceiver(idleReceiver, IntentFilter(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED))
-        val cm = app.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val sticky = ContextCompat.registerReceiver(
+            appCtx,
+            batteryReceiver,
+            batteryFilter,
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        sticky?.let { onBattery(appCtx, it, heartbeat = true) }
+        ContextCompat.registerReceiver(
+            appCtx,
+            idleReceiver,
+            IntentFilter(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        val cm = appCtx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         cm?.registerDefaultNetworkCallback(networkCallback)
+    }
+
+    fun stop() {
+        if (!started.compareAndSet(true, false)) return
+        val ctx = app
+        val cm = ctx?.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        runCatching { ctx?.unregisterReceiver(batteryReceiver) }
+        runCatching { ctx?.unregisterReceiver(idleReceiver) }
+        runCatching { cm?.unregisterNetworkCallback(networkCallback) }
+        app = null
+        rootfsDir = null
+        lastBattery.set(-1)
+        lastOnline.set(null)
+        lastIdle.set(null)
+        inLowState = false
     }
 
     fun emit(type: String, extras: JSONObject = JSONObject()) {
@@ -89,14 +128,22 @@ object HostEventBridge {
         val pct = (level * 100) / scale
         val prev = lastBattery.getAndSet(pct)
         if (heartbeat || prev < 0) {
+            inLowState = pct <= BATTERY_LOW_PCT
             HostStatusPublisher.writeOnce(context, rootfsDir ?: return)
             return
         }
-        if (prev > BATTERY_LOW_PCT && pct <= BATTERY_LOW_PCT) {
-            emit("battery_low", JSONObject().put("percent", pct))
-        } else if (prev < BATTERY_OK_PCT && pct >= BATTERY_OK_PCT) {
-            emit("battery_ok", JSONObject().put("percent", pct))
+        val (nextLow, event) = batteryStep(inLowState, pct)
+        inLowState = nextLow
+        if (event != null) {
+            emit(event, JSONObject().put("percent", pct))
         }
+    }
+
+    /** Hysteresis: enter low at ≤15, leave at ≥20. Oscillation in 14–19 must not re-fire. */
+    fun batteryStep(inLow: Boolean, pct: Int): Pair<Boolean, String?> {
+        if (!inLow && pct <= BATTERY_LOW_PCT) return true to "battery_low"
+        if (inLow && pct >= BATTERY_OK_PCT) return false to "battery_ok"
+        return inLow to null
     }
 
     private val idleReceiver = object : BroadcastReceiver() {

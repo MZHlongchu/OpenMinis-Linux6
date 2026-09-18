@@ -181,6 +181,8 @@
     <string name="settings_multi_agent_enable_subtitle">Main session model coordinates; teammates run via run_subagent</string>
     <string name="settings_multi_agent_max">Max concurrent sub-agents</string>
     <string name="settings_multi_agent_max_subtitle">Up to %1$d teammates in one turn</string>
+    <string name="settings_multi_agent_turns">Sub-agent turn limit</string>
+    <string name="settings_multi_agent_turns_subtitle">Default and max tool-loop turns: %1$d (default 12)</string>
     <string name="settings_multi_agent_decrease">Decrease</string>
     <string name="settings_multi_agent_increase">Increase</string>
     <string name="settings_multi_agent_footer_dispatch">The main chat model is the coordinator. It decomposes, dispatches, accepts and summarizes — it should not do all the work itself. Independent tasks run in parallel; dependent phases wait for acceptance.</string>

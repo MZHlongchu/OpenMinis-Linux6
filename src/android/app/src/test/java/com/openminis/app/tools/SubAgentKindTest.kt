@@ -33,8 +33,11 @@ class SubAgentKindTest {
     @Test
     fun clampTurns() {
         assertEquals(1, SubAgentKind.clampTurns(SubAgentKind.WORKER, 0))
-        assertEquals(16, SubAgentKind.clampTurns(SubAgentKind.EXPLORE, 99))
+        assertEquals(12, SubAgentKind.clampTurns(SubAgentKind.EXPLORE, 99))
         assertEquals(12, SubAgentKind.clampTurns(SubAgentKind.WORKER, null))
+        assertEquals(30, SubAgentKind.clampTurns(SubAgentKind.WORKER, 99, 30))
+        assertEquals(30, SubAgentKind.clampTurns(SubAgentKind.WORKER, null, 30))
+        assertEquals(8, SubAgentKind.clampTurns(SubAgentKind.PLAN, 8, 30))
     }
 
     @Test

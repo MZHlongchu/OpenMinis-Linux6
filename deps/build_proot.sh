@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+[ -d "${TMPDIR:-}" ] || export TMPDIR=/tmp
 
 # ============================================================================
 # PRoot Android Build Script (OpenMinis fork)

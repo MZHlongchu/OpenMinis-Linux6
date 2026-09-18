@@ -4,6 +4,7 @@
 # otherwise the debug keystore is used (UpdateChecker cannot replace a
 # differently-signed install).
 set -euo pipefail
+[ -d "${TMPDIR:-}" ] || export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
