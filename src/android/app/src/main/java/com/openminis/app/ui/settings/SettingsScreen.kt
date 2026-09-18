@@ -108,9 +108,6 @@ fun SettingsScreen(
     // don't need to be retrofitted.
     onBackgroundClick: () -> Unit = {},
     onWebSearchClick: () -> Unit = {},
-    // Hook accepted for forward-compat with AppNavigation's About route. The
-    // About row below still has a TODO onClick in HEAD; future settings-bucket
-    // work will wire this through.
     onAboutClick: () -> Unit = {},
 ) {
     val context = LocalContext.current

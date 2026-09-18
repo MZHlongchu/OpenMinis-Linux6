@@ -416,10 +416,7 @@ private fun FileItemRow(
                     ).show()
                 },
             )
-            // TODO(webapp-hidden): WebApp / "Add to Home Screen" item temporarily
-            // hidden — feature not yet validated/complete. Re-enable by removing
-            // `false &&` from the guard below.
-            if (false && isHtml) {
+            if (isHtml) {
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.webapp_add_to_home)) },
                 leadingIcon = {

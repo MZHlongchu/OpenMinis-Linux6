@@ -1,7 +1,7 @@
 package com.openminis.app.ui.settings
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -10,7 +10,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.Remove
-import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -30,6 +31,8 @@ import androidx.compose.ui.unit.dp
 import com.openminis.app.MinisApp
 import com.openminis.app.R
 import com.openminis.app.data.PlanDiscussionPrefs
+import com.openminis.app.data.model.ModelEntry
+import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.repository.MultiAgentSettings
 
 @Composable
@@ -51,8 +54,10 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
         !entry.isHidden && instancesById[entry.providerInstanceId]?.isEnabled == true
     }
     val candidateIds = remember(candidates) { candidates.map { it.id }.toSet() }
-    val liveSelectedIds = selectedIds.filter { it in candidateIds }
-    val staleCount = selectedIds.size - liveSelectedIds.size
+    val slots = remember(selectedIds, maxConcurrent) {
+        MultiAgentSettings.resizeSlots(selectedIds, maxConcurrent)
+    }
+    val staleCount = selectedIds.count { it.isNotBlank() && it !in candidateIds }
     var discussionMode by remember { mutableStateOf(PlanDiscussionPrefs.mode()) }
 
     LaunchedEffect(configLoaded, candidateIds) {
@@ -164,51 +169,25 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                 )
-            } else {
-                if (staleCount > 0) {
-                    Text(
-                        stringResource(R.string.settings_multi_agent_stale_pruned, staleCount),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    )
-                }
-                candidates.forEachIndexed { index, entry ->
-                    val instance = instancesById[entry.providerInstanceId]
-                    val selected = entry.id in liveSelectedIds
-                    val atCap = !selected && liveSelectedIds.size >= maxConcurrent
-                    val rowEnabled = enabled && (selected || !atCap)
-                    val label = buildString {
-                        append(entry.model.displayName)
-                        instance?.label?.takeIf { it.isNotBlank() }?.let { append(" · ").append(it) }
-                    }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = rowEnabled) {
-                                repo.toggleModelEntry(entry.id, candidateIds)
-                            }
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Checkbox(
-                            checked = selected,
-                            onCheckedChange = null,
-                            enabled = rowEnabled,
-                        )
-                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                            Text(label, style = MaterialTheme.typography.bodyLarge)
-                            Text(
-                                entry.model.id,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                    if (index == candidates.lastIndex) {
-                        // last row — no extra divider needed; SettingsSection cards handle it
-                    }
-                }
+            }
+            if (staleCount > 0) {
+                Text(
+                    stringResource(R.string.settings_multi_agent_stale_pruned, staleCount),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+            slots.forEachIndexed { index, slotId ->
+                SubAgentSlotRow(
+                    index = index,
+                    selectedId = slotId,
+                    candidates = candidates,
+                    instancesById = instancesById,
+                    enabled = enabled && candidates.isNotEmpty(),
+                    showDivider = index < slots.lastIndex,
+                    onSelect = { repo.setSlotModel(index, it) },
+                )
             }
         }
 
@@ -233,5 +212,60 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun SubAgentSlotRow(
+    index: Int,
+    selectedId: String,
+    candidates: List<ModelEntry>,
+    instancesById: Map<String, ProviderInstance>,
+    enabled: Boolean,
+    showDivider: Boolean,
+    onSelect: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedEntry = candidates.find { it.id == selectedId }
+    val value = selectedEntry?.let { slotModelLabel(it, instancesById) }
+        ?: stringResource(R.string.settings_multi_agent_slot_main)
+    Box(modifier = Modifier.fillMaxWidth()) {
+        SettingsValueRow(
+            title = stringResource(R.string.settings_multi_agent_slot, index + 1),
+            value = value,
+            onClick = if (enabled) ({ expanded = true }) else null,
+            showDivider = showDivider,
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.settings_multi_agent_slot_main)) },
+                onClick = {
+                    onSelect("")
+                    expanded = false
+                },
+            )
+            candidates.forEach { entry ->
+                DropdownMenuItem(
+                    text = { Text(slotModelLabel(entry, instancesById)) },
+                    onClick = {
+                        onSelect(entry.id)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+private fun slotModelLabel(
+    entry: ModelEntry,
+    instancesById: Map<String, ProviderInstance>,
+): String = buildString {
+    append(entry.model.displayName)
+    instancesById[entry.providerInstanceId]?.label?.takeIf { it.isNotBlank() }?.let {
+        append(" · ").append(it)
     }
 }

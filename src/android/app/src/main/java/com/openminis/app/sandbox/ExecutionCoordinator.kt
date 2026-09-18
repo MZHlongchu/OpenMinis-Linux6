@@ -28,6 +28,7 @@ import java.util.concurrent.ConcurrentHashMap
 object ExecutionCoordinator {
 
     private const val TAG = "ExecutionCoordinator"
+    private const val LANE_PREFIX = "subagent:"
 
     data class CommandResult(
         val output: String,
@@ -200,8 +201,9 @@ object ExecutionCoordinator {
         // the "file disappears after first download" bug)
         val prevAttachments = PRootKernel.bindMounts["/var/minis/attachments"]
 
-        // Session-specific directories
-        val sessionBase = File(filesDir, "minis-sessions/$sessionId")
+        // Session-specific directories. Sub-agent lanes share the parent
+        // session tree so files written by a teammate stay visible here.
+        val sessionBase = File(filesDir, "minis-sessions/${ownerSessionId(sessionId)}")
         listOf("attachments", "offloads", "workspace", "browser").forEach { subdir ->
             val hostDir = File(sessionBase, subdir).also { it.mkdirs() }
             val linuxPath = "/var/minis/$subdir"
@@ -251,6 +253,14 @@ object ExecutionCoordinator {
      * Called when a session is closed. Stops and removes the shell.
      */
     fun sessionDidTerminate(sessionId: String) {
+        terminateOne(sessionId)
+        if (!isLaneSession(sessionId)) {
+            val prefix = lanePrefix(sessionId)
+            shells.keys.filter { it.startsWith(prefix) }.forEach { terminateOne(it) }
+        }
+    }
+
+    private fun terminateOne(sessionId: String) {
         val shell = shells.remove(sessionId)
         mutexes.remove(sessionId)
         // T124a: drop the snapshot too — a future shell for the same id
@@ -267,11 +277,11 @@ object ExecutionCoordinator {
      */
     fun stopCurrentCommand(sessionId: String? = null) {
         if (sessionId != null) {
-            val shell = shells.remove(sessionId)
-            // T124a: snapshot belongs to the now-dead shell.
-            lastInjectedKeys.remove(sessionId)
-            shell?.stop()
-            Log.i(TAG, "[$sessionId] Shell stopped by user")
+            stopOne(sessionId)
+            if (!isLaneSession(sessionId)) {
+                val prefix = lanePrefix(sessionId)
+                shells.keys.filter { it.startsWith(prefix) }.forEach { stopOne(it) }
+            }
         } else {
             // Stop all sessions (legacy/fallback)
             shells.values.forEach { it.stop() }
@@ -321,4 +331,22 @@ object ExecutionCoordinator {
         }
         TerminalSession.broadcastProxy(env)
     }
+
+    private fun stopOne(sessionId: String) {
+        val shell = shells.remove(sessionId)
+        lastInjectedKeys.remove(sessionId)
+        shell?.stop()
+        Log.i(TAG, "[$sessionId] Shell stopped by user")
+    }
+
+    fun ownerSessionId(sessionId: String): String {
+        if (!isLaneSession(sessionId)) return sessionId
+        val rest = sessionId.substring(LANE_PREFIX.length)
+        val cut = rest.lastIndexOf(':')
+        return if (cut > 0) rest.substring(0, cut) else sessionId
+    }
+
+    fun isLaneSession(sessionId: String): Boolean = sessionId.startsWith(LANE_PREFIX)
+
+    private fun lanePrefix(ownerSessionId: String): String = "$LANE_PREFIX$ownerSessionId:"
 }

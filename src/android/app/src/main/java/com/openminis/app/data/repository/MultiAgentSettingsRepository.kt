@@ -11,8 +11,9 @@ import org.json.JSONArray
  * Persistence for multi-agent parallel dispatch.
  *
  * [maxConcurrent] is the hard cap on simultaneous [run_subagent] calls in one
- * turn. [selectedModelEntryIds] is the pool of models those sub-agents may use;
- * its size is always clamped to [maxConcurrent] so the two settings stay linked.
+ * turn. [selectedModelEntryIds] is a slot list of that same length: slot i is
+ * the model for the i-th concurrent sub-agent. Empty slots reuse the main
+ * session model. Duplicates are allowed so two teammates can share a model.
  */
 class MultiAgentSettingsRepository(context: Context) {
 
@@ -48,9 +49,9 @@ class MultiAgentSettingsRepository(context: Context) {
         val clamped = MultiAgentSettings.clampConcurrent(value)
         prefs.edit().putInt(KEY_MAX_CONCURRENT, clamped).apply()
         _maxConcurrent.value = clamped
-        val trimmed = MultiAgentSettings.trimSelected(_selectedModelEntryIds.value, clamped)
-        if (trimmed != _selectedModelEntryIds.value) {
-            writeSelectedIds(trimmed)
+        val resized = MultiAgentSettings.resizeSlots(_selectedModelEntryIds.value, clamped)
+        if (resized != _selectedModelEntryIds.value) {
+            writeSelectedIds(resized)
         }
     }
 
@@ -61,13 +62,23 @@ class MultiAgentSettingsRepository(context: Context) {
     }
 
     fun setSelectedModelEntryIds(ids: List<String>) {
-        val trimmed = MultiAgentSettings.trimSelected(ids, _maxConcurrent.value)
-        writeSelectedIds(trimmed)
+        writeSelectedIds(MultiAgentSettings.resizeSlots(ids, _maxConcurrent.value))
+    }
+
+    fun setSlotModel(index: Int, id: String) {
+        writeSelectedIds(
+            MultiAgentSettings.setSlot(
+                _selectedModelEntryIds.value,
+                index,
+                id,
+                _maxConcurrent.value,
+            ),
+        )
     }
 
     /**
-     * Drop ids that are no longer selectable (deleted provider, hidden model,
-     * disabled instance). No-op when the live set is unchanged.
+     * Blank ids whose providers were deleted or hidden. Slot positions stay
+     * stable so sub-agent 2 does not inherit sub-agent 1's leftover pick.
      */
     fun retainLiveEntries(liveIds: Set<String>) {
         val next = MultiAgentSettings.retainLive(
@@ -78,31 +89,20 @@ class MultiAgentSettingsRepository(context: Context) {
         if (next != _selectedModelEntryIds.value) writeSelectedIds(next)
     }
 
-    fun toggleModelEntry(id: String, liveIds: Set<String>? = null) {
-        val current = if (liveIds == null) {
-            _selectedModelEntryIds.value
-        } else {
-            MultiAgentSettings.retainLive(_selectedModelEntryIds.value, liveIds, _maxConcurrent.value)
-        }
-        val next = if (id in current) {
-            current.filter { it != id }
-        } else {
-            MultiAgentSettings.trimSelected(current + id, _maxConcurrent.value)
-        }
-        writeSelectedIds(next)
-    }
-
     private fun readSelectedIds(): List<String> {
-        val raw = prefs.getString(KEY_MODEL_IDS, null) ?: return emptyList()
+        val raw = prefs.getString(KEY_MODEL_IDS, null) ?: return MultiAgentSettings.resizeSlots(
+            emptyList(),
+            _maxConcurrent.value,
+        )
         return try {
             val arr = JSONArray(raw)
             buildList {
                 for (i in 0 until arr.length()) {
-                    arr.optString(i).takeIf { it.isNotBlank() }?.let(::add)
+                    add(arr.optString(i))
                 }
-            }.let { MultiAgentSettings.trimSelected(it, _maxConcurrent.value) }
+            }.let { MultiAgentSettings.resizeSlots(it, _maxConcurrent.value) }
         } catch (_: Exception) {
-            emptyList()
+            MultiAgentSettings.resizeSlots(emptyList(), _maxConcurrent.value)
         }
     }
 
@@ -135,42 +135,63 @@ object MultiAgentSettings {
 
     fun clampTurns(n: Int): Int = n.coerceIn(MIN_SUBAGENT_TURNS, MAX_SUBAGENT_TURNS)
 
-    fun trimSelected(ids: List<String>, max: Int): List<String> {
+    /**
+     * Pad or truncate [ids] to [max] slots. Empty strings are kept (unassigned
+     * → main session model). Duplicates are kept so two slots can share a model.
+     */
+    fun resizeSlots(ids: List<String>, max: Int): List<String> {
         val cap = clampConcurrent(max)
-        return ids.filter { it.isNotBlank() }.distinct().take(cap)
+        return (0 until cap).map { i -> ids.getOrNull(i).orEmpty() }
     }
 
-    /** Keep only ids that still exist in [liveIds], then re-apply the concurrency cap. */
+    fun setSlot(ids: List<String>, index: Int, id: String, max: Int): List<String> {
+        val slots = resizeSlots(ids, max).toMutableList()
+        if (index in slots.indices) slots[index] = id
+        return slots
+    }
+
+    /** Keep slot positions; blank ids that are no longer in [liveIds]. */
     fun retainLive(stored: List<String>, liveIds: Set<String>, max: Int): List<String> {
-        return trimSelected(stored.filter { it in liveIds }, max)
+        return resizeSlots(
+            stored.map { id -> if (id.isNotBlank() && id in liveIds) id else "" },
+            max,
+        )
     }
 
     /**
-     * Labels for the system-prompt "Team models:" line. Stale ids (deleted
-     * providers) are omitted instead of printing raw UUIDs.
+     * Labels for the system-prompt "Team models:" line. Unassigned / stale
+     * slots read as the main session model instead of raw UUIDs.
      */
     fun teamModelNames(stored: List<String>, liveNamesById: Map<String, String>): String {
-        val names = stored.mapNotNull { id -> liveNamesById[id]?.takeIf { it.isNotBlank() } }
-        return if (names.isEmpty()) "the main session model" else names.joinToString(", ")
+        if (stored.isEmpty() || stored.all { id -> liveNamesById[id].isNullOrBlank() }) {
+            return "the main session model"
+        }
+        return stored.mapIndexed { i, id ->
+            val name = liveNamesById[id]?.takeIf { it.isNotBlank() } ?: "the main session model"
+            "sub-agent ${i + 1}=$name"
+        }.joinToString(", ")
     }
 
     /**
-     * Pick a model-entry id from the configured pool.
-     * Explicit [requested] wins when it is in the pool (or when the pool is empty
-     * and a request was given). Otherwise round-robin over the pool.
+     * Pick a model-entry id from the configured slots.
+     * Explicit [requested] wins when it matches a filled slot (or when every
+     * slot is empty). Otherwise the i-th concurrent spawn uses slot i;
+     * an empty slot means the main session model (`null`).
      */
     fun pickModelId(
         selected: List<String>,
         requested: String?,
         roundRobinIndex: Int,
     ): String? {
-        val pool = selected.filter { it.isNotBlank() }.distinct()
+        val slots = selected
+        val assigned = slots.filter { it.isNotBlank() }
         val req = requested?.trim()?.takeIf { it.isNotEmpty() }
         if (req != null) {
-            pool.firstOrNull { it.equals(req, ignoreCase = true) }?.let { return it }
-            if (pool.isEmpty()) return req
+            assigned.firstOrNull { it.equals(req, ignoreCase = true) }?.let { return it }
+            if (assigned.isEmpty()) return req
         }
-        if (pool.isEmpty()) return null
-        return pool[Math.floorMod(roundRobinIndex, pool.size)]
+        if (slots.isEmpty()) return req
+        val slot = slots[Math.floorMod(roundRobinIndex, slots.size)]
+        return slot.takeIf { it.isNotBlank() }
     }
 }

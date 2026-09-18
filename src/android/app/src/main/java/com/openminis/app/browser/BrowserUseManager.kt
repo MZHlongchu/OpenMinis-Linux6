@@ -27,7 +27,6 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
-import com.openminis.app.util.IsoTime
 
 /**
  * Manages a single Android WebView for browser automation.
@@ -1659,10 +1658,6 @@ class BrowserUseManager(
         val cookieMgr = runCatching { CookieManager.getInstance() }.getOrNull()
             ?: return BrowserActionResult.error("set_cookies: CookieManager unavailable")
 
-        // Default domain = current page host.
-        val defaultDomain = runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
-
-        // expires (Unix seconds) → RFC-1123 "Expires=" date in GMT.
         val setNames = mutableListOf<String>()
         val domainsTouched = linkedSetOf<String>()
         val failures = mutableListOf<String>()
@@ -1671,38 +1666,14 @@ class BrowserUseManager(
             // Accept the field-name variants common cookie exports use (browser
             // extensions EditThisCookie / Cookie-Editor, Playwright / Puppeteer
             // storage), so a model can paste cookies verbatim. [set-cookies-formats]
-            val name = cookieString(raw, "name")?.takeIf { it.isNotEmpty() }
-            val value = cookieString(raw, "value")
-            if (name == null || value == null) {
+            val encoded = BrowserCookieCodec.encode(url, raw)
+            if (encoded == null) {
                 failures.add("(missing name/value)")
                 continue
             }
-            val domain = cookieString(raw, "domain")?.takeIf { it.isNotEmpty() } ?: defaultDomain
-            val path = cookieString(raw, "path")?.takeIf { it.isNotEmpty() } ?: "/"
-
-            val sb = StringBuilder()
-            sb.append(name).append('=').append(value)
-            if (domain.isNotEmpty()) sb.append("; Domain=").append(domain)
-            sb.append("; Path=").append(path)
-            if (cookieBool(raw, "secure") == true) sb.append("; Secure")
-            // camelCase httpOnly (extensions / Playwright) + snake_case http_only.
-            if (cookieBool(raw, "http_only", "httpOnly") == true) sb.append("; HttpOnly")
-            // Expiry in Unix seconds. Aliases: expires (Puppeteer) + expirationDate
-            // (EditThisCookie / Cookie-Editor, often fractional). <= 0 (Puppeteer's
-            // -1, or 0) → session cookie (no Expires attribute).
-            cookieNumber(raw, "expires", "expirationDate")?.takeIf { it > 0 }?.let { expires ->
-                sb.append("; Expires=").append(IsoTime.formatHttpDate(expires.toLong() * 1000L))
-            }
-            // sameSite accepted (Lax/Strict/None, any case) so exports including
-            // it aren't rejected, but NOT applied yet — CookieManager.setCookie
-            // honors a SameSite attribute, but wiring it needs validation against
-            // the cross-site captcha flows. TODO [set-cookies-samesite].
-            @Suppress("UNUSED_VARIABLE")
-            val sameSite = cookieString(raw, "sameSite", "same_site")
-
-            cookieMgr.setCookie(url, sb.toString())
-            setNames.add(name)
-            domainsTouched.add(domain)
+            cookieMgr.setCookie(encoded.applyUrl, encoded.setCookieHeader)
+            setNames.add(encoded.name)
+            domainsTouched.add(encoded.domain)
         }
         cookieMgr.flush()
 
@@ -1718,42 +1689,6 @@ class BrowserUseManager(
         }
         return BrowserActionResult(text = text)
     }
-
-    // -- Cookie field readers (format-tolerant) --
-
-    /** Look up `aliases` in the map: exact match first, then case-insensitive,
-     *  so httpOnly / HttpOnly / http_only all resolve. */
-    private fun cookieValue(raw: Map<String, Any?>, vararg aliases: String): Any? {
-        for (key in aliases) raw[key]?.let { return it }
-        val lowered = aliases.map { it.lowercase() }.toSet()
-        for ((k, v) in raw) if (k.lowercase() in lowered && v != null) return v
-        return null
-    }
-
-    /** String reader; numbers are stringified so a numeric `value` still works. */
-    private fun cookieString(raw: Map<String, Any?>, vararg aliases: String): String? =
-        when (val v = cookieValue(raw, *aliases)) {
-            is String -> v
-            is Number -> v.toString()
-            else -> null
-        }
-
-    /** Bool reader; tolerates JSON bool, 0/1, and stringified "true"/"false". */
-    private fun cookieBool(raw: Map<String, Any?>, vararg aliases: String): Boolean? =
-        when (val v = cookieValue(raw, *aliases)) {
-            is Boolean -> v
-            is Number -> v.toInt() != 0
-            is String -> v.lowercase() in setOf("true", "1", "yes")
-            else -> null
-        }
-
-    /** Numeric (seconds) reader; accepts JSON number or numeric string. */
-    private fun cookieNumber(raw: Map<String, Any?>, vararg aliases: String): Double? =
-        when (val v = cookieValue(raw, *aliases)) {
-            is Number -> v.toDouble()
-            is String -> v.toDoubleOrNull()
-            else -> null
-        }
 
     // -- Wait for DOM Stable --
 

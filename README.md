@@ -6,14 +6,18 @@
 
 **你的私人、端侧 AI Agent（本仓库是 OpenMinis 的 Linux 沙箱 Android 分支）。**
 
-> **Minis Ultra** — `applicationId` `com.openminis.linux`，当前 **1.22-linux** / versionCode 34，可与官方 OpenMinis 并排安装。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。主机 `su`、工具链（`minis-dev-setup`）、POSIX `/sdcard` 挂载、Ubuntu 24.04 PRoot 客户机见 [LINUX.md](LINUX.md)。多智能体调度见设置 → 多智能体（`minis://settings/multi-agent`）。签名与 libunwind 见 [docs/SIGNING.md](docs/SIGNING.md)。中国大陆编译 Android SDK / 切勿覆盖 aarch64 aapt2 见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。中文发行说明见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
+> **Minis Ultra** — `applicationId` `com.openminis.linux`，当前 **1.23-linux** / versionCode 35，可与官方 OpenMinis 并排安装。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。主机 `su`、工具链（`minis-dev-setup`）、POSIX `/sdcard` 挂载、Ubuntu 24.04 PRoot 客户机见 [LINUX.md](LINUX.md)。多智能体调度见设置 → 多智能体（`minis://settings/multi-agent`）。签名与 libunwind 见 [docs/SIGNING.md](docs/SIGNING.md)。中国大陆编译 Android SDK / 切勿覆盖 aarch64 aapt2 见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。中文发行说明见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ## 下载
 
-- **本版发行包（1.22-linux / versionCode 34）**：[Releases `1.22-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.22-linux) → `minis-ultra-com.openminis.linux.apk`
+- **本版发行包（1.23-linux / versionCode 35）**：[Releases `1.23-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.23-linux) → `minis-ultra-com.openminis.linux.apk`
 - **滚动构建**：[Releases `android-latest`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest)（main 每次成功构建都会覆盖）
 
 侧载前允许「安装未知应用」。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本，见 [docs/SIGNING.md](docs/SIGNING.md)。
+
+### 1.23 要点
+
+子代理各自使用独立 PersistentShell 通道（真并行，工作区仍在父会话）；设置 → 多智能体按并发上限生成「子代理 N」选模型；恢复 WebApp 钉到主屏；BrowserUse `SameSite=None` 自动 Secure；`HostEventHooks` 同步落盘。完整说明：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ### 1.22 要点
 
@@ -49,7 +53,7 @@ Official website: **[openminis.app](https://openminis.app)**
   <img alt="Download on the App Store" height="48" src="assets/badge-appstore.svg" />
 </a>
 &nbsp;
-<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.22-linux">
+<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.23-linux">
   <img alt="Get the APK on GitHub" height="48" src="assets/badge-android.svg" />
 </a>
 
@@ -109,7 +113,7 @@ Minis 有自己的工具系统，但不要求技能必须为它而写：**给 Cl
 
 ## 多智能体（Minis Ultra）
 
-主会话模型是协调者：拆解任务、用 `run_subagent` 分派队友、验收、汇总。同一回合里相互独立的调用会并行（上限与团队模型池联动，1–8，默认 3）；有依赖的阶段必须验收后再继续。子代理看不到主会话，也不能再开子代理。设置页：`minis://settings/multi-agent`。
+主会话模型是协调者：拆解任务、用 `run_subagent` 分派队友、验收、汇总。同一回合里相互独立的调用会并行（上限 1–8，默认 3）；每个并发槽位可单独选模型。有依赖的阶段必须验收后再继续。子代理看不到主会话，也不能再开子代理；各自走独立 shell 通道，文件仍写在父会话工作区。设置页：`minis://settings/multi-agent`。
 
 ---
 

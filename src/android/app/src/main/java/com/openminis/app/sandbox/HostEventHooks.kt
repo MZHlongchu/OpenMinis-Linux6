@@ -83,6 +83,7 @@ object HostEventHooks {
         }
     }
 
+    @Synchronized
     private fun persist(ctx: Context, map: Map<String, List<String>>) {
         val obj = JSONObject()
         for ((k, v) in map) {
@@ -90,6 +91,10 @@ object HostEventHooks {
             v.forEach { arr.put(it) }
             obj.put(k, arr)
         }
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, obj.toString()).apply()
+        val ok = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY, obj.toString())
+            .commit()
+        if (!ok) Log.w(TAG, "failed to persist host event hooks")
     }
 }

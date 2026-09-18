@@ -187,9 +187,11 @@
     <string name="settings_multi_agent_increase">Increase</string>
     <string name="settings_multi_agent_footer_dispatch">The main chat model is the coordinator. It decomposes, dispatches, accepts and summarizes — it should not do all the work itself. Independent tasks run in parallel; dependent phases wait for acceptance.</string>
     <string name="settings_multi_agent_section_models">Team models</string>
-    <string name="settings_multi_agent_footer_models">Select up to %1$d models (linked to the concurrency cap). Sub-agents round-robin this pool unless a call names a model. Leave empty to reuse the main session model.</string>
+    <string name="settings_multi_agent_footer_models">One row per concurrent teammate (linked to the cap of %1$d). Pick a model for each sub-agent, or leave it on the main session model. The N-th parallel run_subagent in a turn uses sub-agent N. A call may still name a model.</string>
+    <string name="settings_multi_agent_slot">Sub-agent %1$d</string>
+    <string name="settings_multi_agent_slot_main">Main session model</string>
     <string name="settings_multi_agent_no_models">No enabled models yet. Add a provider first.</string>
-    <string name="settings_multi_agent_stale_pruned">Dropped %1$d team-model picks whose providers no longer exist. Select again.</string>
+    <string name="settings_multi_agent_stale_pruned">Cleared %1$d slot(s) whose providers no longer exist. Pick again.</string>
     <string name="settings_plan_discussion_section">Plan discussion</string>
     <string name="settings_plan_discussion_off">Off</string>
     <string name="settings_plan_discussion_auto">Auto (skip chitchat)</string>

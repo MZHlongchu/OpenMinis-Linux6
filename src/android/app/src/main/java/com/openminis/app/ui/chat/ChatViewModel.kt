@@ -59,6 +59,7 @@ import com.openminis.app.sandbox.ExecutionCoordinator
 import com.openminis.app.terminal.MinisOpenUrlBroker
 import com.openminis.app.terminal.MinisUrlMarker
 import com.openminis.app.tools.AgentTools
+import com.openminis.app.tools.SubAgentLane
 import com.openminis.app.tools.FileEditTool
 import com.openminis.app.tools.FileReadTool
 import com.openminis.app.tools.FileWriteTool
@@ -108,8 +109,8 @@ import com.openminis.app.util.IsoTime
 
 class ChatViewModel(
     internal val sessionId: String,
-    private val chatRepository: ChatRepository,
-    private val providerRepository: ProviderRepository,
+    internal val chatRepository: ChatRepository,
+    internal val providerRepository: ProviderRepository,
     internal val context: Context,
     val memoryRepository: MemoryRepository? = null,
     val skillRepository: com.openminis.app.data.repository.SkillRepository? = null,
@@ -507,7 +508,7 @@ class ChatViewModel(
 
     private val mediaStore = com.openminis.app.data.storage.MediaStore(context)
 
-    private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
+    internal val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
 
     // ── Long-session window cap ────────────────────────────────────────
@@ -1060,7 +1061,7 @@ class ChatViewModel(
     private val _fallbackTrigger = MutableStateFlow(0)
     val fallbackTrigger: StateFlow<Int> = _fallbackTrigger.asStateFlow()
 
-    private val _activeEntryId = MutableStateFlow<String?>(null)
+    internal val _activeEntryId = MutableStateFlow<String?>(null)
     val activeEntryId: StateFlow<String?> = _activeEntryId.asStateFlow()
 
     /** Prompts enqueued while the agent loop is running. Drained after the loop finishes. */
@@ -1159,7 +1160,7 @@ class ChatViewModel(
     @Volatile
     private var streamJob: Job? = null
     private var currentProvider: LLMProvider? = null
-    private var currentModel: LLMModel? = null
+    internal var currentModel: LLMModel? = null
 
     /**
      * Does the CURRENTLY RESOLVED main model natively consume image pixels?
@@ -1252,11 +1253,11 @@ class ChatViewModel(
      */
     private val toolLoopDetector = ToolLoopDetector()
 
-    private val multiAgentSettings: MultiAgentSettingsRepository
+    internal val multiAgentSettings: MultiAgentSettingsRepository
         get() = (context.applicationContext as MinisApp).multiAgentSettingsRepository
 
-    private val subAgentRoundRobin = AtomicInteger(0)
-    private val subAgentDepth = AtomicInteger(0)
+    internal val subAgentRoundRobin = AtomicInteger(0)
+    internal val subAgentDepth = AtomicInteger(0)
 
     /**
      * Cached reference to the lazily-created [BrowserTabPool] so
@@ -9013,8 +9014,9 @@ class ChatViewModel(
                     val sem = Semaphore(cap)
                     val peers = toolCalls.filter { it.second == "run_subagent" }
                     coroutineScope {
-                        peers.map { (peerId, _, peerArgs) ->
-                            async {
+                        peers.mapIndexed { peerIdx, (peerId, _, peerArgs) ->
+                            val laneId = SubAgentLane.idFor(activeSessionId, peerIdx)
+                            async(SubAgentLane(laneId)) {
                                 val peerStr = peerArgs.toString()
                                 val peerResult = sem.withPermit {
                                     executeRunSubAgent(peerStr, peerId, allToolBlocks, assistantId, accumulatedText)
@@ -9316,7 +9318,7 @@ class ChatViewModel(
         tools: List<AgentToolDefinition>,
     ): String? = preflightValidateToolCallImpl(name, args, tools)
 
-    private suspend fun executeTool(
+    internal suspend fun executeTool(
         name: String,
         argsJson: String,
         toolId: String,
@@ -9566,7 +9568,7 @@ class ChatViewModel(
             // of the Chinese-emoji filename "disappears" bug. `activeSessionId`
             // resolves to the persisted id once `ensureSession()` has run, so
             // every shell runs in a directory that survives VM recreation.
-            val dispatchSessionId = activeSessionId
+            val dispatchSessionId = kotlin.coroutines.coroutineContext[SubAgentLane]?.id ?: activeSessionId
             android.util.Log.w("ShellExecDiag",
                 "executeShell dispatch=$dispatchSessionId rawSessionId=$sessionId realSessionId=$realSessionId isDraft=$isDraft cmd=${command.take(120).replace('\n', ' ')}")
 
@@ -9853,7 +9855,7 @@ class ChatViewModel(
 
     // ─── UI Helpers ──────────────────────────────────────────────────────
 
-    private fun updateAssistantMessage(
+    internal fun updateAssistantMessage(
         id: String,
         content: String,
         isStreaming: Boolean,
@@ -12059,7 +12061,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         _error.value = null
     }
 
-    private fun escapeJson(text: String): String {
+    internal fun escapeJson(text: String): String {
         val sb = StringBuilder("\"")
         for (c in text) {
             when (c) {
@@ -12572,318 +12574,4 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             .replace("\\\\", "\\")
 
 
-    private suspend fun runPlanDiscussion(provider: LLMProvider): String {
-        val assistantId = java.util.UUID.randomUUID().toString()
-        withContext(Dispatchers.Main) {
-            _messages.value = _messages.value + ChatMessage(
-                id = assistantId,
-                role = "assistant",
-                content = "",
-                isStreaming = true,
-                isAwaitingModelResponse = true,
-            )
-        }
-        val userText = _messages.value.lastOrNull { it.role == "user" && !it.isQueued }?.content.orEmpty()
-        val excerpt = _messages.value.takeLast(16).joinToString("\n") {
-            "${it.role}: ${it.content.take(500)}"
-        }
-        val config = providerRepository.config.value
-        val mainEntry = _activeEntryId.value?.let { id -> config.modelEntries.find { it.id == id } }
-        val mainName = mainEntry?.model?.displayName ?: currentModel?.displayName ?: "main"
-        val mainMax = (mainEntry?.model?.maxOutputTokens ?: currentModel?.maxOutputTokens ?: 4096).coerceIn(256, 8192)
-        val mainMember = PlanDiscussionOrchestrator.Member(mainName, "facilitator", provider, mainMax)
-        val stances = listOf("architect", "skeptic", "implementer", "operator")
-        val pool = MultiAgentSettings.retainLive(
-            multiAgentSettings.selectedModelEntryIds.value,
-            config.modelEntries.map { it.id }.toSet(),
-            multiAgentSettings.maxConcurrent.value,
-        )
-        val members = mutableListOf<PlanDiscussionOrchestrator.Member>()
-        if (pool.isNotEmpty()) {
-            pool.forEachIndexed { i, id ->
-                val entry = config.modelEntries.find { it.id == id } ?: return@forEachIndexed
-                val p = providerForModelEntry(entry) ?: return@forEachIndexed
-                members += PlanDiscussionOrchestrator.Member(
-                    displayName = entry.model.displayName,
-                    stance = stances[i % stances.size],
-                    provider = p,
-                    maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 8192),
-                )
-            }
-        }
-        if (members.isEmpty()) {
-            members += mainMember.copy(stance = "architect")
-            members += mainMember.copy(displayName = "$mainName · critic", stance = "skeptic")
-            members += mainMember.copy(displayName = "$mainName · implementer", stance = "implementer")
-        }
-        val tools = AgentTools.makeAgentTools(
-            supportsImageInput = currentModel?.hasImageInput == true,
-            visionGroupConfigured = com.openminis.app.tools.VisionGroupResolver.isConfigured(
-                providerRepository, context,
-            ),
-            memoryEnabled = false,
-            subAgentEnabled = false,
-        )
-        val result = try {
-            PlanDiscussionOrchestrator.run(
-                userText = userText,
-                conversationExcerpt = excerpt,
-                main = mainMember,
-                members = members,
-                tools = tools,
-                executeTool = { name, json ->
-                    executeTool(name, json, "", mutableListOf(), assistantId, "")
-                },
-                onProgress = { msg ->
-                    withContext(Dispatchers.Main) {
-                        val overlay = msg.lineSequence()
-                            .firstOrNull { it.startsWith("**状态：**") }
-                            ?.removePrefix("**状态：**")
-                            ?.trim()
-                            ?: "计划讨论"
-                        SessionActivityTracker.updateToolStatus(overlay, "plan_discussion", true, overlay)
-                        _messages.value = _messages.value.map {
-                            if (it.id == assistantId) {
-                                it.copy(content = msg, isAwaitingModelResponse = true, isStreaming = true)
-                            } else it
-                        }
-                    }
-                },
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            val err = "计划讨论失败: ${e.message ?: e.javaClass.simpleName}"
-            withContext(Dispatchers.Main) {
-                _messages.value = _messages.value.map {
-                    if (it.id == assistantId) {
-                        it.copy(content = err, isStreaming = false, isAwaitingModelResponse = false)
-                    } else it
-                }
-            }
-            return ""
-        }
-        val partsJson = "[{\"type\":\"text\",\"value\":" + escapeJson(result.markdown) + "}]"
-        val persisted = chatRepository.appendMessage(activeSessionId, "assistant", partsJson)
-        withContext(Dispatchers.Main) {
-            SessionActivityTracker.updateToolStatus("", null, false)
-            _messages.value = _messages.value.map {
-                if (it.id == assistantId) it.copy(
-                    id = persisted.id,
-                    content = result.markdown,
-                    isStreaming = false,
-                    isAwaitingModelResponse = false,
-                ) else it
-            }
-        }
-        return result.markdown
-    }
-
-    private suspend fun publishRunSubagentLog(
-        toolId: String,
-        assistantId: String,
-        currentText: String,
-        toolBlocks: MutableList<AssistantBlock>?,
-        log: String,
-    ) {
-        if (toolId.isEmpty() || assistantId.isEmpty() || toolBlocks == null) return
-        synchronized(toolBlocks) {
-            val i = toolBlocks.indexOfFirst { it.id == toolId }
-            if (i >= 0) {
-                toolBlocks[i] = toolBlocks[i].copy(content = log)
-            }
-        }
-        withContext(Dispatchers.Main) {
-            updateAssistantMessage(assistantId, currentText, true, toolBlocks.toList())
-        }
-    }
-
-    private suspend fun executeRunSubAgent(
-        argsJson: String,
-        toolId: String = "",
-        toolBlocks: MutableList<AssistantBlock>? = null,
-        assistantId: String = "",
-        currentText: String = "",
-    ): ToolExecutionResult {
-        if (!multiAgentSettings.enabled.value) {
-            return ToolExecutionResult("Multi-agent dispatch is disabled in Settings → Multi-agent.", false)
-        }
-        if (subAgentDepth.get() > 0) {
-            return ToolExecutionResult("Error: sub-agents cannot spawn further sub-agents.", false)
-        }
-        val args = try { JSONObject(argsJson) } catch (_: Exception) {
-            return ToolExecutionResult("Error: invalid run_subagent arguments", false)
-        }
-        val prompt = args.optString("prompt", "").trim()
-        if (prompt.isEmpty()) {
-            return ToolExecutionResult("Error: prompt is required for run_subagent", false)
-        }
-        val role = args.optString("role", "").trim().ifEmpty { null }
-        val skills = args.optString("skills", "").trim().ifEmpty { null }
-        val requested = args.optString("model", "").trim().ifEmpty { null }
-        val title = args.optString("tool_title", "").trim()
-        val kind = com.openminis.app.tools.SubAgentKind.normalize(args.optString("kind", ""))
-        val writePaths = com.openminis.app.tools.WritePathGuard.parse(args.optString("write_paths", ""))
-        val maxTurns = com.openminis.app.tools.SubAgentKind.clampTurns(
-            kind,
-            if (args.has("max_turns")) args.optInt("max_turns") else null,
-            multiAgentSettings.subagentMaxTurns.value,
-        )
-        val config = providerRepository.config.value
-        val pool = MultiAgentSettings.retainLive(
-            multiAgentSettings.selectedModelEntryIds.value,
-            config.modelEntries.map { it.id }.toSet(),
-            multiAgentSettings.maxConcurrent.value,
-        )
-        val pickedId = MultiAgentSettings.pickModelId(pool, requested, subAgentRoundRobin.getAndIncrement())
-        val entry = when {
-            pickedId != null -> config.modelEntries.find {
-                it.id == pickedId ||
-                    it.model.id.equals(pickedId, ignoreCase = true) ||
-                    it.model.displayName.equals(pickedId, ignoreCase = true)
-            }
-            else -> _activeEntryId.value?.let { id -> config.modelEntries.find { it.id == id } }
-        } ?: return ToolExecutionResult(
-            "No model available for sub-agent. Select models under Settings → Multi-agent, or keep the main session model selected.",
-            false,
-        )
-        val provider = providerForModelEntry(entry)
-            ?: return ToolExecutionResult("Failed to create provider for ${entry.model.displayName}", false)
-        subAgentDepth.incrementAndGet()
-        val trackerId = com.openminis.app.service.SubAgentActivityTracker.start(
-            parentSessionId = realSessionId.ifBlank { sessionId },
-            title = title.ifEmpty { "Sub-agent ($kind)" },
-            role = role,
-            model = entry.model.displayName,
-        )
-        return try {
-            val liveLog = StringBuilder()
-            var lastUiMs = 0L
-            suspend fun onStep(line: String) {
-                val clipped = line.trim()
-                if (clipped.isEmpty()) return
-                liveLog.append(clipped).append('\n')
-                if (liveLog.length > 24_000) {
-                    liveLog.delete(0, liveLog.length - 20_000)
-                }
-                com.openminis.app.service.SubAgentActivityTracker.updateStep(trackerId, clipped)
-                val now = System.currentTimeMillis()
-                val important = clipped.startsWith("▶") || clipped.startsWith("✓") || clipped.startsWith("✗") || clipped.startsWith("turn ")
-                if (!important && now - lastUiMs < 250L) return
-                lastUiMs = now
-                publishRunSubagentLog(toolId, assistantId, currentText, toolBlocks, liveLog.toString())
-            }
-            val result = com.openminis.app.tools.WritePathGuard.withPaths(writePaths) {
-                SubAgentRunner.run(
-                    provider = provider,
-                    modelDisplayName = entry.model.displayName,
-                    userPrompt = prompt,
-                    role = role,
-                    skillsHint = skills,
-                    tools = com.openminis.app.tools.SubAgentKind.filterTools(
-                        kind,
-                        AgentTools.makeAgentTools(
-                            supportsImageInput = entry.model.hasImageInput,
-                            visionGroupConfigured = com.openminis.app.tools.VisionGroupResolver.isConfigured(
-                                providerRepository, context,
-                            ),
-                            memoryEnabled = false,
-                            subAgentEnabled = false,
-                        ),
-                    ),
-                    maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 8192),
-                    executeTool = { name, json ->
-                        if (com.openminis.app.tools.SubAgentKind.blocks(kind, name)) {
-                            ToolExecutionResult("Error: $kind sub-agent cannot use $name.", false)
-                        } else {
-                            executeTool(name, json, "", mutableListOf(), "", "")
-                        }
-                    },
-                    onStep = { onStep(it) },
-                    kind = kind,
-                    writePaths = writePaths,
-                    maxTurns = maxTurns,
-                )
-            }
-            val uiLog = if (liveLog.isNotEmpty()) {
-                liveLog.toString().trimEnd() + "\n---\n" + result.output
-            } else {
-                result.output
-            }
-            publishRunSubagentLog(toolId, assistantId, currentText, toolBlocks, uiLog)
-            com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, result.success)
-            result.copy(toolTitle = title.ifEmpty { "Sub-agent · ${entry.model.displayName}" })
-        } catch (e: Exception) {
-            com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, false, e.message)
-            throw e
-        } finally {
-            subAgentDepth.decrementAndGet()
-        }
-    }
-
-    private fun providerForModelEntry(entry: ModelEntry): LLMProvider? {
-        val instance = providerRepository.instance(entry.providerInstanceId) ?: return null
-        var apiKey = providerRepository.usableApiKey(instance) ?: return null
-        if (instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth) {
-            try {
-                val manager = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
-                val freshToken = kotlinx.coroutines.runBlocking { manager?.validAccessToken() }
-                if (freshToken != null && freshToken != apiKey) {
-                    providerRepository.saveApiKey(instance.id, freshToken)
-                    apiKey = freshToken
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Sub-agent OAuth refresh failed: ${e.message}")
-            }
-        }
-        return ProviderFactory.create(instance, apiKey, entry.model, context)
-    }
-
-    /**
-     * Humanize a snake_case tool name into a Title-Case label for pill headers
-     * while the model's own `tool_title` arg has not yet streamed in.
-     * e.g. `file_write` → "Write File", `shell_execute` → "Execute Shell".
-     */
-    private fun friendlyToolTitle(toolName: String): String = when (toolName) {
-        "shell_execute" -> "Execute Shell"
-        "file_read" -> "Read File"
-        "file_write" -> "Write File"
-        "file_edit" -> "Edit File"
-        "browser_use" -> "Browse Web"
-        "read_image" -> "Read Image"
-        "memory_write" -> "Write Memory"
-        "memory_get" -> "Read Memory"
-        "web_search" -> "Search Web"
-        "search_sessions" -> "Search Sessions"
-        "read_session" -> "Read Session"
-        "run_subagent" -> "Sub-agent"
-        "ask_user_question", "AskUserQuestion" -> "Ask User"
-        else -> toolName
-            .split('_')
-            .filter { it.isNotEmpty() }
-            .joinToString(" ") { it.replaceFirstChar { ch -> ch.uppercase() } }
-    }
-
-    /**
-     * Parse the JSON tool-arguments string into a plain Map for the loop
-     * detector. Malformed JSON degrades gracefully to an empty map — the
-     * detector still hashes the tool name, so identical bad calls are still
-     * detected as a loop.
-     */
-    private fun parseToolParams(argsJson: String): Map<String, Any?> {
-        if (argsJson.isBlank()) return emptyMap()
-        return try {
-            val obj = JSONObject(argsJson)
-            val out = HashMap<String, Any?>(obj.length())
-            val keys = obj.keys()
-            while (keys.hasNext()) {
-                val k = keys.next()
-                val v = obj.get(k)
-                out[k] = if (v == JSONObject.NULL) null else v
-            }
-            out
-        } catch (_: Exception) {
-            emptyMap()
-        }
-    }
 }

@@ -241,7 +241,7 @@ class PersistentShell(
         // proot env. NativeOffloadServer reads this off `request.env` and
         // hands it to OffloadPermissionManager so ASK_ONCE grants/denials
         // are scoped per chat session, not globally.
-        env["MINIS_CHAT_SESSION_ID"] = sessionId
+        env["MINIS_CHAT_SESSION_ID"] = ExecutionCoordinator.ownerSessionId(sessionId)
 
         for ((key, value) in PRootKernel.customEnvironment) {
             env[key] = value

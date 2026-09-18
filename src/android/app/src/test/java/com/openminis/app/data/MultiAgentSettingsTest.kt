@@ -23,10 +23,28 @@ class MultiAgentSettingsTest {
     }
 
     @Test
-    fun trimSelected_capsToMaxAndDedupes() {
+    fun resizeSlots_padsTruncatesAndKeepsDuplicates() {
         val ids = listOf("a", "b", "a", "c", "d", "")
-        assertEquals(listOf("a", "b", "c"), MultiAgentSettings.trimSelected(ids, 3))
-        assertEquals(listOf("a"), MultiAgentSettings.trimSelected(ids, 1))
+        assertEquals(listOf("a", "b", "a"), MultiAgentSettings.resizeSlots(ids, 3))
+        assertEquals(listOf("a"), MultiAgentSettings.resizeSlots(ids, 1))
+        assertEquals(listOf("a", "b", "", ""), MultiAgentSettings.resizeSlots(listOf("a", "b"), 4))
+        assertEquals(listOf("", "", ""), MultiAgentSettings.resizeSlots(emptyList(), 3))
+    }
+
+    @Test
+    fun setSlot_writesIndexWithoutShiftingNeighbors() {
+        assertEquals(
+            listOf("a", "x", ""),
+            MultiAgentSettings.setSlot(listOf("a", "b"), 1, "x", 3),
+        )
+        assertEquals(
+            listOf("", "m2", ""),
+            MultiAgentSettings.setSlot(emptyList(), 1, "m2", 3),
+        )
+        assertEquals(
+            listOf("a", "", "c"),
+            MultiAgentSettings.setSlot(listOf("a", "b", "c"), 1, "", 3),
+        )
     }
 
     @Test
@@ -39,24 +57,41 @@ class MultiAgentSettingsTest {
     }
 
     @Test
-    fun pickModelId_emptyPoolReturnsRequestedOrNull() {
+    fun pickModelId_emptySlotsUseMainUnlessRequested() {
         assertEquals("x", MultiAgentSettings.pickModelId(emptyList(), "x", 0))
         assertNull(MultiAgentSettings.pickModelId(emptyList(), null, 0))
+        assertEquals("x", MultiAgentSettings.pickModelId(listOf("", "", ""), "x", 0))
+        assertNull(MultiAgentSettings.pickModelId(listOf("", "", ""), null, 1))
     }
 
     @Test
-    fun retainLive_dropsDeletedProviderIdsSoCapFreesUp() {
+    fun pickModelId_mapsConcurrentIndexToSlotIncludingBlanks() {
+        val slots = listOf("m1", "", "m3")
+        assertEquals("m1", MultiAgentSettings.pickModelId(slots, null, 0))
+        assertNull(MultiAgentSettings.pickModelId(slots, null, 1))
+        assertEquals("m3", MultiAgentSettings.pickModelId(slots, null, 2))
+        assertEquals("m1", MultiAgentSettings.pickModelId(slots, null, 3))
+        assertEquals("m1", MultiAgentSettings.pickModelId(listOf("m1", "m1"), null, 1))
+    }
+
+    @Test
+    fun retainLive_blanksStaleIdsWithoutCompactingSlots() {
         val stored = listOf("aa9ff554-gone", "live-a", "live-b")
         val live = setOf("live-a", "live-b", "live-c")
-        assertEquals(listOf("live-a", "live-b"), MultiAgentSettings.retainLive(stored, live, 3))
-        assertEquals(emptyList<String>(), MultiAgentSettings.retainLive(stored, emptySet(), 3))
+        assertEquals(listOf("", "live-a", "live-b"), MultiAgentSettings.retainLive(stored, live, 3))
+        assertEquals(listOf("", "", ""), MultiAgentSettings.retainLive(stored, emptySet(), 3))
+        assertEquals(listOf("", "live-a"), MultiAgentSettings.retainLive(stored, live, 2))
     }
 
     @Test
-    fun teamModelNames_omitsStaleIdsInsteadOfPrintingUuids() {
+    fun teamModelNames_labelsEachSlotAndOmitsUuids() {
         val stored = listOf("aa9ff554-gone", "live-a")
         val names = mapOf("live-a" to "GPT")
-        assertEquals("GPT", MultiAgentSettings.teamModelNames(stored, names))
+        assertEquals(
+            "sub-agent 1=the main session model, sub-agent 2=GPT",
+            MultiAgentSettings.teamModelNames(stored, names),
+        )
         assertEquals("the main session model", MultiAgentSettings.teamModelNames(stored, emptyMap()))
+        assertEquals("the main session model", MultiAgentSettings.teamModelNames(listOf("", ""), emptyMap()))
     }
 }

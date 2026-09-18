@@ -1,3 +1,33 @@
+# OpenMinis-Linux 1.23-linux
+
+- versionCode **35**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a；有 `MINIS_UPLOAD_*` 则用上传证书，否则仍为 debug-signed）
+- 签名说明：[docs/SIGNING.md](SIGNING.md)；一键编译：`scripts/build_apk_aarch64.sh`
+
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本。
+
+## 本版
+
+1. **子代理真并行**  
+   每个 `run_subagent` 注入 `SubAgentLane`，`shell_execute` 派到独立 PersistentShell。父会话 Mutex 不再把队友命令排成队。绑定挂载仍指向父会话 `minis-sessions/<id>`，取消/结束时关掉 lane。
+
+2. **团队模型按槽位**  
+   并发上限 N 就生成 N 行「子代理 1…N」，可重复选同一模型或留空用主会话。同一回合第 N 个并行子代理用第 N 槽。
+
+3. **WebApp 钉到主屏**  
+   打开 `WEBAPP_PIN_ENTRY_ENABLED`；聊天 HTML 附件长按、文件浏览器、Web 预览「…」菜单恢复添加主屏幕。
+
+4. **BrowserUse SameSite**  
+   `SameSite=None`（含 `no_restriction`）强制 `Secure`；`CookieManager.setCookie` 用 cookie 自己的域名 URL。
+
+5. **其它**  
+   `HostEventHooks.persist` 同步 `commit()`；ChatViewModel 拆出计划讨论 / `run_subagent` / 工具标题与参数。
+
+---
+
 # OpenMinis-Linux 1.22-linux
 
 - versionCode **34**
