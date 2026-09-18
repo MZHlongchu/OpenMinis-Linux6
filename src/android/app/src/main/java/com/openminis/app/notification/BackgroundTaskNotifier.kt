@@ -124,6 +124,9 @@ class BackgroundTaskNotifier(
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .addAction(actionFor(sessionId, SandboxNotifyActions.RETRY, R.string.notif_task_action_retry))
+            .addAction(actionFor(sessionId, SandboxNotifyActions.BACKUP, R.string.notif_task_action_backup))
+            .addAction(actionFor(sessionId, SandboxNotifyActions.CLEANUP, R.string.notif_task_action_cleanup))
             .build()
 
         try {
@@ -178,6 +181,31 @@ class BackgroundTaskNotifier(
             setShowBadge(true)
         }
         manager.createNotificationChannel(channel)
+    }
+
+
+    private fun actionFor(
+        sessionId: String,
+        action: String,
+        labelRes: Int,
+    ): NotificationCompat.Action {
+        val intent = Intent(context, SandboxNotifyActionReceiver::class.java).apply {
+            this.action = SandboxNotifyActions.ACTION
+            putExtra(SandboxNotifyActions.EXTRA_SESSION_ID, sessionId)
+            putExtra(SandboxNotifyActions.EXTRA_ACTION, action)
+        }
+        val requestCode = 31 * sessionId.hashCode() + action.hashCode()
+        val pi = PendingIntent.getBroadcast(
+            context,
+            requestCode,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return NotificationCompat.Action.Builder(
+            R.mipmap.ic_launcher,
+            context.getString(labelRes),
+            pi,
+        ).build()
     }
 
     companion object {

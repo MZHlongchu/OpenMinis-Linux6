@@ -925,7 +925,7 @@ class DebugRPCHandler(private val context: Context) {
     // ── Update checker (T33) — exposed only via DebugRPC so the e2e flow can
     // be exercised before the production UI entry point lands.
     private suspend fun handleUpdateCheck(): JSONObject {
-        return when (val r = com.openminis.app.data.UpdateChecker.check()) {
+        return when (val r = com.openminis.app.data.UpdateChecker.check(context)) {
             is com.openminis.app.data.UpdateChecker.CheckResult.UpdateAvailable -> JSONObject()
                 .put("status", "update_available")
                 .put("tag_name", r.tagName)

@@ -9,18 +9,13 @@
 #   * http:// https:// about:*                 → in-app WebView preview
 #   * /var/minis/<host>/<path>  (absolute)     → converted to minis://<host>/<path>
 #     minis://attachments/...  minis://workspace/...  minis://shared/... etc.
-#                                              → routed by extension:
-#                                                 images → image viewer
-#                                                 markdown → markdown preview
-#                                                 html → html preview
-#                                                 pdf/office → document preview
-#                                                 audio/video → media player
-#                                                 else → share sheet
+#                                              → routed by extension
+#
+# When stdout is not a TTY (cron / nohup / pipelines) or --system is passed,
+# http(s)/intent/tel/mailto/geo/market URLs go through android-open (NativeOffload)
+# so the host can ACTION_VIEW them without an OSC parser.
 #
 # Protocol: ESC ] 1337 ; MinisOpenURL = <url> BEL
-#   - ESC = 0x1B, BEL = 0x07
-#   - Host scanner strips the whole sequence from the displayed output.
-#
 # Exit 0 always when we emitted something: the caller should believe the
 # viewer was opened.
 
@@ -40,14 +35,10 @@ emit() {
             printf 'Opened in Minis browser: %s\n' "$1"
             ;;
         minis://*)
-            # Already a minis:// URL — pass through.
             emit_marker "$1"
             printf 'Opened in Minis preview: %s\n' "$1"
             ;;
         /var/minis/*)
-            # Convert /var/minis/<host>/<path> → minis://<host>/<path>
-            # so the host can resolve it to the real sandbox location and
-            # pick the right in-app preview by extension.
             rel="${1#/var/minis/}"
             case "$rel" in
                 */*)
@@ -57,30 +48,73 @@ emit() {
                     printf 'Opened in Minis preview: minis://%s/%s\n' "$host" "$path"
                     ;;
                 *)
-                    # e.g. /var/minis/workspace with no trailing path — a bare
-                    # directory. Not previewable; treat as non-URL.
                     printf 'minis-open: not a previewable resource: %s\n' "$1" >&2
                     return 0
                     ;;
             esac
             ;;
         *)
-            # Non-URL, non-/var/minis path: print a hint but don't fail — mimic
-            # xdg-open best-effort so shell scripts that chain it don't abort.
             printf 'minis-open: not a URL or chat resource, ignoring: %s\n' "$1" >&2
             return 0
             ;;
     esac
 }
 
+open_system() {
+    if command -v android-open >/dev/null 2>&1; then
+        android-open "$1"
+    else
+        emit "$1"
+    fi
+}
+
+SYSTEM=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --system|-s)
+            SYSTEM=1
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: minis-open [--system] <url-or-path>" >&2
+            echo "  --system  open http(s)/intent URLs via android-open (NativeOffload)" >&2
+            echo "  url-or-path: http(s)://, minis://, or /var/minis/<host>/<path>" >&2
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo "minis-open: unknown option: $1" >&2
+            exit 2
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
 if [ $# -eq 0 ]; then
-    echo "Usage: minis-open <url-or-path>" >&2
+    echo "Usage: minis-open [--system] <url-or-path>" >&2
     echo "  url-or-path: http(s):// URL, minis:// URL, or /var/minis/<host>/<path>" >&2
     exit 1
 fi
 
 for arg in "$@"; do
-    emit "$arg"
+    use_system=0
+    if [ "$SYSTEM" = 1 ] || [ ! -t 1 ]; then
+        case "$arg" in
+            http://*|https://*|intent:*|android-app:*|tel:*|mailto:*|geo:*|market:*)
+                use_system=1
+                ;;
+        esac
+    fi
+    if [ "$use_system" = 1 ]; then
+        open_system "$arg"
+    else
+        emit "$arg"
+    fi
 done
 
 exit 0

@@ -1282,6 +1282,9 @@
     <string name="notif_config_confirm_body_single">A change needs your review — open Minis to approve or reject.</string>
     <string name="notif_config_confirm_body_multi">%d changes need your review — open Minis to approve or reject.</string>
     <string name="notif_task_failed_body">Task ended with an error. Tap to open the chat.</string>
+    <string name="notif_task_action_retry">Retry</string>
+    <string name="notif_task_action_backup">Backup</string>
+    <string name="notif_task_action_cleanup">Cleanup</string>
 
     <!-- T-selection-add-to-input — long-press text selection menu action -->
     <string name="selection_add_to_chat_input">Add to Chat Input</string>

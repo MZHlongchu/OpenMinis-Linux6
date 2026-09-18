@@ -128,7 +128,7 @@ fun CheckUpdateSection() {
                     statusMessage = null
                     showReleasesLink = false
                     scope.launch {
-                        when (val r = UpdateChecker.check()) {
+                        when (val r = UpdateChecker.check(context)) {
                             is UpdateChecker.CheckResult.UpdateAvailable -> {
                                 update = r
                                 statusMessage = null

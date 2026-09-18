@@ -98,7 +98,7 @@ object UpdateChecker {
      * All network work happens on [Dispatchers.IO]; safe to call from any
      * coroutine scope.
      */
-    suspend fun check(): CheckResult = withContext(Dispatchers.IO) {
+    suspend fun check(context: Context? = null): CheckResult = withContext(Dispatchers.IO) {
         val url = "https://api.github.com/repos/$OWNER/$REPO/releases?per_page=30"
         AppLogger.info(TAG, "GET $url (local=${BuildConfig.VERSION_NAME})")
         try {
@@ -132,33 +132,25 @@ object UpdateChecker {
                 }
 
                 // Build a list of non-draft releases. GitHub already returns
-                // them sorted by created_at desc, but we re-sort by parsed
-                // version number to be robust against odd ordering.
-                data class ReleaseInfo(
-                    val tagName: String,
-                    val versionName: String,
-                    val releaseName: String,
-                    val changelog: String,
-                    val isPrerelease: Boolean,
-                    val apkUrl: String?,
-                    val apkSize: Long,
-                )
-
-                val candidates = mutableListOf<ReleaseInfo>()
+                // them sorted by created_at desc; we re-sort via UpdateVersionLogic.
+                val candidates = mutableListOf<UpdateVersionLogic.ReleaseCandidate>()
                 for (i in 0 until arr.length()) {
                     val r = arr.optJSONObject(i) ?: continue
                     if (r.optBoolean("draft", false)) continue
                     val tag = r.optString("tag_name")
                     if (tag.isEmpty()) continue
-                    val (apkUrl, apkSize) = findApkAsset(r.optJSONArray("assets"))
-                    candidates += ReleaseInfo(
+                    val body = r.optString("body", "")
+                    val (apkUrl, apkSize, apkUpdatedAtMs) = findApkAsset(r.optJSONArray("assets"))
+                    candidates += UpdateVersionLogic.ReleaseCandidate(
                         tagName = tag,
-                        versionName = normalizeTag(tag),
+                        versionName = UpdateVersionLogic.normalizeTag(tag),
                         releaseName = r.optString("name").ifEmpty { tag },
-                        changelog = r.optString("body", ""),
-                        isPrerelease = r.optBoolean("prerelease", false),
+                        changelog = body,
                         apkUrl = apkUrl,
                         apkSize = apkSize,
+                        apkUpdatedAtMs = apkUpdatedAtMs,
+                        bodyVersionCode = UpdateVersionLogic.parseVersionCodeFromBody(body),
+                        bodyVersionName = UpdateVersionLogic.parseVersionNameFromBody(body),
                     )
                 }
                 AppLogger.info(
@@ -178,34 +170,39 @@ object UpdateChecker {
                 // user is told they're up to date when they're actually on the
                 // matching version (and a real newer "0.12-preview" → "0.12"
                 // still compares greater, so updates still surface).
-                val localVer = normalizeTag(BuildConfig.VERSION_NAME)
-                // Highest version we've seen at all (used for the "release
-                // exists but is older or equal" → UpToDate decision and for
-                // logging).
-                val highest = candidates.maxWithOrNull(
-                    compareBy { compareVersions(it.versionName, "0") },
-                ) ?: candidates.first()
+                val localVer = UpdateVersionLogic.normalizeTag(BuildConfig.VERSION_NAME)
+                val localCode = BuildConfig.VERSION_CODE
+                val localLastUpdateMs = try {
+                    context?.packageManager
+                        ?.getPackageInfo(context.packageName, 0)
+                        ?.lastUpdateTime
+                        ?: 0L
+                } catch (_: Exception) {
+                    0L
+                }
+                val highest = UpdateVersionLogic.highestPublished(candidates)
+                    ?: candidates.first()
                 AppLogger.info(
                     TAG,
-                    "highest-published tag=${highest.tagName} parsed=${highest.versionName} prerelease=${highest.isPrerelease} apk=${highest.apkUrl != null}",
+                    "highest-published tag=${highest.tagName} parsed=${highest.versionName} apk=${highest.apkUrl != null}",
                 )
 
-                // First APK-bearing release with version > local. We pick the
-                // highest such release so a stale older APK never shadows a
-                // newer non-APK preview.
-                val upgradeCandidate = candidates
-                    .filter { it.apkUrl != null }
-                    .filter { compareVersions(it.versionName, localVer) > 0 }
-                    .maxWithOrNull(compareBy { compareVersions(it.versionName, "0") })
+                val upgradeCandidate = UpdateVersionLogic.pickUpgrade(
+                    candidates,
+                    localVer,
+                    localCode,
+                    localLastUpdateMs,
+                )
 
                 if (upgradeCandidate != null) {
+                    val shown = UpdateVersionLogic.displayVersion(upgradeCandidate)
                     AppLogger.info(
                         TAG,
-                        "Update available: $localVer → ${upgradeCandidate.versionName} (${upgradeCandidate.tagName})",
+                        "Update available: $localVer → $shown (${upgradeCandidate.tagName})",
                     )
                     return@withContext CheckResult.UpdateAvailable(
                         tagName = upgradeCandidate.tagName,
-                        versionName = upgradeCandidate.versionName,
+                        versionName = shown,
                         releaseName = upgradeCandidate.releaseName,
                         changelog = upgradeCandidate.changelog,
                         apkUrl = upgradeCandidate.apkUrl!!,
@@ -213,15 +210,10 @@ object UpdateChecker {
                     )
                 }
 
-                // No newer-with-APK candidate exists. Decide between three
-                // remaining states:
-                //   1. Highest release ≤ local version → UpToDate.
-                //   2. Highest release > local but no APK in the listing →
-                //      NoApkAsset (mention the tag so the user can grab the
-                //      release manually if they really want).
-                //   3. Otherwise (all releases ≤ local) → UpToDate as well.
-                val highestVsLocal = compareVersions(highest.versionName, localVer)
-                if (highestVsLocal > 0 && highest.apkUrl == null) {
+                val highestVsLocal = UpdateVersionLogic.compareVersions(highest.versionName, localVer)
+                if (highestVsLocal > 0 && highest.apkUrl == null &&
+                    !UpdateVersionLogic.isRollingTag(highest.tagName)
+                ) {
                     AppLogger.info(
                         TAG,
                         "Release ${highest.tagName} > local but no APK asset",
@@ -256,32 +248,21 @@ object UpdateChecker {
     /** Public so UI can deep-link users to manual download when GitHub is blocked. */
     const val RELEASES_URL: String = ProjectRepo.RELEASES_URL
 
-    /** Returns (downloadUrl, sizeBytes) for the first .apk asset, or (null, 0). */
-    private fun findApkAsset(assets: JSONArray?): Pair<String?, Long> {
-        if (assets == null) return null to 0L
+    /** Returns (downloadUrl, sizeBytes, updatedAtMs) for the first .apk asset. */
+    private fun findApkAsset(assets: JSONArray?): Triple<String?, Long, Long> {
+        if (assets == null) return Triple(null, 0L, 0L)
         for (i in 0 until assets.length()) {
             val a = assets.optJSONObject(i) ?: continue
             val name = a.optString("name").lowercase()
             if (name.endsWith(".apk")) {
                 val u = a.optString("browser_download_url").ifEmpty { null }
-                if (u != null) return u to a.optLong("size", 0)
+                if (u != null) {
+                    val updated = UpdateVersionLogic.parseGithubTime(a.optString("updated_at", ""))
+                    return Triple(u, a.optLong("size", 0), updated)
+                }
             }
         }
-        return null to 0L
-    }
-
-    /**
-     * Strip the leading `v` and any `-preview` / `-rc1` / etc. trailing
-     * label so the numeric comparator keeps `0.1` and `0.1-preview`
-     * treated as equivalent. Without this, "0.1 (local) vs 0.1-preview
-     * (remote)" reported the remote as newer because the trailing token
-     * fell into string comparison.
-     */
-    private fun normalizeTag(tag: String): String {
-        val trimmed = tag.trim().removePrefix("v").removePrefix("V")
-        // "0.1-preview" → "0.1"; "0.1.0" → "0.1.0"; "1.2.3-rc1" → "1.2.3"
-        val dashIdx = trimmed.indexOf('-')
-        return if (dashIdx > 0) trimmed.substring(0, dashIdx) else trimmed
+        return Triple(null, 0L, 0L)
     }
 
     /**
@@ -420,7 +401,11 @@ object UpdateChecker {
         // [T-android-updatechecker-localver-normalize] targetVersionName is a
         // normalized version (set from upgradeCandidate.versionName), so the
         // local side must be normalized too — same asymmetry fix as check().
-        if (compareVersions(pending.targetVersionName, normalizeTag(BuildConfig.VERSION_NAME)) <= 0) {
+        if (UpdateVersionLogic.compareVersions(
+                pending.targetVersionName,
+                UpdateVersionLogic.normalizeTag(BuildConfig.VERSION_NAME),
+            ) <= 0
+        ) {
             AppLogger.info(TAG, "pending target ${pending.targetVersionName} <= local; clearing")
             PendingUpdateStore.clearPending(context)
             return null
@@ -457,23 +442,4 @@ object UpdateChecker {
         }
     }
 
-    /**
-     * Numeric-aware version comparator. `1.0.10` beats `1.0.9`. Non-numeric
-     * components fall back to lexicographic compare so a `1.0.0-rc1` build is
-     * treated as "newer than 1.0.0" — acceptable noise for our use case.
-     */
-    private fun compareVersions(a: String, b: String): Int {
-        val ap = a.split('.', '-')
-        val bp = b.split('.', '-')
-        val n = maxOf(ap.size, bp.size)
-        for (i in 0 until n) {
-            val x = ap.getOrNull(i) ?: ""
-            val y = bp.getOrNull(i) ?: ""
-            val xi = x.toIntOrNull()
-            val yi = y.toIntOrNull()
-            val c = if (xi != null && yi != null) xi.compareTo(yi) else x.compareTo(y)
-            if (c != 0) return c
-        }
-        return 0
-    }
 }

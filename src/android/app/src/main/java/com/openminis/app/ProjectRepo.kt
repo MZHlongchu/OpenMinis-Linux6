@@ -6,7 +6,7 @@ package com.openminis.app
  * OpenMinis/OpenMinis iOS+Android monorepo.
  */
 object ProjectRepo {
-    const val OWNER = "OpenMinis"
+    const val OWNER = "tall-1997"
     const val REPO = "OpenMinis-Linux"
     const val URL = "https://github.com/$OWNER/$REPO"
     const val ISSUES_URL = "$URL/issues"

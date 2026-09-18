@@ -54,6 +54,7 @@ import com.openminis.app.sandbox.offload.OpenOffloadHandler
 import com.openminis.app.sandbox.offload.PhotosOffloadHandler
 import com.openminis.app.sandbox.offload.PlayerOffloadHandler
 import com.openminis.app.sandbox.offload.SpeakOffloadHandler
+import com.openminis.app.sandbox.offload.ToastOffloadHandler
 import com.openminis.app.sandbox.offload.SpeechOffloadHandler
 import com.openminis.app.sandbox.offload.WeatherOffloadHandler
 import com.openminis.app.service.SessionActivityTracker
@@ -546,7 +547,10 @@ class MinisApp : Application(), ImageLoaderFactory {
         // reachable even before any shell session is launched.
         NativeOffloadServer.register("android-alarm", AlarmOffloadHandler(this))
         NativeOffloadServer.register("android-calendar", CalendarOffloadHandler(this))
-        NativeOffloadServer.register("android-clipboard", ClipboardOffloadHandler(this))
+        val clipboardOffload = ClipboardOffloadHandler(this)
+        NativeOffloadServer.register("android-clipboard", clipboardOffload)
+        NativeOffloadServer.register("minis-clipboard", clipboardOffload)
+        NativeOffloadServer.register("minis-toast", ToastOffloadHandler(this))
         NativeOffloadServer.register("android-contacts", ContactsOffloadHandler(this))
         NativeOffloadServer.register("android-device", DeviceOffloadHandler(this))
         NativeOffloadServer.register("android-location", LocationOffloadHandler(this))

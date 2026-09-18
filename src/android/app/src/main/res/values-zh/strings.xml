@@ -1180,6 +1180,9 @@
     <string name="notif_config_confirm_body_single">有一项变更需要你确认 —— 打开 Minis 批准或拒绝。</string>
     <string name="notif_config_confirm_body_multi">有 %d 项变更需要你确认 —— 打开 Minis 批准或拒绝。</string>
     <string name="notif_task_failed_body">任务执行失败。点击打开聊天。</string>
+    <string name="notif_task_action_retry">重试</string>
+    <string name="notif_task_action_backup">备份</string>
+    <string name="notif_task_action_cleanup">清理</string>
     <string name="selection_add_to_chat_input">添加到输入框</string>
     <string name="selection_read_aloud">朗读选中内容</string>
     <string name="selection_read_from_start">从头朗读</string>

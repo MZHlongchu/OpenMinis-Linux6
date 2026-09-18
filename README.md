@@ -1,11 +1,17 @@
-# OpenMinis
+# Minis Ultra（OpenMinis-Linux）
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Platforms](https://img.shields.io/badge/Platforms-iOS%20%7C%20Android-lightgrey.svg)](#beta-programme)
+[![Platforms](https://img.shields.io/badge/Platforms-Android%20arm64-lightgrey.svg)](#下载)
+[![Release](https://img.shields.io/github/v/release/tall-1997/OpenMinis-Linux?include_prereleases)](https://github.com/tall-1997/OpenMinis-Linux/releases)
 
-**你的私人、端侧 AI Agent。**
+**你的私人、端侧 AI Agent（本仓库是 OpenMinis 的 Linux 沙箱 Android 分支）。**
 
-> **本仓库是 OpenMinis-Linux 分支** — Android 应用 **Minis Ultra**（`applicationId` 为 `com.openminis.linux`，当前 **1.16-linux** / versionCode 28），可与官方 OpenMinis 并排安装。滚动 APK：Releases `android-latest` → `minis-ultra-com.openminis.linux.apk`。主机 `su`、工具链（`minis-dev-setup`）、POSIX `/sdcard` 挂载、Ubuntu 24.04 PRoot 客户机见 [LINUX.md](LINUX.md)。多智能体调度见设置 → 多智能体（`minis://settings/multi-agent`）。中国大陆编译 Android SDK / 切勿覆盖 aarch64 aapt2 见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。中文发行说明见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
+> **Minis Ultra** — `applicationId` `com.openminis.linux`，当前 **1.17-linux** / versionCode 29，可与官方 OpenMinis 并排安装。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。主机 `su`、工具链（`minis-dev-setup`）、POSIX `/sdcard` 挂载、Ubuntu 24.04 PRoot 客户机见 [LINUX.md](LINUX.md)。多智能体调度见设置 → 多智能体（`minis://settings/multi-agent`）。中国大陆编译 Android SDK / 切勿覆盖 aarch64 aapt2 见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。中文发行说明见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
+
+## 下载
+
+- **本版发行包**：[Releases `1.17-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.17-linux) → `minis-ultra-com.openminis.linux.apk`
+- **滚动构建**：[Releases `android-latest`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest)（main 每次成功构建都会覆盖）
 
 OpenMinis brings leading models — Claude, GPT, Gemini and more — into a native
 mobile experience, and gives them a real computer to work with: a full Linux

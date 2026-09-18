@@ -3,6 +3,7 @@ package com.openminis.app.sandbox
 import android.content.Context
 import android.util.Log
 import com.openminis.app.data.repository.EnvVarRepository
+import com.openminis.app.notification.SandboxNotifyActions
 import com.openminis.app.sandbox.SandboxResourceGate
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -95,6 +96,7 @@ object ExecutionCoordinator {
 
             // Get or create shell — protected by globalLock to avoid duplicate creation
             val shell = getOrCreateShell(sessionId)
+            recordLastCommand(command)
 
             // Inject user-defined environment variables as a *full snapshot*
             // (T124a). Pass the previously-injected key set so applyEnvironment
@@ -124,6 +126,19 @@ object ExecutionCoordinator {
 
             CommandResult(output = output, exitCode = exitCode, durationMs = durationMs)
         }
+        }
+    }
+
+
+    private fun recordLastCommand(command: String) {
+        if (!SandboxNotifyActions.shouldRecordLastCommand(command)) return
+        val host = PRootKernel.resolveHostPath(SandboxNotifyActions.LAST_CMD_GUEST_PATH) ?: return
+        try {
+            host.parentFile?.mkdirs()
+            host.writeText("#!/bin/sh\n# recorded by ExecutionCoordinator\n$command\n")
+            host.setExecutable(true, false)
+        } catch (t: Throwable) {
+            Log.w(TAG, "recordLastCommand failed: ${t.message}")
         }
     }
 

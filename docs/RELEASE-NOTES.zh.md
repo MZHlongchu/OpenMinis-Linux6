@@ -1,31 +1,32 @@
-# OpenMinis-Linux 1.16-linux
+# OpenMinis-Linux 1.17-linux
 
-- versionCode **28**
+- versionCode **29**
 - applicationId `com.openminis.linux`
 - 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a，debug-signed）
 
-## 本版修复
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。
 
-1. **子 Agent 实时步骤**  
-   `run_subagent` 运行中点开工具详情不再只有 “Running...”。父工具块会流式写入 turn / 工具名 / 参数摘要 / 结果片段；顶栏胶囊同步显示当前步骤。
+## 本版
 
-2. **计划讨论可见且会落地**  
-   开启后聊天页出现横幅。讨论过程把状态、任务和共享白板写入助手消息（不再只在结束时替换一行字）。讨论结束后**同一轮**按合成方案开始执行。关闭菜单中的「计划讨论」即可跳过开会。
+1. **关于页 / 检查更新指向本 fork**  
+   `ProjectRepo` 改为 `tall-1997/OpenMinis-Linux`。滚动标签 `android-latest` 不再按字符串和 `1.16` 比大小；用 release body 的 `versionName` / `versionCode`，以及 APK 资源 `updated_at` 对比本机 `lastUpdateTime`。
 
-3. **存储页不再卡在扫描**  
-   进入存储会立刻列出会话和数据库大小；Shell 容器用缓存值 + 后台 `du`（跳过 proc/sys/dev 等），不再在首屏阻塞走完整 `ubuntu-rootfs`。
+2. **模型组能力路由**  
+   当前绑定的是模型组、本轮带了图片、而选中的成员没有视觉时，自动改用组内有 `image` / `image_input` 的成员。组里没人能看图则保持原选择，Vision Group 的 `read_image` 路径不变。
 
-## 1.15 已有能力（仍在）
+3. **任务完成通知：重试 / 备份 / 清理**  
+   后台任务完成通知带三个按钮，点击后由 `ExecutionCoordinator` 在对应会话沙箱执行预设命令（重试上次 shell、打包 workspace、清 `/tmp`）。Intent 只带 action key，不带自由命令。
 
-- 子 Agent 实时状态条、可配置网络搜索、对话卡片模板、浮窗迷你对话、技能订阅源、无障碍场景录制、工具 spill 一键打开
+4. **沙箱控制手机（第一档）**  
+   - `minis-toast <text>`：弹出 Android Toast  
+   - `minis-clipboard`：等同 `android-clipboard`  
+   - `minis-open --system <url>`，以及无 TTY（cron）时的 http(s)：走 `android-open`
 
-## 明确不做
+5. **沙箱状态文件**  
+   客户机 `/run/minis-host-status.json` 约 30 秒刷新：电池温度、剩余空间、应用前台/后台、wakelock、已注册 offload 名。只用 StatFs，不递归扫描 `ubuntu-rootfs`。
 
-- 不移植 Operit（LGPL）/ Operit2（AGPL）源码
-- 不引入 LSPosed / 不捆绑 Shizuku APK / 不内置本地 LLM 权重
-- 不预置抢红包等恶意无障碍脚本
-- 正式签名密钥仍待配置（CI 仍为 debug-signed release）
+## 1.16 已有能力（仍在）
 
-## 许可
-
-本 fork 保持 OpenMinis 原许可证。不要把 Operit / Operit2 源码拷进本仓库。
+- 子 Agent 工具详情流式步骤；计划讨论横幅 + 同一轮执行；存储页不阻塞扫描完整 rootfs。

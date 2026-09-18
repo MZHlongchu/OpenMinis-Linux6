@@ -37,6 +37,8 @@ import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ModelGroup
 import com.openminis.app.data.model.RoutingStrategy
 import com.openminis.app.data.model.hasImageInput
+import com.openminis.app.data.CapabilityRouter
+import com.openminis.app.data.ModelCapability
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.R
 import com.openminis.app.data.repository.ChatRepository
@@ -4779,7 +4781,12 @@ class ChatViewModel(
         }
     }
 
-    private fun resolveProviderFromGroup(groupId: String, preferredEntryId: String? = null): Boolean {
+    private fun resolveProviderFromGroup(
+        groupId: String,
+        preferredEntryId: String? = null,
+        needed: Set<ModelCapability> = emptySet(),
+        pinActiveEntry: Boolean = true,
+    ): Boolean {
         val group = providerRepository.group(groupId) ?: return false
         // [T-android-group-resolve-skip-uncredentialed] FILTER FIRST, THEN
         // PICK — mirroring iOS `ModelGroupRouter.resolve`.
@@ -4802,7 +4809,10 @@ class ChatViewModel(
         // enabledMemberEntries (still used by the settings UI) deliberately
         // does not — "switched on" is the right question there, "usable right
         // now" is the right question here.
-        val available = providerRepository.availableMemberEntries(group)
+        val available = CapabilityRouter.pickMembers(
+            providerRepository.availableMemberEntries(group),
+            needed,
+        )
         if (available.isEmpty()) return false
 
         // preferredEntryId comes from a prior session binding ("user picked
@@ -4837,7 +4847,9 @@ class ChatViewModel(
         _modelName.value = targetEntry.model.displayName
         _providerName.value = instance.label.ifEmpty { targetEntry.model.provider }
         _selectedGroupName.value = group.name
-        _activeEntryId.value = targetEntry.id
+        if (pinActiveEntry) {
+            _activeEntryId.value = targetEntry.id
+        }
         currentProvider = ProviderFactory.create(instance, apiKey, targetEntry.model, context)
         return true
     }
@@ -6494,6 +6506,17 @@ class ChatViewModel(
         _error.value = null
 
         val currentAttachments = _attachments.value
+        val groupIdForCaps = _selectedGroupId.value
+        if (!groupIdForCaps.isNullOrBlank()) {
+            val neededCaps = CapabilityRouter.neededForImages(currentAttachments.any { it.isImage })
+            resolveProviderFromGroup(
+                groupIdForCaps,
+                _activeEntryId.value,
+                neededCaps,
+                pinActiveEntry = neededCaps.isEmpty(),
+            )
+            currentProvider?.let { provider = it }
+        }
         clearAttachments()
 
         // T145: claim _isStreaming synchronously so a rapid second tap can't

@@ -188,6 +188,8 @@ object PRootKernel {
         // were known at app launch.
         applyMountedFoldersSnapshot(context)
 
+        HostStatusPublisher.start(context, rootfsManager.rootfsDir)
+
         isBooted = true
         Log.i(TAG, "PRoot kernel booted " +
             "rootfs=${rootfsManager.rootfsDir.absolutePath} " +

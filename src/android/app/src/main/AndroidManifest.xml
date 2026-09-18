@@ -475,6 +475,14 @@
             android:name=".offload.ScheduledNotificationReceiver"
             android:exported="false" />
 
+        <receiver
+            android:name=".notification.SandboxNotifyActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.openminis.linux.action.SANDBOX_NOTIFY" />
+            </intent-filter>
+        </receiver>
+
         <!-- [T-android-scheduled-tasks-design] AlarmManager target for
              user-defined scheduled tasks (Settings → home top-right
              schedule icon). The receiver dispatches to ScheduledAgentRunner

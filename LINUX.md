@@ -2,11 +2,25 @@
 
 本分支保留 OpenMinis 的 Agent + PRoot 沙箱，并加上偏 Linux 的工具链、主机 `su` 直通、POSIX 共享存储挂载，以及独立的 Android 包名，因此可以和官方 OpenMinis **并排安装**。
 
-启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。当前版本 **1.16-linux**（versionCode 28）。
+启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。当前版本 **1.17-linux**（versionCode 29）。
 
-滚动 APK：GitHub Releases 标签 `android-latest`，文件名 `minis-ultra-com.openminis.linux.apk`。
+滚动 APK：GitHub Releases 标签 `android-latest`，文件名 `minis-ultra-com.openminis.linux.apk`。关于页 / 检查更新走 fork `tall-1997/OpenMinis-Linux`；滚动包用 release body 里的 `versionCode` / `versionName`（以及 APK `updated_at`）判断是否比本机新。
 
-1.16 修复：子 Agent 工具详情会流式显示步骤；计划讨论开启时聊天页有横幅、讨论过程写入消息，结束后同一轮按方案执行；存储页不再因走完整 `ubuntu-rootfs` 卡在扫描。详见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
+1.17：模型组在本轮需要识图时自动改用组内有视觉的成员；任务完成通知带「重试 / 备份 / 清理」沙箱按钮；`minis-toast`、`minis-clipboard`、无 TTY 时 `minis-open` 走 NativeOffload；沙箱可 `cat /run/minis-host-status.json`。详见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
+
+## 沙箱当服务器（第一档）
+
+客户机里可以直接驱动主机：
+
+```
+minis-toast 备份完成
+minis-clipboard get
+minis-clipboard set --text 'hello'
+minis-open --system https://example.com   # 无 TTY 时 http(s) 也会走 android-open
+cat /run/minis-host-status.json           # 温度、剩余空间、前台/后台、wakelock
+```
+
+任务完成通知上的「重试 / 备份 / 清理」会在对应会话沙箱执行预设命令（上次 shell、打包 workspace、清 `/tmp`）。
 
 ## 客户机系统
 

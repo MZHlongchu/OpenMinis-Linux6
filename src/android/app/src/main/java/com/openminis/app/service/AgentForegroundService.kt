@@ -50,6 +50,10 @@ class AgentForegroundService : Service() {
          */
         private val processStartElapsedMs = android.os.SystemClock.elapsedRealtime()
 
+        @Volatile
+        var wakeLockHeld: Boolean = false
+            internal set
+
         private const val TAG = "AgentForegroundService"
         private const val CHANNEL_ID = "agent_status"
         private const val CHANNEL_NAME = "Agent Status"
@@ -611,6 +615,7 @@ class AgentForegroundService : Service() {
                 // when SessionActivityTracker reports zero active sessions.
                 acquire()
             }
+            wakeLockHeld = true
             Log.d(TAG, "WakeLock acquired (PARTIAL_WAKE_LOCK)")
         } catch (e: Exception) {
             Log.w(TAG, "WakeLock acquire failed: ${e.message}")
@@ -629,6 +634,7 @@ class AgentForegroundService : Service() {
             Log.w(TAG, "WakeLock release failed: ${e.message}")
         } finally {
             wakeLock = null
+            wakeLockHeld = false
         }
     }
 
