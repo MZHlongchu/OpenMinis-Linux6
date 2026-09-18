@@ -65,6 +65,39 @@ class BoundedTextTest {
     }
 
     @Test
+    fun `priority logs still fit in the overflow window`() {
+        assertTrue(
+            BoundedText.canAppendPriorityLog(BoundedText.MAX_LOG_FILE_BYTES, 10),
+        )
+        assertFalse(
+            BoundedText.canAppendPriorityLog(
+                BoundedText.MAX_LOG_FILE_BYTES + BoundedText.MAX_LOG_OVERFLOW_BYTES,
+                10,
+            ),
+        )
+        assertTrue(BoundedText.isPriorityLogLine("[12:00:00] [ERROR] [X] boom"))
+        assertTrue(BoundedText.isPriorityLogLine("[12:00:00] [WARN] [X] slow"))
+        assertFalse(BoundedText.isPriorityLogLine("[12:00:00] [INFO] [X] ok"))
+    }
+
+    @Test
+    fun `sse payload is truncated`() {
+        val huge = "S".repeat(2_000)
+        val clipped = BoundedText.clampSsePayload(huge)
+        assertEquals(BoundedText.MAX_SSE_LOG_CHARS + 1, clipped.length)
+        assertTrue(clipped.endsWith("…"))
+    }
+
+    @Test
+    fun `tool input delta logs on a stride not every token`() {
+        assertTrue(BoundedText.shouldLogLengthStride(10))
+        assertTrue(BoundedText.shouldLogLengthStride(64))
+        assertFalse(BoundedText.shouldLogLengthStride(100))
+        assertTrue(BoundedText.shouldLogLengthStride(2_048))
+        assertFalse(BoundedText.shouldLogLengthStride(2_100))
+    }
+
+    @Test
     fun `selectPrewarmFragments never adds a giant fragment`() {
         val giant = "G".repeat(BoundedText.MAX_PREWARM_FRAGMENT_CHARS + 1)
         val small = "ok"

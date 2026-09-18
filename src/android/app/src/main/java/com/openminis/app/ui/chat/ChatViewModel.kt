@@ -8245,7 +8245,10 @@ class ChatViewModel(
                         // renamed id so the per-tool ring + block lookup match
                         // the block that ToolUseStart created.
                         val toolInputId = dedupeToolInputId(chunk.id)
-                        android.util.Log.d("ToolChain[VM]", "[turn=$turn] ToolInputDelta id=$toolInputId len=${chunk.accumulated.length}")
+                        val deltaLen = chunk.accumulated.length
+                        if (com.openminis.app.text.BoundedText.shouldLogLengthStride(deltaLen)) {
+                            android.util.Log.d("ToolChain[VM]", "[turn=$turn] ToolInputDelta id=$toolInputId len=$deltaLen")
+                        }
                         // Maintain a per-tool ring of the most recent `accumulated`
                         // snapshots so the preflight validator below can dump them
                         // when an empty/invalid call is detected. Cheap (single

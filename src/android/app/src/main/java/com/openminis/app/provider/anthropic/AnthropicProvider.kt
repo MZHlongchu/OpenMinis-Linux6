@@ -198,7 +198,10 @@ class AnthropicProvider(
                 if (payload == "[DONE]") break
 
                 val event = try { JSONObject(payload) } catch (_: Exception) { continue }
-                android.util.Log.d("ToolChain[Provider]", "RAW SSE: $payload")
+                android.util.Log.d(
+                    "ToolChain[Provider]",
+                    "RAW SSE: ${com.openminis.app.text.BoundedText.clampSsePayload(payload)}",
+                )
                 val eventType = event.safeOptString("type", "")
 
                 when (eventType) {
@@ -233,7 +236,10 @@ class AnthropicProvider(
                                 val partial = delta.safeOptString("partial_json", "")
                                 if (partial.isNotEmpty() && currentToolId != null) {
                                     toolInputBuffer.append(partial)
-                                    android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=$currentToolId accumulated=${toolInputBuffer.length}chars")
+                                    val n = toolInputBuffer.length
+                                    if (com.openminis.app.text.BoundedText.shouldLogLengthStride(n)) {
+                                        android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=$currentToolId accumulated=${n}chars")
+                                    }
                                     send(LLMStreamChunk.ToolInputDelta(currentToolId!!, toolInputBuffer.toString()))
                                 }
                             }

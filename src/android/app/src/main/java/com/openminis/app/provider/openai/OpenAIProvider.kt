@@ -990,7 +990,10 @@ class OpenAIProvider private constructor(
                     )
                     continue
                 }
-                android.util.Log.d("ToolChain[Provider]", "RAW SSE: $payload")
+                android.util.Log.d(
+                    "ToolChain[Provider]",
+                    "RAW SSE: ${com.openminis.app.text.BoundedText.clampSsePayload(payload)}",
+                )
                 sseEventCount++
 
                 // T321: per-event delta-field summary. Only counts/lengths,
@@ -1351,7 +1354,10 @@ class OpenAIProvider private constructor(
                                 }
                                 // Emit input delta
                                 if (acc.id.isNotEmpty() && acc.args.isNotEmpty()) {
-                                    android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=${acc.id} accumulated=${acc.args.length}chars")
+                                    val n = acc.args.length
+                                    if (com.openminis.app.text.BoundedText.shouldLogLengthStride(n)) {
+                                        android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=${acc.id} accumulated=${n}chars")
+                                    }
                                     send(LLMStreamChunk.ToolInputDelta(acc.id, acc.args.toString()))
                                 }
                             }

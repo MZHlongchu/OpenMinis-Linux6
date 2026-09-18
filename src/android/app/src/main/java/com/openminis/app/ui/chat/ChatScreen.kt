@@ -3782,6 +3782,8 @@ fun ChatScreen(
                 // tells us whether the bottleneck is row-list build,
                 // initial list measure, or per-row composition.
                 val perfFirstLayoutFired = remember(sessionId) { java.util.concurrent.atomic.AtomicBoolean(false) }
+                val perfFirstItemComposeFired = remember(sessionId) { java.util.concurrent.atomic.AtomicBoolean(false) }
+                val perfFirstItemPlacedFired = remember(sessionId) { java.util.concurrent.atomic.AtomicBoolean(false) }
                 Box {
                 AlwaysStretchOverscrollBox { sharedEffect ->
                 LazyColumn(
@@ -3940,10 +3942,12 @@ fun ChatScreen(
                         // (before measure); onPlaced fires after layout.
                         if (item == flatItems.lastOrNull()) {
                             androidx.compose.runtime.SideEffect {
-                                com.openminis.app.diagnostics.PerfLongCtx.step(
-                                    sessionId,
-                                    "lazyColumn.firstItem.compose",
-                                )
+                                if (perfFirstItemComposeFired.compareAndSet(false, true)) {
+                                    com.openminis.app.diagnostics.PerfLongCtx.step(
+                                        sessionId,
+                                        "lazyColumn.firstItem.compose",
+                                    )
+                                }
                             }
                         }
                         // [Perf][LongCtx] aggregate compose-count tracker.
@@ -3997,11 +4001,13 @@ fun ChatScreen(
                                 .then(
                                     if (isNewestItem) {
                                         Modifier.onPlaced {
-                                            com.openminis.app.diagnostics.PerfLongCtx.step(
-                                                sessionId,
-                                                "lazyColumn.firstItem.placed",
-                                                "size=${it.size.width}x${it.size.height}",
-                                            )
+                                            if (perfFirstItemPlacedFired.compareAndSet(false, true)) {
+                                                com.openminis.app.diagnostics.PerfLongCtx.step(
+                                                    sessionId,
+                                                    "lazyColumn.firstItem.placed",
+                                                    "size=${it.size.width}x${it.size.height}",
+                                                )
+                                            }
                                             // [T-android-jank-diag-logging]
                                             // One quotable line per session
                                             // open, after the first frame's

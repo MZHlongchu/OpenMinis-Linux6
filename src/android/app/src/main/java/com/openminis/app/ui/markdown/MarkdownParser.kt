@@ -90,17 +90,15 @@ object MarkdownParser {
      * KaTeX. Mirrors iOS MarkdownMathExtractor.extract → cmark → restore.
      */
     fun parseWithMath(markdown: String): ParseResult {
-        val src = BoundedText.markdownParseInput(markdown)
-        val (cleaned, spans) = extractMath(src)
+        val (cleaned, spans) = extractMath(markdown)
         val rawBlocks = parse(cleaned)
         val restored = restoreMath(rawBlocks, spans)
         return ParseResult(restored, spans)
     }
 
     fun parse(markdown: String): List<Block> {
-        val src = BoundedText.markdownParseInput(markdown)
-        android.util.Log.d("MdParser", "parse() len=${src.length} preview=${src.take(160).replace("\n","\\n")}")
-        val lines = src.lines()
+        android.util.Log.d("MdParser", "parse() len=${markdown.length} preview=${markdown.take(160).replace("\n","\\n")}")
+        val lines = markdown.lines()
         val blocks = mutableListOf<Block>()
         var i = 0
 

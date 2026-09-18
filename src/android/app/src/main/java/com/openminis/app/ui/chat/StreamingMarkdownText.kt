@@ -1354,7 +1354,10 @@ private fun findDisplayMathClose(lines: List<String>, from: Int): Int? {
 }
 
 private suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
-    val src = BoundedText.markdownParseInput(content)
+    // Do not substring the whole document: LargeContentGuard expand and
+    // file preview (up to 512 KB) must keep block structure. ICU stays
+    // bounded by the per-line [BoundedText.MAX_ICU_INPUT_CHARS] skip below.
+    val src = content
     val blocks = mutableListOf<MdBlock>()
     val lines = src.lines()
     var i = 0

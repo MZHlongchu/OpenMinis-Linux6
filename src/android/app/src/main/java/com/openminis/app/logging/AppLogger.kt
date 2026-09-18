@@ -319,10 +319,12 @@ object AppLogger {
             if (!BoundedText.canAppendLog(size, lineBytes)) {
                 if (!logFileCapped) {
                     logFileCapped = true
-                    w.println("[AppLogger] daily log reached ${BoundedText.MAX_LOG_FILE_BYTES} bytes; further writes dropped")
+                    w.println("[AppLogger] daily log reached ${BoundedText.MAX_LOG_FILE_BYTES} bytes; info/debug dropped, ERROR/WARN kept")
                     w.flush()
                 }
-                return
+                val keepPriority = !quiet && BoundedText.isPriorityLogLine(clipped) &&
+                    BoundedText.canAppendPriorityLog(size, lineBytes)
+                if (!keepPriority) return
             }
             w.println(clipped)
             w.flush()

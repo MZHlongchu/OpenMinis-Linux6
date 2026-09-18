@@ -29,7 +29,7 @@ class ContentDiagTest {
             | --- | --- |
             | 1 | 2 |
 
-            $$E=mc^2$$
+            ${'$'}${'$'}E=mc^2${'$'}${'$'}
         """.trimIndent()
         val s = ContentDiag.summarize(text)
         assertEquals(text.length, s.chars)

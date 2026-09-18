@@ -21,10 +21,21 @@ object BoundedText {
     const val MAX_ICU_INPUT_CHARS = 16_384
 
     /**
-     * Never markdown-parse more than this, even after LargeContentGuard expand.
-     * Matches [com.openminis.app.ui.chat.LARGE_MESSAGE_THRESHOLD_CHARS].
+     * Cache / cold-prewarm ceiling, aligned with LargeContentGuard collapse.
+     * Expanded frozen messages and file preview must still parse the full
+     * body; ICU is bounded per-line via [MAX_ICU_INPUT_CHARS], not by
+     * chopping the document here.
      */
     const val MAX_MARKDOWN_PARSE_CHARS = 32_000
+
+    /** RAW SSE / logcat payload preview. */
+    const val MAX_SSE_LOG_CHARS = 240
+
+    /** ToolInputDelta logcat stride (chars of accumulated JSON). */
+    const val TOOL_INPUT_DELTA_LOG_STRIDE = 2_048
+
+    /** Extra room for ERROR/WARN after the daily file hits [MAX_LOG_FILE_BYTES]. */
+    const val MAX_LOG_OVERFLOW_BYTES = 512L * 1024
 
     /** ContentDiag fingerprint window (head + tail). */
     const val MAX_CONTENT_DIAG_SCAN_CHARS = 8_192
@@ -75,6 +86,36 @@ object BoundedText {
     ): Boolean {
         if (currentFileBytes >= maxFileBytes) return false
         return currentFileBytes + lineBytes.toLong() <= maxFileBytes
+    }
+
+    fun isPriorityLogLine(line: String): Boolean =
+        "[ERROR]" in line || "[WARN]" in line
+
+    /**
+     * After the daily cap, ERROR/WARN may still land until
+     * [MAX_LOG_FILE_BYTES] + [MAX_LOG_OVERFLOW_BYTES].
+     */
+    fun canAppendPriorityLog(
+        currentFileBytes: Long,
+        lineBytes: Int,
+    ): Boolean {
+        val hard = MAX_LOG_FILE_BYTES + MAX_LOG_OVERFLOW_BYTES
+        if (currentFileBytes >= hard) return false
+        return currentFileBytes + lineBytes.toLong() <= hard
+    }
+
+    fun clampSsePayload(payload: String, maxChars: Int = MAX_SSE_LOG_CHARS): String {
+        if (payload.length <= maxChars) return payload
+        return payload.substring(0, maxChars) + "…"
+    }
+
+    fun shouldLogLengthStride(
+        length: Int,
+        stride: Int = TOOL_INPUT_DELTA_LOG_STRIDE,
+    ): Boolean {
+        if (length <= 64) return true
+        if (stride <= 0) return false
+        return length % stride < 32
     }
 
     /**
