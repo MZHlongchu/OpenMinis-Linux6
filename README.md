@@ -10,14 +10,14 @@
 
 ## 下载
 
-- **本版发行包（1.19-linux / versionCode 31）**：[Releases `1.19-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.19-linux) → `minis-ultra-com.openminis.linux.apk`
+- **本版发行包（1.20-linux / versionCode 32）**：[Releases `1.20-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.20-linux) → `minis-ultra-com.openminis.linux.apk`
 - **滚动构建**：[Releases `android-latest`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest)（main 每次成功构建都会覆盖）
 
 侧载前允许「安装未知应用」。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本，见 [docs/SIGNING.md](docs/SIGNING.md)。
 
 ### 1.20 要点
 
-跨会话检索（`search_sessions` / `read_session`）、子 Agent `kind=worker|explore|plan` 与 `write_paths`、系统默认助手入口、主屏新建对话小组件。完整说明：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。已发布安装包仍是 1.19-linux，1.20 尚未打 tag。
+跨会话检索（`search_sessions` / `read_session`）、子 Agent `kind=worker|explore|plan` 与 `write_paths`、系统默认助手入口、主屏新建对话小组件、browser_use 跟系统 WebView（目标 Chrome/151）、crash_handler 链接 libunwind。完整说明：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ### 1.19 要点
 
@@ -41,7 +41,7 @@ Official website: **[openminis.app](https://openminis.app)**
   <img alt="Download on the App Store" height="48" src="assets/badge-appstore.svg" />
 </a>
 &nbsp;
-<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.19-linux">
+<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.20-linux">
   <img alt="Get the APK on GitHub" height="48" src="assets/badge-android.svg" />
 </a>
 
