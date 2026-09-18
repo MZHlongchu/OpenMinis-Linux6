@@ -13,9 +13,15 @@ import com.openminis.app.tools.PlanDiscussionOrchestrator
 import com.openminis.app.tools.SubAgentLane
 import com.openminis.app.tools.SubAgentRunner
 import com.openminis.app.tools.ToolExecutionResult
+import com.openminis.app.tools.SubAgentKind
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 internal suspend fun ChatViewModel.runPlanDiscussion(provider: LLMProvider): String {
@@ -150,6 +156,10 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
         toolBlocks: MutableList<AssistantBlock>? = null,
         assistantId: String = "",
         currentText: String = "",
+        limiter: Semaphore? = null,
+        parallelWriters: Int = 1,
+        waveIndex: Int = 0,
+        waveSize: Int = 1,
     ): ToolExecutionResult {
         if (!multiAgentSettings.enabled.value) {
             return ToolExecutionResult("Multi-agent dispatch is disabled in Settings → Multi-agent.", false)
@@ -157,22 +167,98 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
         if (subAgentDepth.get() > 0) {
             return ToolExecutionResult("Error: sub-agents cannot spawn further sub-agents.", false)
         }
-        val spawn = parseSubAgentSpawn(argsJson, multiAgentSettings.subagentMaxTurns.value)
-            ?: return ToolExecutionResult(
+        val spawns = parseSubAgentBatch(argsJson, multiAgentSettings.subagentMaxTurns.value)
+        if (spawns.isEmpty()) {
+            return ToolExecutionResult(
                 if (argsJson.isBlank() || !argsJson.trim().startsWith("{"))
-                    "Error: invalid run_subagent arguments"
+                    "Error: invalid spawn_agent arguments"
                 else
-                    "Error: prompt is required for run_subagent",
+                    "Error: spawn_agent requires a non-empty tasks array or prompt",
                 false,
             )
+        }
+        val writersHere = spawns.count { SubAgentKind.canWrite(it.kind) }
+        val writerTotal = maxOf(parallelWriters, writersHere)
+        val sem = limiter ?: Semaphore(
+            MultiAgentSettings.clampConcurrent(multiAgentSettings.maxConcurrent.value),
+        )
+        if (spawns.size == 1) {
+            val total = waveSize.coerceAtLeast(1)
+            val index = if (total > 1) waveIndex + 1 else 1
+            return sem.withPermit {
+                runOneSubAgent(
+                    spawn = spawns[0],
+                    toolId = toolId,
+                    toolBlocks = toolBlocks,
+                    assistantId = assistantId,
+                    currentText = currentText,
+                    parallelWriters = writerTotal,
+                    index = index,
+                    total = total,
+                )
+            }
+        }
+        val results = supervisorScope {
+            spawns.mapIndexed { i, spawn ->
+                async {
+                    sem.withPermit {
+                        runOneSubAgent(
+                            spawn = spawn,
+                            toolId = toolId,
+                            toolBlocks = toolBlocks,
+                            assistantId = assistantId,
+                            currentText = currentText,
+                            parallelWriters = writerTotal,
+                            index = i + 1,
+                            total = spawns.size,
+                        )
+                    }
+                }
+            }.awaitAll()
+        }
+        val ok = results.count { it.success }
+        val body = buildString {
+            append("Dispatched ${results.size} sub-agents: $ok ok, ${results.size - ok} failed.\n")
+            results.forEachIndexed { i, r ->
+                append("\n## 子代理 ${i + 1}/${results.size} (${spawns[i].kind}, ")
+                append(if (r.success) "ok" else "fail")
+                append(")\n")
+                append(r.output.trim())
+                append('\n')
+            }
+        }
+        publishRunSubagentLog(toolId, assistantId, currentText, toolBlocks, body)
+        return ToolExecutionResult(
+            output = body,
+            success = results.any { it.success },
+            toolTitle = "子代理 ${spawns.size}",
+        )
+    }
+
+private suspend fun ChatViewModel.runOneSubAgent(
+        spawn: ChatSubAgentSpawn,
+        toolId: String,
+        toolBlocks: MutableList<AssistantBlock>?,
+        assistantId: String,
+        currentText: String,
+        parallelWriters: Int,
+        index: Int,
+        total: Int,
+    ): ToolExecutionResult {
         val prompt = spawn.prompt
         val role = spawn.role
         val skills = spawn.skills
         val requested = spawn.requestedModel
-        val title = spawn.title
         val kind = spawn.kind
         val writePaths = spawn.writePaths
         val maxTurns = spawn.maxTurns
+        val title = spawn.title.ifEmpty { "子代理 $index/$total" }
+        if (SubAgentKind.requiresWritePaths(kind, parallelWriters) && writePaths.isEmpty()) {
+            return ToolExecutionResult(
+                "Error: parallel workers must declare non-overlapping write_paths so file_write/file_edit stay isolated.",
+                false,
+            )
+        }
         val config = providerRepository.config.value
         val pool = MultiAgentSettings.retainLive(
             multiAgentSettings.selectedModelEntryIds.value,
@@ -199,27 +285,38 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
             ?: SubAgentLane.idFor(parentSession, System.nanoTime())
         val trackerId = com.openminis.app.service.SubAgentActivityTracker.start(
             parentSessionId = parentSession,
-            title = title.ifEmpty { "Sub-agent ($kind)" },
+            title = title,
             role = role,
             model = entry.model.displayName,
+            index = index,
+            total = total,
+            kind = kind,
+            turnCap = maxTurns,
         )
         return try {
             withContext(SubAgentLane(laneId)) {
             val liveLog = StringBuilder()
             var lastUiMs = 0L
-            suspend fun onStep(line: String) {
-                val clipped = line.trim()
-                if (clipped.isEmpty()) return
+            val publishLive = total == 1
+            suspend fun onStep(turn: Int, toolName: String) {
+                com.openminis.app.service.SubAgentActivityTracker.updateProgress(
+                    trackerId, turn, maxTurns, toolName,
+                )
+                val clipped = buildString {
+                    append("turn $turn/$maxTurns")
+                    if (toolName.isNotBlank()) append(" · $toolName")
+                }
                 liveLog.append(clipped).append('\n')
                 if (liveLog.length > 24_000) {
                     liveLog.delete(0, liveLog.length - 20_000)
                 }
-                com.openminis.app.service.SubAgentActivityTracker.updateStep(trackerId, clipped)
                 val now = System.currentTimeMillis()
-                val important = clipped.startsWith("▶") || clipped.startsWith("✓") || clipped.startsWith("✗") || clipped.startsWith("turn ")
+                val important = toolName.isNotBlank()
                 if (!important && now - lastUiMs < 250L) return
                 lastUiMs = now
-                publishRunSubagentLog(toolId, assistantId, currentText, toolBlocks, liveLog.toString())
+                if (publishLive) {
+                    publishRunSubagentLog(toolId, assistantId, currentText, toolBlocks, liveLog.toString())
+                }
             }
             val result = com.openminis.app.tools.WritePathGuard.withPaths(writePaths) {
                 SubAgentRunner.run(
@@ -228,7 +325,7 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
                     userPrompt = prompt,
                     role = role,
                     skillsHint = skills,
-                    tools = com.openminis.app.tools.SubAgentKind.filterTools(
+                    tools = SubAgentKind.filterTools(
                         kind,
                         AgentTools.makeAgentTools(
                             supportsImageInput = entry.model.hasImageInput,
@@ -241,13 +338,13 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
                     ),
                     maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 8192),
                     executeTool = { name, json ->
-                        if (com.openminis.app.tools.SubAgentKind.blocks(kind, name)) {
+                        if (SubAgentKind.blocks(kind, name)) {
                             ToolExecutionResult("Error: $kind sub-agent cannot use $name.", false)
                         } else {
                             executeTool(name, json, "", mutableListOf(), "", "")
                         }
                     },
-                    onStep = { onStep(it) },
+                    onStep = { turn, toolName -> onStep(turn, toolName) },
                     kind = kind,
                     writePaths = writePaths,
                     maxTurns = maxTurns,
@@ -258,7 +355,9 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
             } else {
                 result.output
             }
-            publishRunSubagentLog(toolId, assistantId, currentText, toolBlocks, uiLog)
+            if (publishLive) {
+                publishRunSubagentLog(toolId, assistantId, currentText, toolBlocks, uiLog)
+            }
             com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, result.success)
             result.copy(toolTitle = title.ifEmpty { "Sub-agent · ${entry.model.displayName}" })
             }

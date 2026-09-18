@@ -1,3 +1,41 @@
+# OpenMinis-Linux 1.26-linux
+
+- versionCode **38**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a；有 `MINIS_UPLOAD_*` 则用上传证书，否则仍为 debug-signed）
+- 签名说明：[docs/SIGNING.md](SIGNING.md)；一键编译：`scripts/build_apk_aarch64.sh`
+
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本。
+
+## 本版
+
+对照拾忆 `spawn_agent`，把原先偏粗的 `run_subagent` 调度收成一次调用、四种角色、执行层隔离。
+
+1. **工具改为 spawn_agent**  
+   协调者工具列表只暴露 `spawn_agent`。旧会话里的 `run_subagent` 仍可执行，子代理一律禁止再嵌套派出。
+
+2. **一次 tasks[] 并行**  
+   协调者按复杂度决定派出几个队友，放进同一个 `tasks` 数组。它们共享并发上限（1–8，默认 3），一个失败不取消兄弟任务。结果按「子代理 i/N」汇总。顶层 `prompt` 仍可作为单任务写法。
+
+3. **四种 kind**  
+   - `explore`：只读侦察（file_read / web_search / 会话检索等白名单）  
+   - `plan`：只读设计  
+   - `worker`：可写；同一波多个 worker 必须给出互不重叠的 `write_paths`  
+   - `general-purpose`：兜底，仍禁止嵌套派出  
+
+4. **动态轮次**  
+   未指定 `max_turns` 时按任务推断：简单约 10，中等 20，复杂 40–60。设置 → 多智能体的数字是硬上限（默认/最大 60）。
+
+5. **进度条**  
+   聊天顶栏芯片为「子代理 i/N · kind · run · turn x/y · 当前工具」。
+
+6. **schema**  
+   `tasks` 在 Anthropic / OpenAI / Gemini 工具定义里是 array of object，避免模型把多队友拆成多次独立调用才并行。
+
+---
+
 # OpenMinis-Linux 1.25-linux
 
 - versionCode **37**

@@ -10,12 +10,12 @@ import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 
 /**
- * Nested agent loop used by [run_subagent]. Sub-agents do not receive the
+ * Nested agent loop used by [spawn_agent]. Sub-agents do not receive the
  * parent conversation and must not spawn further sub-agents.
  */
 object SubAgentRunner {
 
-    const val MAX_TURNS = 12
+    const val MAX_TURNS = 60
     private const val MAX_REPORT_CHARS = 24_000
 
     suspend fun run(
@@ -27,7 +27,7 @@ object SubAgentRunner {
         tools: List<AgentToolDefinition>,
         maxTokens: Int,
         executeTool: suspend (name: String, argsJson: String) -> ToolExecutionResult,
-        onStep: suspend (String) -> Unit = {},
+        onStep: suspend (turn: Int, toolName: String) -> Unit = { _, _ -> },
         kind: String = SubAgentKind.WORKER,
         writePaths: List<String> = emptyList(),
         maxTurns: Int = MAX_TURNS,
@@ -45,7 +45,8 @@ object SubAgentRunner {
 
         try {
             repeat(turns) { turnIdx ->
-                runCatching { onStep("turn ${turnIdx + 1}/$turns") }
+                val turn = turnIdx + 1
+                runCatching { onStep(turn, "") }
                 val textSb = StringBuilder()
                 val toolCalls = mutableListOf<Triple<String, String, JSONObject>>()
                 provider.streamMessage(
@@ -69,12 +70,12 @@ object SubAgentRunner {
                     report.append(text)
                     val snippet = text.replace('\n', ' ').trim().take(160)
                     if (snippet.isNotEmpty()) {
-                        runCatching { onStep("· $snippet") }
+                        runCatching { onStep(turn, "") }
                     }
                 }
 
                 if (toolCalls.isEmpty()) {
-                    runCatching { onStep("done") }
+                    runCatching { onStep(turn, "done") }
                     val out = report.toString().ifBlank { text.ifBlank { "(sub-agent finished with empty output)" } }
                     return ToolExecutionResult(truncate(out), true)
                 }
@@ -94,19 +95,19 @@ object SubAgentRunner {
 
                 val resultParts = mutableListOf<AgentContentPart>()
                 for ((id, name, args) in toolCalls) {
-                    if (name == "run_subagent") {
+                    if (SubAgentKind.isSpawnTool(name) || SubAgentKind.blocks(kind, name)) {
                         resultParts.add(
                             AgentContentPart.ToolResult(
                                 id = id,
                                 name = name,
-                                content = "Error: sub-agents cannot spawn further sub-agents. Complete the assigned work yourself.",
+                                content = "Error: sub-agents cannot spawn further sub-agents or use blocked tools. Complete the assigned work yourself.",
                                 isError = true,
                             ),
                         )
                         continue
                     }
                     val argsJson = args.toString()
-                    runCatching { onStep("▶ $name ${previewToolArgs(argsJson)}") }
+                    runCatching { onStep(turn, name) }
                     val result = try {
                         executeTool(name, argsJson)
                     } catch (e: CancellationException) {
@@ -114,9 +115,7 @@ object SubAgentRunner {
                     } catch (e: Exception) {
                         ToolExecutionResult("Error: ${e.message ?: e.javaClass.simpleName}", false)
                     }
-                    val mark = if (result.success) "✓" else "✗"
-                    val preview = result.output.replace('\n', ' ').trim().take(120)
-                    runCatching { onStep("$mark $name $preview") }
+                    runCatching { onStep(turn, name) }
                     resultParts.add(
                         AgentContentPart.ToolResult(
                             id = id,
@@ -204,7 +203,7 @@ ${roleLine}${skillsLine}${kindLine}${writeLine}You cannot see the parent convers
 
 Rules:
 - Complete ONLY the assigned slice. Do not rewrite unrelated files.
-- Do not spawn further sub-agents. run_subagent is not available and will error if you try.
+- Do not spawn further sub-agents. spawn_agent / run_subagent are not available and will error if you try.
 $toolLine
 - Follow the brief's Workflow, then return a concise report: what changed, files touched, leftover risks, and whether Expected result passed.
 - If you cannot meet the acceptance criteria, say so explicitly and list what failed.

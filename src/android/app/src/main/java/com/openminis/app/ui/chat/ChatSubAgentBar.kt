@@ -44,8 +44,13 @@ fun SubAgentLiveBar(
                 SubAgentActivityTracker.Status.FAILED -> Color(0xFFFF3B30) to Color.White
             }
             val label = buildString {
-                append(m.title.take(28))
-                m.role?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
+                if (m.index > 0 && m.total > 0) {
+                    append("子代理 ${m.index}/${m.total}")
+                } else {
+                    append(m.title.take(28))
+                }
+                m.kind?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
+                    ?: m.role?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
                 append(
                     when (m.status) {
                         SubAgentActivityTracker.Status.RUNNING -> " · run"
@@ -53,9 +58,16 @@ fun SubAgentLiveBar(
                         SubAgentActivityTracker.Status.FAILED -> " · fail"
                     },
                 )
-                if (m.status == SubAgentActivityTracker.Status.RUNNING && m.lastStep.isNotBlank()) {
-                    append(" · ")
-                    append(m.lastStep.take(48))
+                if (m.status == SubAgentActivityTracker.Status.RUNNING) {
+                    val cap = m.turnCap
+                    if (cap > 0) {
+                        append(" · turn ${m.turnIndex.coerceAtLeast(1)}/$cap")
+                    }
+                    m.currentTool.takeIf { it.isNotBlank() }?.let { append(" · $it") }
+                        ?: m.lastStep.takeIf { it.isNotBlank() && cap <= 0 }?.let {
+                            append(" · ")
+                            append(it.take(48))
+                        }
                 }
             }
             Text(

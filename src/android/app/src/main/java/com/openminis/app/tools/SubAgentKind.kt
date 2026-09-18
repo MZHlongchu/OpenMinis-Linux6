@@ -1,56 +1,135 @@
 package com.openminis.app.tools
 
 import com.openminis.app.data.model.AgentToolDefinition
-import com.openminis.app.data.repository.MultiAgentSettings
 
 /**
- * 拾忆 `spawn_agent` kinds, mapped onto OpenMinis `run_subagent`.
+ * 拾忆-style `spawn_agent` kinds.
  *
- * - worker: full tools except nested sub-agents (existing behaviour)
- * - explore / plan: read-only — no file_write, file_edit, shell_execute
+ * explore / plan are read-only (tool whitelist). worker may write and must
+ * declare [write_paths] when two or more workers run in the same wave.
+ * general-purpose is the unrestricted fallback (still no nested spawn).
  */
 object SubAgentKind {
     const val WORKER = "worker"
     const val EXPLORE = "explore"
     const val PLAN = "plan"
+    const val GENERAL = "general-purpose"
 
-    private val READ_ONLY = setOf(EXPLORE, PLAN)
     const val RUN_SUBAGENT = "run_subagent"
-    val BLOCKED_WHEN_READ_ONLY = setOf(
-        FileWriteTool.NAME,
-        FileEditTool.NAME,
-        "shell_execute",
-        "memory_write",
+    const val SPAWN_AGENT = "spawn_agent"
+
+    const val SIMPLE_TURNS = 10
+    const val MEDIUM_TURNS = 20
+    const val COMPLEX_TURNS = 40
+    const val COMPLEX_MAX_TURNS = 60
+    const val MAX_TURNS = COMPLEX_MAX_TURNS
+
+    private val READ_ONLY_ALLOW = setOf(
+        "file_read",
+        "web_search",
+        "search_sessions",
+        "read_session",
+        "memory_get",
+        "read_image",
+        "browser_use",
     )
 
-    fun normalize(raw: String?): String {
-        return when (raw?.trim()?.lowercase().orEmpty()) {
-            EXPLORE, "read", "readonly", "read-only", "search" -> EXPLORE
-            PLAN, "planner" -> PLAN
-            else -> WORKER
-        }
+    private val ALWAYS_DENY = setOf(
+        RUN_SUBAGENT,
+        SPAWN_AGENT,
+        "ask_user_question",
+        "AskUserQuestion",
+    )
+
+    fun isSpawnTool(name: String): Boolean {
+        val n = name.trim()
+        return n.equals(SPAWN_AGENT, ignoreCase = true) ||
+            n.equals(RUN_SUBAGENT, ignoreCase = true)
     }
 
-    fun isReadOnly(kind: String): Boolean = kind in READ_ONLY
+    fun normalize(raw: String?): String = when (raw?.trim()?.lowercase()) {
+        EXPLORE, "read-only", "readonly", "research", "recon" -> EXPLORE
+        PLAN, "planner", "design" -> PLAN
+        GENERAL, "general", "general_purpose", "generalpurpose", "gp" -> GENERAL
+        else -> WORKER
+    }
+
+    fun canWrite(kind: String): Boolean {
+        val k = normalize(kind)
+        return k == WORKER || k == GENERAL
+    }
+
+    fun isReadOnly(kind: String): Boolean {
+        val k = normalize(kind)
+        return k == EXPLORE || k == PLAN
+    }
+
+    fun requiresWritePaths(kind: String, parallelWriters: Int): Boolean {
+        return normalize(kind) == WORKER && parallelWriters > 1
+    }
 
     fun blocks(kind: String, toolName: String): Boolean {
-        if (toolName == RUN_SUBAGENT) return true
-        return isReadOnly(kind) && toolName in BLOCKED_WHEN_READ_ONLY
+        if (toolName in ALWAYS_DENY || isSpawnTool(toolName)) return true
+        val k = normalize(kind)
+        if (k == EXPLORE || k == PLAN) return toolName !in READ_ONLY_ALLOW
+        return false
     }
 
     fun filterTools(kind: String, tools: List<AgentToolDefinition>): List<AgentToolDefinition> {
-        return tools.filter { def ->
-            def.name != RUN_SUBAGENT && !(isReadOnly(kind) && def.name in BLOCKED_WHEN_READ_ONLY)
+        return tools.filter { !blocks(kind, it.name) }
+    }
+
+    /**
+     * Simple recon ≈ 10 turns; medium ≈ 20; complex implement/refactor ≈ 40–60.
+     * Callers still clamp to the user-facing settings cap.
+     */
+    fun inferTurns(kind: String, prompt: String): Int {
+        val k = normalize(kind)
+        val len = prompt.length
+        val simple = containsSimpleHint(prompt)
+        val complex = containsComplexHint(prompt)
+        return when (k) {
+            EXPLORE -> if (len > 1500 || complex) MEDIUM_TURNS else SIMPLE_TURNS
+            PLAN -> if (len > 2000 || complex) COMPLEX_TURNS else MEDIUM_TURNS
+            else -> when {
+                len > 3500 || (complex && len > 1800) -> COMPLEX_MAX_TURNS
+                len > 1200 || complex -> COMPLEX_TURNS
+                len < 400 && simple -> SIMPLE_TURNS
+                else -> MEDIUM_TURNS
+            }
         }
     }
 
     fun clampTurns(
         kind: String,
         requested: Int?,
-        defaultCap: Int = SubAgentRunner.MAX_TURNS,
+        cap: Int = MAX_TURNS,
+        prompt: String = "",
     ): Int {
-        val cap = MultiAgentSettings.clampTurns(defaultCap)
-        val n = requested ?: cap
-        return n.coerceIn(1, cap)
+        val limit = cap.coerceIn(1, MAX_TURNS)
+        val target = if (requested == null || requested <= 0) {
+            inferTurns(kind, prompt)
+        } else {
+            requested
+        }
+        return target.coerceIn(1, limit)
+    }
+
+    private fun containsSimpleHint(prompt: String): Boolean {
+        val p = prompt.lowercase()
+        val keys = listOf(
+            "look", "find", "list", "where", "summarize",
+            "搜索", "查找", "看看", "摘要", "定位",
+        )
+        return keys.any { p.contains(it) }
+    }
+
+    private fun containsComplexHint(prompt: String): Boolean {
+        val p = prompt.lowercase()
+        val keys = listOf(
+            "implement", "refactor", "migrate", "rewrite", "fix all",
+            "实现", "重构", "迁移", "重写", "全量",
+        )
+        return keys.any { p.contains(it) }
     }
 }

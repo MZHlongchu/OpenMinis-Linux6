@@ -59,6 +59,7 @@ import com.openminis.app.sandbox.ExecutionCoordinator
 import com.openminis.app.terminal.MinisOpenUrlBroker
 import com.openminis.app.terminal.MinisUrlMarker
 import com.openminis.app.tools.AgentTools
+import com.openminis.app.tools.SubAgentKind
 import com.openminis.app.tools.SubAgentLane
 import com.openminis.app.tools.FileEditTool
 import com.openminis.app.tools.FileReadTool
@@ -95,7 +96,6 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -9011,25 +9011,35 @@ class ChatViewModel(
                 }
 
                 android.util.Log.d("ToolChain[VM]", "[turn=$turn] executeTool START name=$name args=${argsStr.take(200)}")
-                if (name == "run_subagent" && !didFanOutSubAgents) {
+                if (SubAgentKind.isSpawnTool(name) && !didFanOutSubAgents) {
                     didFanOutSubAgents = true
                     val cap = MultiAgentSettings.clampConcurrent(multiAgentSettings.maxConcurrent.value)
                     val sem = Semaphore(cap)
-                    val peers = toolCalls.filter { it.second == "run_subagent" }
+                    val peers = toolCalls.filter { SubAgentKind.isSpawnTool(it.second) }
+                    val writerCount = peers.sumOf { (_, _, peerArgs) ->
+                        parseSubAgentBatch(peerArgs.toString(), multiAgentSettings.subagentMaxTurns.value)
+                            .count { spawn -> SubAgentKind.canWrite(spawn.kind) }
+                    }
                     coroutineScope {
                         peers.mapIndexed { peerIdx, (peerId, _, peerArgs) ->
-                            val laneId = SubAgentLane.idFor(activeSessionId, peerIdx)
-                            async(SubAgentLane(laneId)) {
-                                val peerStr = peerArgs.toString()
-                                val peerResult = sem.withPermit {
-                                    executeRunSubAgent(peerStr, peerId, allToolBlocks, assistantId, accumulatedText)
-                                }
+                            async {
+                                val peerResult = executeRunSubAgent(
+                                    peerArgs.toString(),
+                                    peerId,
+                                    allToolBlocks,
+                                    assistantId,
+                                    accumulatedText,
+                                    limiter = sem,
+                                    parallelWriters = writerCount,
+                                    waveIndex = peerIdx,
+                                    waveSize = peers.size,
+                                )
                                 synchronized(parallelSubResults) { parallelSubResults[peerId] = peerResult }
                             }
                         }.awaitAll()
                     }
                 }
-                val result = if (name == "run_subagent") {
+                val result = if (SubAgentKind.isSpawnTool(name)) {
                     parallelSubResults[id] ?: executeTool(name, argsStr, id, allToolBlocks, assistantId, accumulatedText)
                 } else {
                     executeTool(name, argsStr, id, allToolBlocks, assistantId, accumulatedText)
@@ -9371,7 +9381,8 @@ class ChatViewModel(
             "browser_use" -> executeBrowserUseTool(argsJson)
             "memory_write" -> executeMemoryWriteTool(argsJson)
             "memory_get" -> executeMemoryGetTool(argsJson)
-            "run_subagent" -> executeRunSubAgent(argsJson, toolId, toolBlocks, assistantId, currentText)
+            SubAgentKind.SPAWN_AGENT, SubAgentKind.RUN_SUBAGENT ->
+                executeRunSubAgent(argsJson, toolId, toolBlocks, assistantId, currentText)
             com.openminis.app.tools.WebSearchTool.NAME -> com.openminis.app.tools.WebSearchTool.execute(argsJson, context)
             com.openminis.app.tools.SessionLookupTool.SEARCH -> com.openminis.app.tools.SessionLookupTool.executeSearch(
                 argsJson, activeSessionId, context,
@@ -10320,7 +10331,7 @@ class ChatViewModel(
             )
             val cap = multiAgentSettings.maxConcurrent.value
             val turns = multiAgentSettings.subagentMaxTurns.value
-            "\n- run_subagent: Dispatch a teammate. You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Each prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration because sub-agents cannot see this conversation and cannot call run_subagent. kind=worker|explore|plan; write_paths limits file_write/file_edit. Independent work: emit multiple run_subagent calls in ONE turn (they run in parallel, cap=" + cap + "). max_turns default/cap=" + turns + ". Dependent phases: finish and accept before starting the next. After a teammate returns, verify against Expected result; if it fails, name the gap and re-dispatch. Team models: " + names + ". Settings: minis://settings/multi-agent"
+            "\n- spawn_agent: You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Prefer ONE spawn_agent call with a tasks[] array (you choose N from complexity; they run concurrently, isolated failures, cap=" + cap + "). Each task prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration because sub-agents cannot see this conversation and cannot call spawn_agent. kind=explore (read-only recon)|plan (read-only design)|worker (writes; parallel workers MUST set non-overlapping write_paths)|general-purpose (fallback). Omit max_turns to auto-size (simple≈10, complex 40–60, hard cap=" + turns + "). Dependent phases: accept before the next wave. After a teammate returns, verify Expected result; on failure, name the gap and re-dispatch. Team models: " + names + ". Settings: minis://settings/multi-agent"
         } else {
             ""
         }

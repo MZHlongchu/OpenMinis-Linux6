@@ -10,7 +10,7 @@ import org.json.JSONArray
 /**
  * Persistence for multi-agent parallel dispatch.
  *
- * [maxConcurrent] is the hard cap on simultaneous [run_subagent] calls in one
+ * [maxConcurrent] is the hard cap on simultaneous spawn_agent members in one
  * turn. [selectedModelEntryIds] is a slot list of that same length: slot i is
  * the model for the i-th concurrent sub-agent. Empty slots reuse the main
  * session model. Duplicates are allowed so two teammates can share a model.
@@ -128,8 +128,8 @@ object MultiAgentSettings {
     const val MAX_CONCURRENT = 8
     const val DEFAULT_CONCURRENT = 3
     const val MIN_SUBAGENT_TURNS = 1
-    const val MAX_SUBAGENT_TURNS = 48
-    const val DEFAULT_SUBAGENT_TURNS = 12
+    const val MAX_SUBAGENT_TURNS = 60
+    const val DEFAULT_SUBAGENT_TURNS = 60
 
     fun clampConcurrent(n: Int): Int = n.coerceIn(MIN_CONCURRENT, MAX_CONCURRENT)
 

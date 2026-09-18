@@ -165,7 +165,7 @@ object PlanDiscussionOrchestrator {
                 )
                 val resultParts = mutableListOf<AgentContentPart>()
                 for ((id, name, args) in toolCalls) {
-                    if (name == "run_subagent") {
+                    if (SubAgentKind.isSpawnTool(name)) {
                         resultParts.add(
                             AgentContentPart.ToolResult(
                                 id = id,

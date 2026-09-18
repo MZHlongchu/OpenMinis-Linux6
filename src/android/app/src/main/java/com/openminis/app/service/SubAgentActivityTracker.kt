@@ -4,11 +4,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Live roster of concurrent [run_subagent] members for the chat status bar.
- * ChatViewModel publishes start/finish; ChatScreen renders chips.
+ * Live roster of concurrent spawn_agent members for the chat status bar.
+ * UI shows 子代理 i/N plus turn and the in-flight tool.
  */
 object SubAgentActivityTracker {
 
@@ -19,77 +18,84 @@ object SubAgentActivityTracker {
         val parentSessionId: String,
         val title: String,
         val role: String?,
-        val model: String,
+        val model: String?,
         val status: Status,
-        val startedAtMs: Long,
-        val finishedAtMs: Long? = null,
-        val error: String? = null,
         val lastStep: String = "",
+        val error: String? = null,
+        val index: Int = 0,
+        val total: Int = 0,
+        val kind: String? = null,
+        val turnIndex: Int = 0,
+        val turnCap: Int = 0,
+        val currentTool: String = "",
     )
 
     private val _members = MutableStateFlow<List<Member>>(emptyList())
     val members: StateFlow<List<Member>> = _members.asStateFlow()
 
-    private val pruneAfterMs = 45_000L
-    private val lastPruneAt = AtomicLong(0L)
-
     fun start(
         parentSessionId: String,
         title: String,
         role: String?,
-        model: String,
-        nowMs: Long = System.currentTimeMillis(),
+        model: String?,
+        index: Int = 0,
+        total: Int = 0,
+        kind: String? = role,
+        turnCap: Int = 0,
     ): String {
-        pruneLocked(nowMs)
         val id = UUID.randomUUID().toString()
         val member = Member(
             id = id,
             parentSessionId = parentSessionId,
-            title = title.ifBlank { "Sub-agent" },
+            title = title,
             role = role,
             model = model,
             status = Status.RUNNING,
-            startedAtMs = nowMs,
+            index = index,
+            total = total,
+            kind = kind,
+            turnCap = turnCap,
         )
         _members.value = _members.value + member
         return id
     }
 
     fun updateStep(id: String, step: String) {
-        val clipped = step.replace('\n', ' ').trim().take(160)
-        if (clipped.isEmpty()) return
         _members.value = _members.value.map { m ->
-            if (m.id != id) m else m.copy(lastStep = clipped)
+            if (m.id == id) m.copy(lastStep = step) else m
         }
     }
 
-    fun finish(id: String, success: Boolean, error: String? = null, nowMs: Long = System.currentTimeMillis()) {
-        _members.value = _members.value.map { m ->
-            if (m.id != id) m
-            else m.copy(
-                status = if (success) Status.SUCCESS else Status.FAILED,
-                finishedAtMs = nowMs,
-                error = error,
-            )
+    fun updateProgress(id: String, turn: Int, cap: Int, tool: String) {
+        val step = buildString {
+            append("turn $turn/$cap")
+            if (tool.isNotBlank()) append(" · $tool")
         }
-        pruneLocked(nowMs)
+        _members.value = _members.value.map { m ->
+            if (m.id == id) {
+                m.copy(
+                    lastStep = step,
+                    turnIndex = turn,
+                    turnCap = cap,
+                    currentTool = tool,
+                )
+            } else {
+                m
+            }
+        }
+    }
+
+    fun finish(id: String, success: Boolean, error: String? = null) {
+        val status = if (success) Status.SUCCESS else Status.FAILED
+        _members.value = _members.value.map { m ->
+            if (m.id == id) m.copy(status = status, error = error) else m
+        }
     }
 
     fun clearSession(parentSessionId: String) {
-        _members.value = _members.value.filterNot { it.parentSessionId == parentSessionId }
+        _members.value = _members.value.filter { it.parentSessionId != parentSessionId }
     }
 
-    fun membersFor(parentSessionId: String, nowMs: Long = System.currentTimeMillis()): List<Member> {
-        pruneLocked(nowMs)
-        return _members.value.filter { it.parentSessionId == parentSessionId }
-    }
-
-    private fun pruneLocked(nowMs: Long) {
-        if (nowMs - lastPruneAt.get() < 2_000L) return
-        lastPruneAt.set(nowMs)
-        _members.value = _members.value.filter { m ->
-            m.status == Status.RUNNING ||
-                (m.finishedAtMs != null && nowMs - m.finishedAtMs < pruneAfterMs)
-        }
-    }
+    fun membersFor(parentSessionId: String): List<Member> =
+        _members.value.filter { it.parentSessionId == parentSessionId }
 }

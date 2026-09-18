@@ -14,14 +14,14 @@ object SubAgentBrief {
     const val WORKFLOW = "## Workflow"
     const val COLLABORATION = "## Collaboration"
 
-    /** Hint injected into the coordinator system prompt and run_subagent tool. */
-    const val COORDINATOR_SPEC = """Each run_subagent prompt MUST include these markdown sections:
+    /** Hint injected into the coordinator system prompt and spawn_agent tool. */
+    const val COORDINATOR_SPEC = """Each spawn_agent task prompt MUST include these markdown sections:
 ## Task — the slice to complete (paths, files, what "done" means)
 ## Expected result — acceptance criteria the coordinator will verify
 ## Constraints — what not to touch, write_paths, kind limits
 ## Workflow — ordered steps (read → change → verify → report)
-## Collaboration — you are a teammate, not the coordinator; do not call run_subagent
-Independent slices: emit multiple run_subagent calls in ONE turn. Dependent phases: accept the previous result before dispatching the next. Never ask a sub-agent to spawn further sub-agents."""
+## Collaboration — you are a teammate, not the coordinator; do not call spawn_agent
+Independent slices: one spawn_agent call with a tasks[] array. Dependent phases: accept the previous result before dispatching the next wave. Never ask a sub-agent to spawn further sub-agents."""
 
     fun wrap(
         rawPrompt: String,
@@ -38,7 +38,7 @@ Independent slices: emit multiple run_subagent calls in ONE turn. Dependent phas
         }
         val collaboration = """$COLLABORATION
 You are a sub-agent (kind=$kind), not the session coordinator. You cannot see the parent chat. Complete ONLY this slice and return a report.
-- Do not call run_subagent or spawn teammates. Nested dispatch is blocked.
+- Do not call spawn_agent or run_subagent. Nested dispatch is blocked.
 - Do not rewrite unrelated files or expand the scope.
 $roleLine$writeLine- If you cannot meet the expected result, say so explicitly and list what failed.""".trimIndent()
 
@@ -59,7 +59,7 @@ Meet the acceptance criteria in the task. If none were given, deliver a concise 
 
 $CONSTRAINTS
 - Complete ONLY this slice. Do not rewrite unrelated files.
-- Do not call run_subagent or spawn teammates.
+- Do not call spawn_agent or run_subagent.
 $roleLine$writeLine
 $WORKFLOW
 1. Read only the files you need.

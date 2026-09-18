@@ -2,11 +2,11 @@
 
 本分支保留 OpenMinis 的 Agent + PRoot 沙箱，并加上偏 Linux 的工具链、主机 `su` 直通、POSIX 共享存储挂载，以及独立的 Android 包名，因此可以和官方 OpenMinis **并排安装**。
 
-启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。当前版本 **1.25-linux**（versionCode 37）。
+启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。当前版本 **1.26-linux**（versionCode 38）。
 
 滚动 APK：GitHub Releases 标签 `android-latest`，文件名 `minis-ultra-com.openminis.linux.apk`。关于页 / 检查更新走 fork `tall-1997/OpenMinis-Linux`；滚动包用 release body 里的 `versionCode` / `versionName`（以及 APK `updated_at`）判断是否比本机新。
 
-正式发行包：[Releases `1.25-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.25-linux)。1.25：原生进化层（提案审批、Be-ACTIVE、闲时收割、技能补丁、信念衰减/周反思/场景注入）。1.24：超长 markdown/日志 ICU OOM 闪退修复、日日志封顶。1.23：子代理独立 shell 通道、按槽位选团队模型、WebApp 钉到主屏、SameSite cookie。1.22：可配置子代理轮次、Android 14 广播 flag、自构建 TMPDIR/aapt2、沙箱代理与主机事件加固。1.21：结构化子 Agent 任务书、计划讨论 AUTO、会话装饰开关、修复 crash_handler 误链主机 libunwind。1.20：`search_sessions`/`read_session`、子 Agent `kind`/`write_paths`、系统助手入口与桌面小组件、browser_use 跟系统 WebView（目标 Chrome/151）、libunwind。1.19：主机事件通道、动态 minis-notify、任务级能力路由、沙箱长任务 FGS、http_proxy 日志/切断、WebDAV 恢复向导、aarch64 一键编译。详见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
+正式发行包：[Releases `1.26-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.26-linux)。1.26：拾忆风格 spawn_agent（tasks 并行、四种 kind、动态轮次、write_paths 隔离、子代理 i/N 进度）。1.25：原生进化层（提案审批、Be-ACTIVE、闲时收割、技能补丁、信念衰减/周反思/场景注入）。1.24：超长 markdown/日志 ICU OOM 闪退修复、日日志封顶。1.23：子代理独立 shell 通道、按槽位选团队模型、WebApp 钉到主屏、SameSite cookie。1.22：可配置子代理轮次、Android 14 广播 flag、自构建 TMPDIR/aapt2、沙箱代理与主机事件加固。1.21：结构化子 Agent 任务书、计划讨论 AUTO、会话装饰开关、修复 crash_handler 误链主机 libunwind。1.20：`search_sessions`/`read_session`、子 Agent `kind`/`write_paths`、系统助手入口与桌面小组件、browser_use 跟系统 WebView（目标 Chrome/151）、libunwind。1.19：主机事件通道、动态 minis-notify、任务级能力路由、沙箱长任务 FGS、http_proxy 日志/切断、WebDAV 恢复向导、aarch64 一键编译。详见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ## 沙箱当服务器
 

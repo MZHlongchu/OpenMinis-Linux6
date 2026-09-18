@@ -6,8 +6,8 @@ import kotlin.coroutines.CoroutineContext
 
 /**
  * Restricts [FileWriteTool] / [FileEditTool] to prefixes assigned via
- * `run_subagent.write_paths` (拾忆 spawn_agent write_paths). Empty or absent
- * prefixes mean unrestricted.
+ * `spawn_agent.write_paths` (拾忆-style isolation). Empty or absent
+ * prefixes mean unrestricted for a solo writer; parallel workers must set them.
  *
  * Implemented as a [ThreadContextElement] so the allow-list survives
  * `withContext` hops and so two parallel sub-agents on the same dispatcher

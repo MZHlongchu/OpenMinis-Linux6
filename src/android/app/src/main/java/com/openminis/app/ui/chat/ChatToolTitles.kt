@@ -16,7 +16,7 @@ internal fun friendlyToolTitle(toolName: String): String = when (toolName) {
     "web_search" -> "Search Web"
     "search_sessions" -> "Search Sessions"
     "read_session" -> "Read Session"
-    "run_subagent" -> "Sub-agent"
+    "spawn_agent", "run_subagent" -> "Sub-agent"
     "ask_user_question", "AskUserQuestion" -> "Ask User"
     else -> toolName
         .split('_')

@@ -25,4 +25,31 @@ class SubAgentActivityTrackerTest {
         assertEquals("▶ shell_execute ls -la", SubAgentActivityTracker.membersFor("s2").first().lastStep)
         SubAgentActivityTracker.clearSession("s2")
     }
+
+    @Test
+    fun updateProgressTracksTurnAndTool() {
+        SubAgentActivityTracker.clearSession("s3")
+        val id = SubAgentActivityTracker.start(
+            parentSessionId = "s3",
+            title = "slice",
+            role = "coder",
+            model = "gpt",
+            index = 2,
+            total = 3,
+            kind = "worker",
+            turnCap = 40,
+        )
+        SubAgentActivityTracker.updateProgress(id, 4, 40, "file_read")
+        val m = SubAgentActivityTracker.membersFor("s3").first()
+        assertEquals(2, m.index)
+        assertEquals(3, m.total)
+        assertEquals("worker", m.kind)
+        assertEquals(4, m.turnIndex)
+        assertEquals(40, m.turnCap)
+        assertEquals("file_read", m.currentTool)
+        assertEquals("turn 4/40 · file_read", m.lastStep)
+        SubAgentActivityTracker.finish(id, false, "boom")
+        assertEquals("boom", SubAgentActivityTracker.membersFor("s3").first().error)
+        SubAgentActivityTracker.clearSession("s3")
+    }
 }

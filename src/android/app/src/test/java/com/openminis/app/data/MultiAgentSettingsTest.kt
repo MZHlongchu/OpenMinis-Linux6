@@ -16,10 +16,10 @@ class MultiAgentSettingsTest {
     }
 
     @Test
-    fun clampTurns_defaultsToTwelveRange() {
+    fun clampTurns_defaultsToSixtyRange() {
         assertEquals(1, MultiAgentSettings.clampTurns(0))
         assertEquals(12, MultiAgentSettings.clampTurns(12))
-        assertEquals(48, MultiAgentSettings.clampTurns(99))
+        assertEquals(60, MultiAgentSettings.clampTurns(99))
     }
 
     @Test

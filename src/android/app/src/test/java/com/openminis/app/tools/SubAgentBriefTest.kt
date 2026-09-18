@@ -20,7 +20,7 @@ class SubAgentBriefTest {
         assertTrue(out.contains(SubAgentBrief.WORKFLOW))
         assertTrue(out.contains(SubAgentBrief.COLLABORATION))
         assertTrue(out.contains("Fix StorageScanner hang"))
-        assertTrue(out.contains("do not call run_subagent") || out.contains("Do not call run_subagent"))
+        assertTrue(out.contains("do not call spawn_agent") || out.contains("Do not call spawn_agent"))
         assertTrue(out.contains("/var/minis/app"))
         assertTrue(out.contains("Android reviewer"))
         assertFalse(SubAgentBrief.isStructured("just do it"))

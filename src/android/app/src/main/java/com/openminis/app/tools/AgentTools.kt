@@ -50,26 +50,69 @@ object AgentTools {
         }
     }
 
-    private fun runSubAgentDefinition(): AgentToolDefinition = AgentToolDefinition(
-        name = "run_subagent",
-        description = """Dispatch a teammate sub-agent. You are the session coordinator: decompose, dispatch, accept, summarize — do not do all the work yourself.
+    private fun runSubAgentDefinition(): AgentToolDefinition {
+        val taskItem = AgentToolParam(
+            type = "object",
+            description = "One teammate. Independent tasks in this array run concurrently; failures are isolated.",
+            properties = mapOf(
+                "prompt" to AgentToolParam(
+                    "string",
+                    "Self-contained brief with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration. Sub-agents cannot see this conversation and must not call spawn_agent.",
+                ),
+                "kind" to AgentToolParam(
+                    "string",
+                    "explore (read-only recon), plan (read-only design), worker (writes), or general-purpose (fallback).",
+                    enumValues = listOf("explore", "plan", "worker", "general-purpose"),
+                ),
+                "write_paths" to AgentToolParam(
+                    "string",
+                    "Comma-separated Linux path prefixes this worker may file_write/file_edit. Required when two or more workers run in the same wave.",
+                ),
+                "max_turns" to AgentToolParam(
+                    "integer",
+                    "Omit to auto-size: simple ≈ 10, complex 40–60, clamped to Settings → Multi-agent.",
+                ),
+                "role" to AgentToolParam("string", "Member role, e.g. 'Android reviewer', 'docs writer'."),
+                "skills" to AgentToolParam("string", "Comma-separated skill ids the worker should read first."),
+                "model" to AgentToolParam("string", "Optional model-entry id from the configured sub-agent pool. Omit to round-robin."),
+                "tool_title" to AgentToolParam("string", "Short live-status title, e.g. 'Review RootfsManager'."),
+            ),
+            required = listOf("prompt"),
+        )
+        return AgentToolDefinition(
+            name = "spawn_agent",
+            description = """Dispatch teammate sub-agents. You are the session coordinator: decompose, dispatch, accept, summarize — do not do all the work yourself.
 
-Each call MUST include a self-contained prompt (sub-agents cannot see this conversation) with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration. Nested run_subagent is blocked. Note the member role and which skills to read.
+Prefer ONE spawn_agent call with a tasks[] array. You choose how many tasks the work needs; they run concurrently up to the configured cap, and one failure does not cancel siblings. Nested spawn_agent/run_subagent is blocked.
 
-kind: worker (default, can write), explore (read-only research), plan (read-only design). write_paths: comma-separated Linux prefixes the worker may file_write/file_edit. Independent slices: emit multiple run_subagent calls in ONE turn (they run in parallel up to the configured cap). Dependent phases: wait for results, verify against acceptance criteria, then dispatch the next phase. If a result fails acceptance, point out the gap and re-dispatch.""",
-        parameters = mapOf(
-            "tool_title" to AgentToolParam("string", "Short live-status title, e.g. 'Review RootfsManager'."),
-            "prompt" to AgentToolParam("string", "Self-contained brief with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration. Sub-agents cannot see this conversation and must not call run_subagent."),
-            "role" to AgentToolParam("string", "Member role, e.g. 'Android reviewer', 'docs writer'."),
-            "skills" to AgentToolParam("string", "Comma-separated skill ids the worker should read first."),
-            "model" to AgentToolParam("string", "Optional model-entry id from the configured sub-agent pool. Omit to round-robin."),
-            "kind" to AgentToolParam("string", "worker (default), explore (read-only), or plan (read-only)."),
-            "write_paths" to AgentToolParam("string", "Comma-separated Linux path prefixes this worker may modify. Empty = unrestricted (worker only)."),
-            "max_turns" to AgentToolParam("integer", "Max tool-loop turns for this sub-agent (default and cap from Settings → Multi-agent, default 12)."),
-        ),
-        required = listOf("prompt"),
-        propertyOrdering = listOf("tool_title", "prompt", "kind", "write_paths", "role", "skills", "model", "max_turns"),
-    )
+kind: explore (read-only recon), plan (read-only design), worker (can write), general-purpose (fallback when the slice does not fit the others). Parallel workers MUST set non-overlapping write_paths.
+
+Each task prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration. Omit max_turns to auto-size (simple ≈ 10, complex 40–60). Dependent phases: wait, verify Expected result, then dispatch the next wave. A single-task call may still pass prompt at the top level.""",
+            parameters = mapOf(
+                "tasks" to AgentToolParam(
+                    type = "array",
+                    description = "Teammates to run in parallel. Size is your call based on complexity. Independent slices only.",
+                    items = taskItem,
+                ),
+                "tool_title" to AgentToolParam("string", "Short live-status title when not using tasks[]."),
+                "prompt" to AgentToolParam("string", "Legacy single-task brief. Ignored when tasks[] is non-empty."),
+                "role" to AgentToolParam("string", "Member role, e.g. 'Android reviewer', 'docs writer'."),
+                "skills" to AgentToolParam("string", "Comma-separated skill ids the worker should read first."),
+                "model" to AgentToolParam("string", "Optional model-entry id from the configured sub-agent pool. Omit to round-robin."),
+                "kind" to AgentToolParam(
+                    "string",
+                    "explore | plan | worker | general-purpose. Default worker.",
+                    enumValues = listOf("explore", "plan", "worker", "general-purpose"),
+                ),
+                "write_paths" to AgentToolParam("string", "Comma-separated Linux path prefixes this worker may modify. Required for parallel workers."),
+                "max_turns" to AgentToolParam("integer", "Omit to auto-size: simple ≈ 10, complex 40–60."),
+            ),
+            required = emptyList(),
+            propertyOrdering = listOf(
+                "tasks", "tool_title", "prompt", "kind", "write_paths", "role", "skills", "model", "max_turns",
+            ),
+        )
+    }
 
     // Aligned with iOS AIChatViewModel.swift:4982-4993
     private fun shellExecuteDefinition(): AgentToolDefinition = AgentToolDefinition(
