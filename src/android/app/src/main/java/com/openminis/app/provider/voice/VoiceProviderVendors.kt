@@ -15,10 +15,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
-import java.text.SimpleDateFormat
+import com.openminis.app.util.IsoTime
 import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
 import java.util.UUID
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -424,10 +422,7 @@ class XunfeiVoiceProvider(
     // HMAC-SHA256 URL signature -----------------------------------------------
 
     private fun buildSignedURL(host: String, path: String, date: Date): String {
-        val formatter = SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss z", Locale.US).apply {
-            timeZone = TimeZone.getTimeZone("GMT")
-        }
-        val dateStr = formatter.format(date)
+        val dateStr = IsoTime.formatHttpDate(date.time)
         val signatureOrigin = "host: $host\ndate: $dateStr\nGET $path HTTP/1.1"
         val signatureB64 = hmacSha256Base64(signatureOrigin, apiSecret)
         val authOrigin = "api_key=\"${apiKey ?: ""}\", " +

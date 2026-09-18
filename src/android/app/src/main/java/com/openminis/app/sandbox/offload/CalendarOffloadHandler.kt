@@ -14,9 +14,8 @@ import com.openminis.app.sandbox.NativeOffloadResult
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
-import java.text.SimpleDateFormat
+import com.openminis.app.util.IsoTime
 import java.util.Calendar
-import java.util.Locale
 import java.util.TimeZone
 
 /**
@@ -611,10 +610,7 @@ class CalendarOffloadHandler(private val context: Context) : NativeOffloadHandle
     /** ISO 8601 with offset (e.g. 2026-04-26T13:51:00+08:00). Matches
      *  apple-calendar noff_format_date so cross-platform consumers see
      *  identical strings. */
-    private fun formatIso(ms: Long): String {
-        val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
-        return sdf.format(java.util.Date(ms))
-    }
+    private fun formatIso(ms: Long): String = IsoTime.formatOffset(ms)
 
     // ── Calendar account selection ───────────────────────────────────────
 
@@ -715,22 +711,7 @@ class CalendarOffloadHandler(private val context: Context) : NativeOffloadHandle
             }
             return System.currentTimeMillis() + sign * n * unitMs
         }
-        val formats = listOf(
-            "yyyy-MM-dd'T'HH:mm:ssXXX",
-            "yyyy-MM-dd'T'HH:mm:ss'Z'",
-            "yyyy-MM-dd'T'HH:mm:ss",
-            "yyyy-MM-dd'T'HH:mm",
-            "yyyy-MM-dd",
-        )
-        for (f in formats) {
-            try {
-                val sdf = SimpleDateFormat(f, Locale.US).apply {
-                    timeZone = if (f.endsWith("'Z'")) TimeZone.getTimeZone("UTC") else TimeZone.getDefault()
-                }
-                return sdf.parse(s)?.time
-            } catch (_: Throwable) {}
-        }
-        return null
+        return IsoTime.parseFlexible(s)
     }
 
     companion object {

@@ -23,9 +23,7 @@ import com.openminis.app.R
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.openminis.app.util.IsoTime
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -405,11 +403,10 @@ object CrashFrequencyDetector {
             .sortedByDescending { it.lastModified() }
 
         val out = mutableListOf<PickableEntry>()
-        val timeFmt = SimpleDateFormat("MM-dd HH:mm", Locale.US)
         for (f in crashes) {
             out += PickableEntry(
                 file = f,
-                label = "${f.name}  ·  ${formatBytes(f.length())}  ·  ${timeFmt.format(Date(f.lastModified()))}",
+                label = "${f.name}  ·  ${formatBytes(f.length())}  ·  ${IsoTime.formatMonthDayHm(f.lastModified())}",
                 section = 0,
                 defaultChecked = true,
             )
@@ -637,7 +634,7 @@ object CrashFrequencyDetector {
             }
             val authority = "${ctx.packageName}.fileprovider"
             val uri = FileProvider.getUriForFile(ctx, authority, zip)
-            val date = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
+            val date = IsoTime.formatMinutes(System.currentTimeMillis())
             val subject = ctx.getString(R.string.crash_freq_email_subject, date)
             // Project crash-report inbox — a public alias, safe to ship in
             // open-source builds (replaced the maintainer's personal email).
@@ -889,7 +886,7 @@ object CrashFrequencyDetector {
         val readable = files.filter { it.exists() && it.length() > 0 }
         if (readable.isEmpty()) return null
         val shareDir = File(ctx.cacheDir, "share").apply { mkdirs() }
-        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val stamp = IsoTime.formatCompactSeconds()
         val zipFile = File(shareDir, "minis-logs-$stamp.zip")
         ZipOutputStream(FileOutputStream(zipFile).buffered()).use { zout ->
             val buf = ByteArray(64 * 1024)

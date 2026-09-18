@@ -228,24 +228,11 @@ object LaunchCycleBeacon {
         val close = line.indexOf(']')
         if (open != 0 || close <= 0) return null
         val iso = line.substring(1, close)
-        return try {
-            val fmt = java.text.SimpleDateFormat(
-                "yyyy-MM-dd'T'HH:mm:ss.SSS",
-                java.util.Locale.US,
-            ).apply { timeZone = java.util.TimeZone.getDefault() }
-            fmt.parse(iso)?.time
-        } catch (_: Throwable) {
-            null
-        }
+        return com.openminis.app.util.IsoTime.parseLocalMillis(iso)
     }
 
-    private fun isoLocal(ms: Long): String {
-        val fmt = java.text.SimpleDateFormat(
-            "yyyy-MM-dd'T'HH:mm:ss.SSS",
-            java.util.Locale.US,
-        ).apply { timeZone = java.util.TimeZone.getDefault() }
-        return fmt.format(java.util.Date(ms))
-    }
+    private fun isoLocal(ms: Long): String =
+        com.openminis.app.util.IsoTime.formatLocalMillis(ms)
 
     private fun appendLine(file: File, line: String) {
         try {

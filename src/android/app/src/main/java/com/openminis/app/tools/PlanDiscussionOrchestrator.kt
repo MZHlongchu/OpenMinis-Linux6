@@ -88,14 +88,16 @@ object PlanDiscussionOrchestrator {
         )
         board.append("\n### Synthesis (").append(main.displayName).append(")\n").append(synthesis).append("\n")
 
-        val md = buildString {
-            append("## 计划讨论\n\n")
-            append("下面是主会话提案、各模型独立立场（可互看全文）经过 ${ROUNDS} 轮讨论后的合成。本轮讨论结束后会按该方案开始执行。若要跳过讨论，请关闭聊天菜单中的「计划讨论」。\n\n")
-            append("### 主会话提案\n\n").append(proposal.trim()).append("\n\n")
-            append("### 合成方案\n\n").append(synthesis.trim()).append("\n")
-            append("\n---\n讨论结束，本轮将按该方案开始执行。\n")
+        return Result(markdown = discussionMarkdown(board.toString()), transcript = board.toString())
+    }
+
+    fun discussionMarkdown(board: String): String {
+        return buildString {
+            append("## 计划讨论（主会话 × 子 Agent）\n\n")
+            append("本轮在共享白板上进行：用户与主会话都能看见每一轮发言。讨论结束后主会话按 Synthesis 执行，不要再开一轮讨论。关闭入口：设置 → 多智能体。\n\n")
+            append(board.trim())
+            append("\n\n---\n讨论结束，本轮将按合成方案开始执行。\n")
         }
-        return Result(markdown = md, transcript = board.toString())
     }
 
     fun liveMarkdown(status: String, userText: String, board: String): String {
@@ -210,6 +212,7 @@ object PlanDiscussionOrchestrator {
 
     private fun facilitatorPrompt(name: String) = """
         You are $name, the session facilitator for a PLAN DISCUSSION.
+        Your statement is posted to a shared board visible to the USER and every discussant.
         Goal: propose the next implementation approach. Other models will see
         this board and may agree or refute. Use tools to inspect the real workspace.
         Do not implement the whole task. Stay in your own stance.
@@ -217,7 +220,8 @@ object PlanDiscussionOrchestrator {
 
     private fun discussantPrompt(name: String, stance: String) = """
         You are $name in a shared plan discussion. Independent stance: $stance.
-        You CAN see every previous statement on the board. Use tools (shell, files, skills) as needed.
+        You CAN see every previous statement on the board; the USER also sees this board live.
+        Use tools (shell, files, skills) as needed.
         Agree, refine, or refute with specifics. Do not rubber-stamp. Do not implement the full task.
         Do not spawn sub-agents.
     """.trimIndent()
@@ -225,6 +229,6 @@ object PlanDiscussionOrchestrator {
     private fun synthesizerPrompt(name: String) = """
         You are $name synthesizing a plan discussion for the USER.
         Produce one clear recommendation. Record dissent that you did not adopt.
-        The user decides. Do not start coding the plan.
+        The full board is visible to the user. The user decides. Do not start coding the plan.
     """.trimIndent()
 }

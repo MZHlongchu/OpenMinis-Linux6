@@ -1,6 +1,7 @@
 package com.openminis.app.backup.remote
 
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.util.IsoTime
 
 /**
  * [T-android-rclone-browse] Directory browsing + folder creation for the
@@ -46,22 +47,8 @@ object RcloneBrowser {
         // rclone reports a zero time for "unknown"; showing 0001-01-01 would be
         // worse than showing nothing.
         if (s.startsWith("0001-01-01")) return null
-        for (pattern in TIME_PATTERNS) {
-            runCatching {
-                val f = java.text.SimpleDateFormat(pattern, java.util.Locale.US).apply {
-                    timeZone = java.util.TimeZone.getTimeZone("UTC")
-                }
-                return f.parse(s)?.time
-            }
-        }
-        return null
+        return IsoTime.parseFlexible(s)
     }
-
-    private val TIME_PATTERNS = listOf(
-        "yyyy-MM-dd'T'HH:mm:ss.SSSSSSSSSXXX",
-        "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
-        "yyyy-MM-dd'T'HH:mm:ssXXX",
-    )
 
     /**
      * List directories under [path] on [remote]. Files are omitted — the picker

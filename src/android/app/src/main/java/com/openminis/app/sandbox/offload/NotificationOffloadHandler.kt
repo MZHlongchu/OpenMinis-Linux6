@@ -26,10 +26,7 @@ import com.openminis.app.sandbox.NativeOffloadResult
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
+import com.openminis.app.util.IsoTime
 import java.util.UUID
 
 /**
@@ -416,30 +413,11 @@ class NotificationOffloadHandler(private val context: Context) : NativeOffloadHa
     // ── helpers ─────────────────────────────────────────────────────────
 
     /** ISO 8601 with offset, matches noff_format_date on iOS. */
-    private fun formatIso(ms: Long): String {
-        val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
-        return sdf.format(Date(ms))
-    }
+    private fun formatIso(ms: Long): String = IsoTime.formatOffset(ms)
 
     /** Parse ISO 8601 into ms epoch. Accepts the same set of forms as the
      *  alarm and calendar handlers so prompts can use any convention. */
-    private fun parseIso(s: String): Long? {
-        val patterns = listOf(
-            "yyyy-MM-dd'T'HH:mm:ssXXX",
-            "yyyy-MM-dd'T'HH:mm:ss'Z'",
-            "yyyy-MM-dd'T'HH:mm:ss",
-            "yyyy-MM-dd'T'HH:mm",
-        )
-        for (pat in patterns) {
-            try {
-                val sdf = SimpleDateFormat(pat, Locale.US).apply {
-                    timeZone = if (pat.endsWith("'Z'")) TimeZone.getTimeZone("UTC") else TimeZone.getDefault()
-                }
-                return sdf.parse(s)?.time
-            } catch (_: Throwable) {}
-        }
-        return null
-    }
+    private fun parseIso(s: String): Long? = IsoTime.parseFlexible(s)
 
     // ── list ────────────────────────────────────────────────────────────────
 

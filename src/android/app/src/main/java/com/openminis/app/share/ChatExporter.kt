@@ -12,6 +12,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -46,6 +48,8 @@ import java.util.zip.ZipOutputStream
  *
  * Runs on [Dispatchers.IO]; [progress] is a [StateFlow] so a future UI
  * (progress overlay) can subscribe without re-architecting the call site.
+ * Concurrent exports are serialized on [exportLock] so they cannot clobber
+ * the singleton progress or race the same zip name.
  */
 object ChatExporter {
 
@@ -76,6 +80,7 @@ object ChatExporter {
 
     private val _progress = MutableStateFlow<Progress>(Progress.Idle)
     val progress: StateFlow<Progress> = _progress.asStateFlow()
+    private val exportLock = Mutex()
 
     /**
      * Stream-export [session] in [format] (`"json"` | `"text"`) and return
@@ -90,47 +95,146 @@ object ChatExporter {
         repository: ChatRepository,
         format: String,
     ): Pair<Uri, Summary> = withContext(Dispatchers.IO) {
-        val isJson = format == "json"
-        val ext = if (isJson) "json" else "txt"
-        val stagingRoot = File(context.cacheDir, "export-staging")
-        val workDir = File(stagingRoot, UUID.randomUUID().toString())
-        if (!workDir.mkdirs() && !workDir.isDirectory) {
-            throw IllegalStateException("export-staging mkdir failed: ${workDir.absolutePath}")
-        }
-
-        try {
-            val transcriptFile = File(workDir, "messages.$ext")
-            val summary = streamTranscript(repository, session, isJson, transcriptFile)
-
-            val metaFile = File(workDir, "session.json")
-            writeSessionMeta(metaFile, session, summary)
-
-            // Build zip under shared/ so FileProvider can hand it out.
-            val sharedDir = File(context.cacheDir, "shared").apply { mkdirs() }
-            val safeTitle = (session.title ?: "conversation")
-                .replace(Regex("[^A-Za-z0-9_-]+"), "_")
-                .take(64)
-                .ifEmpty { "conversation" }
-            val zipFile = File(sharedDir, "${safeTitle}-${session.id.take(8)}.zip")
-            if (zipFile.exists()) zipFile.delete()
-
-            ZipOutputStream(FileOutputStream(zipFile).buffered()).use { zos ->
-                zipFileEntry(zos, "messages.$ext", transcriptFile)
-                zipFileEntry(zos, "session.json", metaFile)
+        exportLock.withLock {
+            val isJson = format == "json"
+            val ext = if (isJson) "json" else "txt"
+            val stagingRoot = File(context.cacheDir, "export-staging")
+            val workDir = File(stagingRoot, UUID.randomUUID().toString())
+            if (!workDir.mkdirs() && !workDir.isDirectory) {
+                throw IllegalStateException("export-staging mkdir failed: ${workDir.absolutePath}")
             }
 
-            val authority = "${context.packageName}.fileprovider"
-            val uri = FileProvider.getUriForFile(context, authority, zipFile)
-            _progress.value = Progress.Done(uri, summary)
-            AppLogger.info(LOG_CATEGORY, "exportToZip ok: ${zipFile.absolutePath} (${zipFile.length()} bytes, ${summary.messageCount} msgs)")
-            uri to summary
-        } catch (t: Throwable) {
-            _progress.value = Progress.Failed(t)
-            AppLogger.error(LOG_CATEGORY, "exportToZip failed: ${t.message}")
-            throw t
-        } finally {
-            // Always clean staging — the zip itself lives under shared/.
-            runCatching { workDir.deleteRecursively() }
+            try {
+                val transcriptFile = File(workDir, "messages.$ext")
+                val summary = streamTranscript(repository, session, isJson, transcriptFile)
+
+                val metaFile = File(workDir, "session.json")
+                writeSessionMeta(metaFile, session, summary)
+
+                val sharedDir = File(context.cacheDir, "shared").apply { mkdirs() }
+                val zipFile = File(sharedDir, "${safeName(session)}.zip")
+                if (zipFile.exists()) zipFile.delete()
+
+                ZipOutputStream(FileOutputStream(zipFile).buffered()).use { zos ->
+                    zipFileEntry(zos, "messages.$ext", transcriptFile)
+                    zipFileEntry(zos, "session.json", metaFile)
+                }
+
+                val authority = "${context.packageName}.fileprovider"
+                val uri = FileProvider.getUriForFile(context, authority, zipFile)
+                _progress.value = Progress.Done(uri, summary)
+                AppLogger.info(LOG_CATEGORY, "exportToZip ok: ${zipFile.absolutePath} (${zipFile.length()} bytes, ${summary.messageCount} msgs)")
+                uri to summary
+            } catch (t: Throwable) {
+                _progress.value = Progress.Failed(t)
+                AppLogger.error(LOG_CATEGORY, "exportToZip failed: ${t.message}")
+                throw t
+            } finally {
+                runCatching { workDir.deleteRecursively() }
+            }
+        }
+    }
+
+    /**
+     * Bulk export. One zip with a folder per session plus `manifest.json`.
+     * A single-item list reuses [exportToZip] so the share sheet matches the
+     * row context-menu path.
+     */
+    suspend fun exportManyToZip(
+        context: Context,
+        sessions: List<ChatSessionEntity>,
+        repository: ChatRepository,
+        format: String,
+    ): Pair<Uri, Summary> = withContext(Dispatchers.IO) {
+        if (sessions.isEmpty()) {
+            throw IllegalArgumentException("no sessions to export")
+        }
+        if (sessions.size == 1) {
+            return@withContext exportToZip(context, sessions.first(), repository, format)
+        }
+        exportLock.withLock {
+            val isJson = format == "json"
+            val ext = if (isJson) "json" else "txt"
+            val stagingRoot = File(context.cacheDir, "export-staging")
+            val workDir = File(stagingRoot, UUID.randomUUID().toString())
+            if (!workDir.mkdirs() && !workDir.isDirectory) {
+                throw IllegalStateException("export-staging mkdir failed: ${workDir.absolutePath}")
+            }
+            try {
+                var totalMessages = 0
+                var images = 0
+                var videos = 0
+                var bytes = 0L
+                var first: Long? = null
+                var last: Long? = null
+                val manifestSessions = JSONArray()
+                val usedFolders = mutableSetOf<String>()
+                val sharedDir = File(context.cacheDir, "shared").apply { mkdirs() }
+                val zipFile = File(sharedDir, "minis-sessions-${sessions.size}.zip")
+                if (zipFile.exists()) zipFile.delete()
+
+                ZipOutputStream(FileOutputStream(zipFile).buffered()).use { zos ->
+                    sessions.forEachIndexed { index, session ->
+                        _progress.value = Progress.Running(index, sessions.size)
+                        val folder = uniqueFolder(safeName(session), usedFolders)
+                        val sessionDir = File(workDir, folder).apply { mkdirs() }
+                        val transcriptFile = File(sessionDir, "messages.$ext")
+                        val summary = streamTranscript(
+                            repository, session, isJson, transcriptFile,
+                            reportProgress = false,
+                        )
+                        val metaFile = File(sessionDir, "session.json")
+                        writeSessionMeta(metaFile, session, summary)
+                        zipFileEntry(zos, "$folder/messages.$ext", transcriptFile)
+                        zipFileEntry(zos, "$folder/session.json", metaFile)
+                        totalMessages += summary.messageCount
+                        images += summary.imageAttachments
+                        videos += summary.videoAttachments
+                        bytes += summary.estimatedBytes
+                        first = minOfNullable(first, summary.firstCreatedAt)
+                        last = maxOfNullable(last, summary.lastCreatedAt)
+                        manifestSessions.put(
+                            JSONObject()
+                                .put("id", session.id)
+                                .put("title", session.title ?: "")
+                                .put("folder", folder)
+                                .put("message_count", summary.messageCount),
+                        )
+                    }
+                    val manifest = JSONObject()
+                        .put("format", if (isJson) "json" else "text")
+                        .put("session_count", sessions.size)
+                        .put("message_count", totalMessages)
+                        .put("sessions", manifestSessions)
+                    zos.putNextEntry(ZipEntry("manifest.json"))
+                    zos.write(manifest.toString(2).toByteArray(Charsets.UTF_8))
+                    zos.closeEntry()
+                }
+
+                val summary = Summary(
+                    format = if (isJson) "json" else "text",
+                    messageCount = totalMessages,
+                    firstCreatedAt = first,
+                    lastCreatedAt = last,
+                    imageAttachments = images,
+                    videoAttachments = videos,
+                    estimatedBytes = bytes,
+                )
+                val authority = "${context.packageName}.fileprovider"
+                val uri = FileProvider.getUriForFile(context, authority, zipFile)
+                _progress.value = Progress.Done(uri, summary)
+                AppLogger.info(
+                    LOG_CATEGORY,
+                    "exportManyToZip ok: ${zipFile.absolutePath} (${sessions.size} sessions, $totalMessages msgs)",
+                )
+                uri to summary
+            } catch (t: Throwable) {
+                _progress.value = Progress.Failed(t)
+                AppLogger.error(LOG_CATEGORY, "exportManyToZip failed: ${t.message}")
+                throw t
+            } finally {
+                runCatching { workDir.deleteRecursively() }
+            }
         }
     }
 
@@ -139,6 +243,7 @@ object ChatExporter {
         session: ChatSessionEntity,
         isJson: Boolean,
         out: File,
+        reportProgress: Boolean = true,
     ): Summary {
         val total = repository.messageCount(session.id)
         var done = 0
@@ -148,12 +253,12 @@ object ChatExporter {
         var videos = 0
         var bytes = 0L
 
-        _progress.value = Progress.Running(0, total)
+        if (reportProgress) {
+            _progress.value = Progress.Running(0, total)
+        }
 
         BufferedWriter(OutputStreamWriter(FileOutputStream(out), Charsets.UTF_8)).use { writer ->
             if (isJson) {
-                // Stream a hand-rolled JSON array — `[ {…}, {…}, … ]` —
-                // so we never materialize the whole list at once.
                 writer.write("[")
                 var firstEntry = true
                 forEachBatch(repository, session.id, total) { batch ->
@@ -177,7 +282,9 @@ object ChatExporter {
                         done += 1
                     }
                     writer.flush()
-                    _progress.value = Progress.Running(done, total)
+                    if (reportProgress) {
+                        _progress.value = Progress.Running(done, total)
+                    }
                 }
                 writer.write("]")
             } else {
@@ -200,7 +307,9 @@ object ChatExporter {
                         done += 1
                     }
                     writer.flush()
-                    _progress.value = Progress.Running(done, total)
+                    if (reportProgress) {
+                        _progress.value = Progress.Running(done, total)
+                    }
                 }
             }
         }
@@ -247,6 +356,36 @@ object ChatExporter {
             put("format", summary.format)
         }
         file.writeText(meta.toString(2), Charsets.UTF_8)
+    }
+
+    private fun safeName(session: ChatSessionEntity): String {
+        val base = (session.title ?: "conversation")
+            .replace(Regex("[^A-Za-z0-9_-]+"), "_")
+            .take(64)
+            .ifEmpty { "conversation" }
+        return "$base-${session.id.take(8)}"
+    }
+
+    private fun uniqueFolder(base: String, used: MutableSet<String>): String {
+        var name = base
+        var n = 2
+        while (!used.add(name)) {
+            name = "$base-$n"
+            n += 1
+        }
+        return name
+    }
+
+    private fun minOfNullable(a: Long?, b: Long?): Long? = when {
+        a == null -> b
+        b == null -> a
+        else -> minOf(a, b)
+    }
+
+    private fun maxOfNullable(a: Long?, b: Long?): Long? = when {
+        a == null -> b
+        b == null -> a
+        else -> maxOf(a, b)
     }
 
     private fun zipFileEntry(zos: ZipOutputStream, name: String, file: File) {

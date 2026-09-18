@@ -4,11 +4,9 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.openminis.app.util.IsoTime
 import java.io.File
 import java.io.FileWriter
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
@@ -84,8 +82,6 @@ object HangDetector {
 
     private const val STALL_LOG_DIR = "logs"
     private const val STALL_LOG_PREFIX = "stall-"
-    private val DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-    private val TIMESTAMP_FORMAT = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val started = AtomicBoolean(false)
@@ -275,8 +271,8 @@ object HangDetector {
         } catch (t: Throwable) {
             arrayOf<StackTraceElement>()
         }
-        val ts = TIMESTAMP_FORMAT.format(Date())
-        val date = DATE_FORMAT.format(Date())
+        val ts = IsoTime.formatLocalTimeMillis()
+        val date = IsoTime.formatLocalDate()
         val builder = StringBuilder()
         builder.append(
             "===== HANG @ $ts (duration ~${durationMs}ms) sample=$label escalation=$escalation =====\n",

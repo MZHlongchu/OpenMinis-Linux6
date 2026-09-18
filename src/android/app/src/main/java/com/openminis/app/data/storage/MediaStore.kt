@@ -4,9 +4,7 @@ import android.content.Context
 import com.openminis.app.data.model.MediaRef
 import java.io.File
 import java.io.InputStream
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.openminis.app.util.IsoTime
 import java.util.UUID
 
 class MediaStore(context: Context) {
@@ -20,7 +18,7 @@ class MediaStore(context: Context) {
         originalFileName: String? = null,
     ): MediaRef {
         val id = UUID.randomUUID().toString()
-        val dateDir = SimpleDateFormat("yyyy/MM/dd", Locale.US).format(Date())
+        val dateDir = IsoTime.formatPathDate()
         val originalExt = originalFileName
             ?.substringAfterLast('.', "")
             ?.takeIf { it.length in 1..10 && it.all { c -> c.isLetterOrDigit() } }
@@ -55,7 +53,7 @@ class MediaStore(context: Context) {
         originalFileName: String? = null,
     ): MediaRef? {
         val id = UUID.randomUUID().toString()
-        val dateDir = SimpleDateFormat("yyyy/MM/dd", Locale.US).format(Date())
+        val dateDir = IsoTime.formatPathDate()
         val originalExt = originalFileName
             ?.substringAfterLast('.', "")
             ?.takeIf { it.length in 1..10 && it.all { c -> c.isLetterOrDigit() } }

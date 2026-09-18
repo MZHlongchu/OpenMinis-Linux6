@@ -11,9 +11,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
 import java.nio.file.Files
-import java.text.SimpleDateFormat
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Calendar
-import java.util.Date
 import java.util.Locale
 
 /** Mirrors iOS FileSortKey. */
@@ -124,25 +125,26 @@ data class FileItem(
     val formattedDate: String
         get() {
             if (modifiedMs <= 0L) return ""
-            val date = Date(modifiedMs)
+            val instant = Instant.ofEpochMilli(modifiedMs)
             val now = Calendar.getInstance()
-            val then = Calendar.getInstance().apply { time = date }
+            val then = Calendar.getInstance().apply { timeInMillis = modifiedMs }
             val sameDay = now.get(Calendar.YEAR) == then.get(Calendar.YEAR) &&
                 now.get(Calendar.DAY_OF_YEAR) == then.get(Calendar.DAY_OF_YEAR)
-            if (sameDay) return timeFormatter.format(date)
+            if (sameDay) return timeFormatter.format(instant)
             val yesterday = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }
             val isYesterday = yesterday.get(Calendar.YEAR) == then.get(Calendar.YEAR) &&
                 yesterday.get(Calendar.DAY_OF_YEAR) == then.get(Calendar.DAY_OF_YEAR)
             if (isYesterday) return "Yesterday"
             val daysAgo = (now.timeInMillis - then.timeInMillis) / (24L * 60 * 60 * 1000)
-            if (daysAgo in 0..6) return weekdayFormatter.format(date)
-            return shortDateFormatter.format(date)
+            if (daysAgo in 0..6) return weekdayFormatter.format(instant)
+            return shortDateFormatter.format(instant)
         }
 
     companion object {
-        private val timeFormatter = SimpleDateFormat("h:mm a", Locale.getDefault())
-        private val weekdayFormatter = SimpleDateFormat("EEEE", Locale.getDefault())
-        private val shortDateFormatter = SimpleDateFormat("MMM d, yyyy", Locale.getDefault())
+        private val zone = ZoneId.systemDefault()
+        private val timeFormatter = DateTimeFormatter.ofPattern("h:mm a", Locale.getDefault()).withZone(zone)
+        private val weekdayFormatter = DateTimeFormatter.ofPattern("EEEE", Locale.getDefault()).withZone(zone)
+        private val shortDateFormatter = DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.getDefault()).withZone(zone)
 
         fun from(file: File): FileItem? {
             if (!file.exists()) return null
@@ -507,7 +509,8 @@ class FileBrowserViewModel(
     }
 
     companion object {
-        val dateFormatter = SimpleDateFormat("MMM d, yyyy HH:mm", Locale.getDefault())
+        private val dateFormatter = DateTimeFormatter.ofPattern("MMM d, yyyy HH:mm", Locale.getDefault())
+            .withZone(ZoneId.systemDefault())
 
         /** SharedPreferences file for FileBrowser display options. */
         const val PREFS_NAME = "file_browser_prefs"
@@ -515,7 +518,7 @@ class FileBrowserViewModel(
         const val PREF_KEY_SHOW_HIDDEN = "file_browser_show_hidden"
 
         fun formatDate(timestamp: Long): String {
-            return if (timestamp > 0) dateFormatter.format(Date(timestamp)) else "—"
+            return if (timestamp > 0) dateFormatter.format(Instant.ofEpochMilli(timestamp)) else "—"
         }
     }
 }

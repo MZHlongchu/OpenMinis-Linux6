@@ -22,6 +22,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.lang.ref.WeakReference
 import kotlin.coroutines.resume
+import com.openminis.app.util.IsoTime
 
 /**
  * JSON-RPC 2.0 method dispatcher for the debug server.
@@ -711,7 +712,6 @@ class DebugRPCHandler(private val context: Context) {
     private fun formatLLMRequestsText(raw: JSONObject): String {
         val arr = raw.optJSONArray("requests") ?: return ""
         val sb = StringBuilder()
-        val ts = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
         for (i in 0 until arr.length()) {
             val e = arr.optJSONObject(i) ?: continue
             val provider = e.optString("provider")
@@ -729,7 +729,7 @@ class DebugRPCHandler(private val context: Context) {
             } else ""
             sb.append("// --- #").append(i + 1).append(' ')
                 .append(provider).append(' ')
-                .append(if (timestamp > 0) ts.format(java.util.Date(timestamp)) else "")
+                .append(if (timestamp > 0) IsoTime.formatHms(timestamp) else "")
                 .append(' ').append(durMs).append("ms")
                 .append(" HTTP ").append(status)
                 .append(if (usageStr.isNotEmpty()) " | $usageStr" else "")

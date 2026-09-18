@@ -3,9 +3,6 @@ package com.openminis.app.ui.preview
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
-import android.view.View
-import android.webkit.CookieManager
-import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.runtime.Composable
@@ -51,61 +48,14 @@ class WebViewHolder(
 
     @SuppressLint("SetJavaScriptEnabled")
     val webView: WebView = WebView(appContext).apply {
-        // [T-android-browser-blank] HTML preview lives in a Compose Dialog /
-        // ModalBottomSheet secondary window. On some OEM GPUs the WebView
-        // hardware draw functor fails to composite there — title/URL update
-        // but #root stays blank. Same workaround as
-        // BrowserUseManager.configureWebView: render through a hardware layer.
-        setLayerType(View.LAYER_TYPE_HARDWARE, null)
-        settings.javaScriptEnabled = true       // sandbox HTML demos rely on JS
-        settings.domStorageEnabled = true
-        settings.allowFileAccess = true         // file:// for sandbox previews
-        settings.allowContentAccess = true
-        // Same-origin file:// access is needed so `<script src="game.js">`
-        // sitting next to a sandbox HTML loads correctly. We accept the small
-        // attack surface because all paths come from PRoot-resolved sandbox
-        // outputs, never untrusted user content from the network.
-        @Suppress("DEPRECATION")
-        settings.allowFileAccessFromFileURLs = true
-        @Suppress("DEPRECATION")
-        settings.allowUniversalAccessFromFileURLs = true
-        // T-htmlpreview-2d5c4f3d: pages that use viewport units (`100vh` /
-        // `height: 100%`) combined with `overflow: hidden` would render
-        // blank inside the bottom-sheet preview, because the WebView starts
-        // life detached (created with the Application context — no window)
-        // and loadUrl can fire before Compose attaches it. With no
-        // metaviewport handling, Blink resolves CSS viewport units against
-        // a zero container, collapsing `body { height: 100vh; overflow:
-        // hidden }` to a 0-height clipped box that the resize after attach
-        // never re-expands.
-        //
-        // Turning on useWideViewPort + loadWithOverviewMode tells WebView
-        // to honor the page's <meta viewport> (or fall back to 980 CSS px
-        // when missing) and shrink-to-fit, which decouples the CSS viewport
-        // from the initial measured size and makes 100vh resolve against
-        // the metaviewport instead. Matches the WebApp path (WebAppActivity)
-        // implicitly via WebViewAssetLoader's defaults.
-        settings.useWideViewPort = true
-        settings.loadWithOverviewMode = true
-        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-        com.openminis.app.browser.WebViewEngine.applyCompat(this)
+        // Same Blink bootstrap as browser_use / BrowserSheet: hardware layer
+        // for sheet compositing, cookies, file://, metaviewport, WebViewEngine
+        // compat. Preview-only clients stay below.
+        com.openminis.app.browser.BrowserUseManager.configureWebView(
+            this,
+            com.openminis.app.browser.UserAgentProfile.MOBILE_CHROME,
+        )
         mobileUserAgent = settings.userAgentString
-        // T-android-webview-v3-port: enable first- + third-party cookies so
-        // the in-chat preview matches Chrome cookie semantics. Without
-        // third-party cookies the embedded captcha/auth iframes that
-        // production sites use (hCaptcha, Cloudflare Turnstile, OAuth
-        // popups) silently drop tokens — the same flow the user clears in
-        // a real browser tab fails inside our preview. WebView ships with
-        // 3P cookies disabled by default; first-party defaults to true on
-        // every Android version we support, but we set both explicitly so
-        // the intent is grep-able. `this` here is the outer
-        // WebView(appContext).apply{…} receiver — capture it locally so
-        // the nested CookieManager.apply{} stays readable.
-        val wv = this
-        CookieManager.getInstance().apply {
-            setAcceptCookie(true)
-            setAcceptThirdPartyCookies(wv, true)
-        }
         webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(
                 view: WebView,

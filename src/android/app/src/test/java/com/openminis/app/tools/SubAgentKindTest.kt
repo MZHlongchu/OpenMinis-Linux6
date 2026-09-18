@@ -36,4 +36,16 @@ class SubAgentKindTest {
         assertEquals(16, SubAgentKind.clampTurns(SubAgentKind.EXPLORE, 99))
         assertEquals(12, SubAgentKind.clampTurns(SubAgentKind.WORKER, null))
     }
+
+    @Test
+    fun alwaysDropsNestedSpawn() {
+        val tools = listOf(
+            AgentToolDefinition("run_subagent", "d", mapOf("x" to AgentToolParam("string", "x")), listOf("x")),
+            AgentToolDefinition("file_read", "r", mapOf("x" to AgentToolParam("string", "x")), listOf("x")),
+        )
+        assertEquals(listOf("file_read"), SubAgentKind.filterTools(SubAgentKind.WORKER, tools).map { it.name })
+        assertEquals(listOf("file_read"), SubAgentKind.filterTools(SubAgentKind.EXPLORE, tools).map { it.name })
+        assertTrue(SubAgentKind.blocks(SubAgentKind.WORKER, "run_subagent"))
+        assertTrue(SubAgentKind.blocks(SubAgentKind.PLAN, "run_subagent"))
+    }
 }

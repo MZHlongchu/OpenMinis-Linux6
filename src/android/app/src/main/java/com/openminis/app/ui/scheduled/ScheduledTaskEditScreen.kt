@@ -66,10 +66,8 @@ import com.openminis.app.scheduled.ScheduledRepeatMode
 import com.openminis.app.scheduled.ScheduledTargetMode
 import com.openminis.app.scheduled.ScheduledTask
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
 import java.util.Calendar
-import java.util.Date
-import java.util.Locale
+import com.openminis.app.util.IsoTime
 
 /**
  * [T-android-scheduled-tasks-design / T-android-scheduled-tasks-full]
@@ -793,7 +791,7 @@ private fun startOfLocalDay(utcMidnightMs: Long): Long {
 }
 
 private fun dateLabel(ms: Long): String =
-    SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(ms))
+    IsoTime.formatPattern(ms, "MMM d")
 
 @Suppress("LongParameterList")
 private fun buildTask(

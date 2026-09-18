@@ -93,9 +93,7 @@ import com.openminis.app.ui.markdown.MarkdownText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.openminis.app.util.IsoTime
 import com.openminis.app.i18n.uppercaseForDisplay
 
 /**
@@ -1133,7 +1131,7 @@ private fun relativeTime(millis: Long): String {
         minutes < 60 -> "$minutes min ago"
         hours < 24 -> "$hours hr ago"
         days < 30 -> "$days days ago"
-        else -> SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(millis))
+        else -> IsoTime.formatLocalDate(millis)
     }
 }
 

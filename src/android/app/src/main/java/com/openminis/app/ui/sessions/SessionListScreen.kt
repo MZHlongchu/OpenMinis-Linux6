@@ -603,6 +603,7 @@ fun SessionListScreen(
     // confirmation can restate the consequence.
     var folderToDelete by remember { mutableStateOf<Pair<FolderEntity, Int>?>(null) }
     var showBulkDeleteDialog by remember { mutableStateOf(false) }
+    var showBulkExportDialog by remember { mutableStateOf(false) }
     var showOverflowMenu by remember { mutableStateOf(false) }
     var editSession by remember { mutableStateOf<ChatSessionEntity?>(null) }
     var showBrowserSheet by remember { mutableStateOf(false) }
@@ -1240,7 +1241,7 @@ fun SessionListScreen(
                 // Selection toolbar at bottom (matching iOS: Export + Delete)
                 SelectionToolbar(
                     selectedCount = selectedIds.size,
-                    onExport = { /* TODO: export */ },
+                    onExport = { showBulkExportDialog = true },
                     onMove = { viewModel.requestGroupPickerForSelection() },
                     onDelete = { showBulkDeleteDialog = true },
                     modifier = Modifier.align(Alignment.BottomCenter),
@@ -1304,6 +1305,24 @@ fun SessionListScreen(
                 deleteTargetId?.let { viewModel.deleteSession(it) }
                 showDeleteDialog = false
                 deleteTargetId = null
+            },
+        )
+    }
+
+    if (showBulkExportDialog) {
+        MinisAlertDialog(
+            onDismissRequest = { showBulkExportDialog = false },
+            title = stringResource(R.string.sessionlist_export),
+            confirmText = stringResource(R.string.sessionlist_export_json),
+            onConfirm = {
+                showBulkExportDialog = false
+                exportSelectedSessions(context, sessions, selectedIds, draftPlaceholderId, chatRepository, scope, "json")
+            },
+            text = stringResource(R.string.sessionlist_n_selected, selectedIds.size),
+            neutralText = stringResource(R.string.sessionlist_export_plain),
+            onNeutral = {
+                showBulkExportDialog = false
+                exportSelectedSessions(context, sessions, selectedIds, draftPlaceholderId, chatRepository, scope, "text")
             },
         )
     }
@@ -3363,17 +3382,7 @@ private fun exportSession(
                 repository = chatRepository,
                 format = format,
             )
-            val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "application/zip"
-                putExtra(Intent.EXTRA_SUBJECT, session.title ?: "Conversation")
-                putExtra(Intent.EXTRA_STREAM, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            val chooser = Intent.createChooser(
-                intent,
-                context.getString(R.string.sessionlist_export),
-            ).apply { addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-            context.startActivity(chooser)
+            shareZip(context, uri, session.title ?: "Conversation")
         } catch (t: Throwable) {
             android.widget.Toast.makeText(
                 context,
@@ -3382,5 +3391,54 @@ private fun exportSession(
             ).show()
         }
     }
+}
+
+private fun exportSelectedSessions(
+    context: Context,
+    sessions: List<ChatSessionEntity>,
+    selectedIds: Set<String>,
+    draftPlaceholderId: String?,
+    chatRepository: ChatRepository,
+    scope: kotlinx.coroutines.CoroutineScope,
+    format: String,
+) {
+    val picked = sessions.filter { it.id in selectedIds && it.id != draftPlaceholderId }
+    if (picked.isEmpty()) return
+    scope.launch {
+        try {
+            val (uri, _) = com.openminis.app.share.ChatExporter.exportManyToZip(
+                context = context,
+                sessions = picked,
+                repository = chatRepository,
+                format = format,
+            )
+            val subject = if (picked.size == 1) {
+                picked.first().title ?: "Conversation"
+            } else {
+                context.getString(R.string.sessionlist_n_selected, picked.size)
+            }
+            shareZip(context, uri, subject)
+        } catch (t: Throwable) {
+            android.widget.Toast.makeText(
+                context,
+                context.getString(R.string.export_progress_failed),
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+}
+
+private fun shareZip(context: Context, uri: android.net.Uri, subject: String) {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "application/zip"
+        putExtra(Intent.EXTRA_SUBJECT, subject)
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    val chooser = Intent.createChooser(
+        intent,
+        context.getString(R.string.sessionlist_export),
+    ).apply { addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+    context.startActivity(chooser)
 }
 

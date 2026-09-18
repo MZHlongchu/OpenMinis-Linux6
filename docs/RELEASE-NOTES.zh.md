@@ -1,3 +1,32 @@
+# OpenMinis-Linux 1.21-linux
+
+- versionCode **33**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a；有 `MINIS_UPLOAD_*` 则用上传证书，否则仍为 debug-signed）
+- 签名说明：[docs/SIGNING.md](SIGNING.md)；一键编译：`scripts/build_apk_aarch64.sh`
+
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本。
+
+## 本版
+
+1. **结构化子 Agent 任务书**  
+   协调者 `run_subagent` 的 prompt 运行时包成 `## Task / Expected result / Constraints / Workflow / Collaboration`。任何 kind 都去掉并拦截嵌套 `run_subagent`。
+
+2. **计划讨论 AUTO + 可见白板**  
+   设置 → 多智能体：关闭 / 自动（跳过闲聊） / 每条消息。自动模式不跑短回复。完整轮次写入聊天 markdown，主会话按 Synthesis 执行。
+
+3. **会话装饰可关**  
+   设置 → 外观：浮动工具栏、工具预览、已完成工具卡（默认关）、子代理芯片、计划讨论横幅。进行中的工具仍显示。
+
+4. **修复 1.20-linux CI**  
+   `libminis_crash_handler.so` 曾链到 NDK 主机 `linux-x86_64/lib/libunwind.so`（与 aarch64 不兼容）。现固定 `ndkVersion = 28.0.13004108`，CMake 只按绝对路径链接 sysroot 里的 aarch64 `libunwind.a`。
+
+1.20-linux 标签仍在，但该次 GitHub Actions 没有产出 APK。请改下 **1.21-linux**。
+
+---
+
 # OpenMinis-Linux 1.20-linux
 
 - versionCode **32**

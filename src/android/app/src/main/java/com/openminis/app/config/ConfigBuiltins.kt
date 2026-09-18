@@ -20,11 +20,8 @@ import com.openminis.app.data.repository.EnvVarRepository
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.ui.chat.ChatViewModelStore
+import com.openminis.app.util.IsoTime
 import kotlinx.coroutines.runBlocking
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
 
 /**
  * Built-in field registrations. Single place to add or remove a
@@ -559,10 +556,6 @@ internal object ConfigBuiltins {
         // thinkingrules.<instanceId>:<ruleId>.<field>.
         r.register(com.openminis.app.config.collections.ThinkingRulesCollection(providerRepo))
 
-        val isoFormatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
-        }
-
         // Aggregate read-only summary so `minis-config get providers`
         // returns a useful list of configured instances. Credentials
         // (apiKey / oauthToken) are deliberately omitted.
@@ -643,7 +636,7 @@ internal object ConfigBuiltins {
                                 linkedMapOf(
                                     "key" to ConfigValue.Str(e.key),
                                     "note" to ConfigValue.Str(e.note),
-                                    "created_at" to ConfigValue.Str(isoFormatter.format(Date(e.createdAt))),
+                                    "created_at" to ConfigValue.Str(IsoTime.formatUtcSeconds(e.createdAt)),
                                 )
                             )
                         }

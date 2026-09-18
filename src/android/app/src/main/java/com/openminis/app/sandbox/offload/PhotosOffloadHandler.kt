@@ -21,11 +21,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
-import java.text.SimpleDateFormat
+import com.openminis.app.util.IsoTime
 import java.util.Calendar
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
 
 /**
  * android-photos — query and manage the device photo library via MediaStore.
@@ -54,8 +51,6 @@ import java.util.TimeZone
  *   - `--max` is accepted as an alias for `--limit`.
  */
 class PhotosOffloadHandler(private val context: Context) : NativeOffloadHandler {
-    private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-
     override fun handle(request: NativeOffloadRequest): NativeOffloadResult {
         val args = OffloadArgs(request.argv.drop(1), booleanFlags = setOf("confirm"))
         if (args.hasFlag("h", "help") || args.positional.isEmpty()) {
@@ -157,7 +152,7 @@ class PhotosOffloadHandler(private val context: Context) : NativeOffloadHandler 
                     .put("name", c.getString(1) ?: "")
                     .put("media_type", kind)
                 val dt = c.getLong(2)
-                if (dt > 0) p.put("date", dateFormat.format(Date(dt))).put("date_iso", formatIso(dt))
+                if (dt > 0) p.put("date", IsoTime.formatLocalSeconds(dt)).put("date_iso", formatIso(dt))
                 p.put("width", c.getInt(3))
                     .put("height", c.getInt(4))
                     .put("size_bytes", c.getLong(5))
@@ -430,7 +425,7 @@ class PhotosOffloadHandler(private val context: Context) : NativeOffloadHandler 
                         .put("name", c.getString(1) ?: "")
                         .put("media_type", kind)
                     val dt = c.getLong(2)
-                    if (dt > 0) p.put("date", dateFormat.format(Date(dt))).put("date_iso", formatIso(dt))
+                    if (dt > 0) p.put("date", IsoTime.formatLocalSeconds(dt)).put("date_iso", formatIso(dt))
                     p.put("size_bytes", c.getLong(3))
                         .put("mime_type", c.getString(4) ?: "")
                         .put("bucket_id", c.getLong(5))
@@ -885,29 +880,9 @@ class PhotosOffloadHandler(private val context: Context) : NativeOffloadHandler 
         return startMs to endMs
     }
 
-    private fun parseDate(s: String): Long? {
-        val patterns = listOf(
-            "yyyy-MM-dd'T'HH:mm:ssXXX",
-            "yyyy-MM-dd'T'HH:mm:ss'Z'",
-            "yyyy-MM-dd'T'HH:mm:ss",
-            "yyyy-MM-dd'T'HH:mm",
-            "yyyy-MM-dd",
-        )
-        for (p in patterns) {
-            try {
-                val sdf = SimpleDateFormat(p, Locale.US).apply {
-                    timeZone = if (p.endsWith("'Z'")) TimeZone.getTimeZone("UTC") else TimeZone.getDefault()
-                }
-                return sdf.parse(s)?.time
-            } catch (_: Throwable) {}
-        }
-        return null
-    }
+    private fun parseDate(s: String): Long? = IsoTime.parseFlexible(s)
 
-    private fun formatIso(ms: Long): String {
-        val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
-        return sdf.format(Date(ms))
-    }
+    private fun formatIso(ms: Long): String = IsoTime.formatOffset(ms)
 
     private fun photoStats(): String {
         var count = 0L
@@ -932,8 +907,8 @@ class PhotosOffloadHandler(private val context: Context) : NativeOffloadHandler 
         val json = JSONObject()
             .put("total_photos", count)
             .put("total_size_mb", String.format("%.1f", totalSize / 1e6))
-        if (earliest < Long.MAX_VALUE) json.put("earliest", dateFormat.format(Date(earliest)))
-        if (latest > 0) json.put("latest", dateFormat.format(Date(latest)))
+        if (earliest < Long.MAX_VALUE) json.put("earliest", IsoTime.formatLocalSeconds(earliest))
+        if (latest > 0) json.put("latest", IsoTime.formatLocalSeconds(latest))
         return json.toString(2)
     }
 
@@ -987,7 +962,7 @@ class PhotosOffloadHandler(private val context: Context) : NativeOffloadHandler 
                         .put("id", id)
                         .put("name", c.getString(1) ?: "")
                     val dt = c.getLong(2)
-                    if (dt > 0) p.put("date", dateFormat.format(Date(dt)))
+                    if (dt > 0) p.put("date", IsoTime.formatLocalSeconds(dt))
                     p.put("latitude", coords[0])
                         .put("longitude", coords[1])
                         .put("distance_km", String.format("%.2f", dist))

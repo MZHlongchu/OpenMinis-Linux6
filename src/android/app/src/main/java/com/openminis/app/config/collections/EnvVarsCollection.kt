@@ -10,10 +10,7 @@ import com.openminis.app.config.fields.ClosureField
 import com.openminis.app.config.fields.HiddenField
 import com.openminis.app.config.fields.ReadOnlyField
 import com.openminis.app.data.repository.EnvVarRepository
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
+import com.openminis.app.util.IsoTime
 
 /**
  * Exposes `EnvVarRepository` entries under `envvars.<key>.…`. Mirrors
@@ -37,10 +34,6 @@ class EnvVarsCollection(
     override val removable: Boolean get() = true
     override val risk: ConfigRisk get() = ConfigRisk.SENSITIVE
     override val addPayloadSchema: ConfigSchema get() = ConfigSchema.Json
-
-    private val isoFormatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
-        timeZone = TimeZone.getTimeZone("UTC")
-    }
 
     override fun childIds(): List<String> = repo.entries.value.map { it.key }
 
@@ -81,7 +74,7 @@ class EnvVarsCollection(
             reader = {
                 val e = repo.entries.value.firstOrNull { it.key == key }
                 if (e == null) ConfigValue.Null
-                else ConfigValue.Str(isoFormatter.format(Date(e.createdAt)))
+                else ConfigValue.Str(IsoTime.formatUtcSeconds(e.createdAt))
             },
         )
 

@@ -15,9 +15,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
+import com.openminis.app.util.IsoTime
 
 /**
  * Restores a `.minisbak` package on Android (docs/backup-restore-design.md §8),
@@ -1037,21 +1035,7 @@ class BackupImporter(
         fun JsonObject.millis(key: String): Long? {
             val raw = str(key) ?: return null
             raw.toLongOrNull()?.let { return it }
-            for (pattern in ISO_PATTERNS) {
-                runCatching {
-                    val f = SimpleDateFormat(pattern, Locale.US)
-                        .apply { timeZone = TimeZone.getTimeZone("UTC") }
-                    return f.parse(raw)?.time
-                }
-            }
-            return null
+            return IsoTime.parseFlexible(raw)
         }
-
-        private val ISO_PATTERNS = listOf(
-            "yyyy-MM-dd'T'HH:mm:ss'Z'",
-            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
-            "yyyy-MM-dd'T'HH:mm:ssXXX",
-            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
-        )
     }
 }

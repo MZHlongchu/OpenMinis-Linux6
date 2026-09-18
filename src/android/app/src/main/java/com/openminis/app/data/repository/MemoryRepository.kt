@@ -3,9 +3,7 @@ package com.openminis.app.data.repository
 import android.util.Log
 import com.openminis.app.logging.AppLogger
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.openminis.app.util.IsoTime
 
 /**
  * Manages the memory directory (`minis-global/memory/`).
@@ -68,12 +66,10 @@ class MemoryRepository(private val memoryDir: File) {
     fun writeMemory(content: String): String {
         if (content.isBlank()) return "Error: Missing required 'content' parameter"
 
-        val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-        val fileName = "${dateFmt.format(Date())}.md"
+        val fileName = "${IsoTime.formatLocalDate()}.md"
         val file = File(memoryDir, fileName)
 
-        val timeFmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-        val timestamp = timeFmt.format(Date())
+        val timestamp = IsoTime.formatLocalSeconds(System.currentTimeMillis())
         val entry = "<!-- $timestamp -->\n$content\n\n"
 
         val existing = if (file.exists()) file.readText() else ""
@@ -274,8 +270,7 @@ class MemoryRepository(private val memoryDir: File) {
      * "(N more lines, use memory_get to search)" continuation.
      */
     fun loadRecentDailyMemoryFragment(): String? {
-        val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-        val now = Date()
+        val now = System.currentTimeMillis()
         val fragments = mutableListOf<String>()
         // [XSessionDiag] Names of the logs actually injected, for the diagnostic
         // line below. Collected alongside `fragments` so the log can name the
@@ -284,8 +279,7 @@ class MemoryRepository(private val memoryDir: File) {
         var dayOffset = 0
 
         while (fragments.size < MAX_RECENT_FILES && dayOffset < MAX_LOOKBACK_DAYS) {
-            val date = Date(now.time - dayOffset.toLong() * 86400_000L)
-            val dateStr = dateFmt.format(date)
+            val dateStr = IsoTime.formatLocalDate(now - dayOffset.toLong() * 86400_000L)
             val file = File(memoryDir, "$dateStr.md")
 
             if (file.exists()) {
@@ -353,13 +347,12 @@ class MemoryRepository(private val memoryDir: File) {
      * List all memory files: GLOBAL.md first, then daily logs descending.
      */
     fun listAllFiles(): List<MemoryFileInfo> {
-        val dateFmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)
         val items = mutableListOf<MemoryFileInfo>()
 
         // GLOBAL.md always first
         val globalFile = File(memoryDir, GLOBAL_FILE)
         val globalContent = if (globalFile.exists()) try { globalFile.readText() } catch (_: Exception) { "" } else ""
-        val globalModDate = if (globalFile.exists()) dateFmt.format(Date(globalFile.lastModified())) else ""
+        val globalModDate = if (globalFile.exists()) IsoTime.formatMinutes(globalFile.lastModified()) else ""
         items.add(MemoryFileInfo(
             name = GLOBAL_FILE,
             isGlobal = true,
@@ -379,7 +372,7 @@ class MemoryRepository(private val memoryDir: File) {
             items.add(MemoryFileInfo(
                 name = file.name,
                 isGlobal = false,
-                modifiedDate = dateFmt.format(Date(file.lastModified())),
+                modifiedDate = IsoTime.formatMinutes(file.lastModified()),
                 fileSize = formatFileSize(file.length()),
                 preview = firstContentLine(content),
             ))
@@ -519,9 +512,8 @@ class MemoryRepository(private val memoryDir: File) {
     }
 
     private fun candidateDateStrings(): List<String> {
-        val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-        val now = Date()
-        return listOf(fmt.format(now), fmt.format(Date(now.time - 86400_000L)))
+        val now = System.currentTimeMillis()
+        return listOf(IsoTime.formatLocalDate(now), IsoTime.formatLocalDate(now - 86400_000L))
     }
 
     // -- Internal --

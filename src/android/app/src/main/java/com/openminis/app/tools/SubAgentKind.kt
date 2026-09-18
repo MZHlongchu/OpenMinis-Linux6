@@ -14,6 +14,7 @@ object SubAgentKind {
     const val PLAN = "plan"
 
     private val READ_ONLY = setOf(EXPLORE, PLAN)
+    const val RUN_SUBAGENT = "run_subagent"
     val BLOCKED_WHEN_READ_ONLY = setOf(
         FileWriteTool.NAME,
         FileEditTool.NAME,
@@ -31,12 +32,15 @@ object SubAgentKind {
 
     fun isReadOnly(kind: String): Boolean = kind in READ_ONLY
 
-    fun blocks(kind: String, toolName: String): Boolean =
-        isReadOnly(kind) && toolName in BLOCKED_WHEN_READ_ONLY
+    fun blocks(kind: String, toolName: String): Boolean {
+        if (toolName == RUN_SUBAGENT) return true
+        return isReadOnly(kind) && toolName in BLOCKED_WHEN_READ_ONLY
+    }
 
     fun filterTools(kind: String, tools: List<AgentToolDefinition>): List<AgentToolDefinition> {
-        if (!isReadOnly(kind)) return tools
-        return tools.filter { it.name !in BLOCKED_WHEN_READ_ONLY }
+        return tools.filter { def ->
+            def.name != RUN_SUBAGENT && !(isReadOnly(kind) && def.name in BLOCKED_WHEN_READ_ONLY)
+        }
     }
 
     fun clampTurns(kind: String, requested: Int?): Int {

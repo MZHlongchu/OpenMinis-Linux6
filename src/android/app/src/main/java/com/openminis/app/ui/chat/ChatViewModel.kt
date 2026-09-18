@@ -68,6 +68,7 @@ import com.openminis.app.tools.ToolExecutionResult
 import com.openminis.app.tools.SubAgentRunner
 import com.openminis.app.tools.PlanDiscussionOrchestrator
 import com.openminis.app.data.PlanDiscussionPrefs
+import com.openminis.app.data.PlanDiscussionTrigger
 import com.openminis.app.MinisApp
 import com.openminis.app.offload.OffloadPermissionManager
 import com.openminis.app.service.SessionActivityTracker
@@ -100,6 +101,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import com.openminis.app.util.IsoTime
 
 // [T-android-split-chat] StreamingDelta / ChatMessage / QueuedPrompt /
 // ToolBlockStatus / SlashCommand / AssistantBlock moved verbatim to ChatModels.kt.
@@ -957,8 +959,7 @@ class ChatViewModel(
         val dir = java.io.File(context.cacheDir, "pasted_text").apply { mkdirs() }
         // Timestamp + short uuid: sorts chronologically in a file listing and
         // cannot collide when two pastes land in the same millisecond.
-        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
-            .format(java.util.Date())
+        val stamp = IsoTime.formatCompactSeconds()
         val name = "Pasted_$stamp-${java.util.UUID.randomUUID().toString().take(8)}.txt"
         val file = java.io.File(dir, name)
         return try {
@@ -1572,7 +1573,7 @@ class ChatViewModel(
 
     fun setPlanDiscussionEnabled(enabled: Boolean) {
         PlanDiscussionPrefs.setEnabled(context, enabled)
-        _planDiscussionEnabled.value = enabled
+        _planDiscussionEnabled.value = PlanDiscussionPrefs.isEnabled()
     }
 
     /**
@@ -5791,7 +5792,7 @@ class ChatViewModel(
                 val fallbackProviders = buildFallbackProviders(launchedProvider)
                 try {
                     AppLogger.info(TAG_STREAM, "$label runAgentLoop CALL")
-                    val planMarkdown = if (PlanDiscussionPrefs.isEnabled()) {
+                    val planMarkdown = if (PlanDiscussionTrigger.shouldRun(PlanDiscussionPrefs.mode(), _messages.value.lastOrNull { it.role == "user" && !it.isQueued }?.content.orEmpty())) {
                         runPlanDiscussion(launchedProvider)
                     } else {
                         null
@@ -5799,7 +5800,7 @@ class ChatViewModel(
                     val promptForLoop = if (!planMarkdown.isNullOrBlank()) {
                         systemPrompt +
                             "\n\n## Agreed plan from Plan Discussion\n" +
-                            "The user enabled Plan Discussion. A multi-model discussion already produced this plan. Follow it unless the latest user message contradicts it. Do not re-run a discussion.\n\n" +
+                            "A plan discussion already ran on a shared board visible to the user (every round is in the previous assistant message). Follow the Synthesis. Do not start another discussion or spawn discussants.\n\n" +
                             planMarkdown
                     } else {
                         systemPrompt
@@ -9528,6 +9529,7 @@ class ChatViewModel(
             if (command.isBlank()) {
                 return ToolExecutionResult("Error: 'command' is required", false, toolTitle = toolTitle)
             }
+            command = com.openminis.app.tools.WritePathGuard.wrapShellCommand(command)
 
             // [T-android-overlay-finalize item 1] Removed the
             // shell-specific status hack ("shell: $toolTitle"). Since the
@@ -10306,7 +10308,7 @@ class ChatViewModel(
                 providerRepository.config.value.modelEntries.associate { it.id to it.model.displayName },
             )
             val cap = multiAgentSettings.maxConcurrent.value
-            "\n- run_subagent: Dispatch a teammate. You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Each prompt MUST be self-contained (goal, workspace paths, relevant files, constraints, acceptance criteria) because sub-agents cannot see this conversation. kind=worker|explore|plan; write_paths limits file_write/file_edit. Independent work: emit multiple run_subagent calls in ONE turn (they run in parallel, cap=" + cap + "). Dependent phases: finish and accept before starting the next. After a teammate returns, verify against acceptance criteria; if it fails, name the gap and re-dispatch. Team models: " + names + ". Settings: minis://settings/multi-agent"
+            "\n- run_subagent: Dispatch a teammate. You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Each prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration because sub-agents cannot see this conversation and cannot call run_subagent. kind=worker|explore|plan; write_paths limits file_write/file_edit. Independent work: emit multiple run_subagent calls in ONE turn (they run in parallel, cap=" + cap + "). Dependent phases: finish and accept before starting the next. After a teammate returns, verify against Expected result; if it fails, name the gap and re-dispatch. Team models: " + names + ". Settings: minis://settings/multi-agent"
         } else {
             ""
         }
@@ -10670,11 +10672,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         data class UploadMeta(val linuxPath: String, val size: Long, val modifiedIso: String)
         val metas = mutableListOf<UploadMeta>()
         val nowMs = System.currentTimeMillis()
-        val isoFormatter = java.text.SimpleDateFormat(
-            "yyyy-MM-dd'T'HH:mm:ss'Z'",
-            java.util.Locale.US,
-        ).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
-        val nowStr = isoFormatter.format(java.util.Date(nowMs))
+        val nowStr = IsoTime.formatUtcSeconds(nowMs)
 
         for (attachment in attachments) {
             if (attachment.isImage) {
@@ -12619,7 +12617,9 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         }
         val tools = AgentTools.makeAgentTools(
             supportsImageInput = currentModel?.hasImageInput == true,
-            visionGroupConfigured = false,
+            visionGroupConfigured = com.openminis.app.tools.VisionGroupResolver.isConfigured(
+                providerRepository, context,
+            ),
             memoryEnabled = false,
             subAgentEnabled = false,
         )
@@ -12771,39 +12771,38 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 lastUiMs = now
                 publishRunSubagentLog(toolId, assistantId, currentText, toolBlocks, liveLog.toString())
             }
-            val result = SubAgentRunner.run(
-                provider = provider,
-                modelDisplayName = entry.model.displayName,
-                userPrompt = prompt,
-                role = role,
-                skillsHint = skills,
-                tools = com.openminis.app.tools.SubAgentKind.filterTools(
-                    kind,
-                    AgentTools.makeAgentTools(
-                        supportsImageInput = entry.model.hasImageInput,
-                        visionGroupConfigured = false,
-                        memoryEnabled = false,
-                        subAgentEnabled = false,
+            val result = com.openminis.app.tools.WritePathGuard.withPaths(writePaths) {
+                SubAgentRunner.run(
+                    provider = provider,
+                    modelDisplayName = entry.model.displayName,
+                    userPrompt = prompt,
+                    role = role,
+                    skillsHint = skills,
+                    tools = com.openminis.app.tools.SubAgentKind.filterTools(
+                        kind,
+                        AgentTools.makeAgentTools(
+                            supportsImageInput = entry.model.hasImageInput,
+                            visionGroupConfigured = com.openminis.app.tools.VisionGroupResolver.isConfigured(
+                                providerRepository, context,
+                            ),
+                            memoryEnabled = false,
+                            subAgentEnabled = false,
+                        ),
                     ),
-                ),
-                maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 8192),
-                executeTool = { name, json ->
-                    if (com.openminis.app.tools.SubAgentKind.blocks(kind, name)) {
-                        ToolExecutionResult("Error: $kind sub-agent cannot use $name.", false)
-                    } else {
-                        val prev = com.openminis.app.tools.WritePathGuard.swap(writePaths)
-                        try {
+                    maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 8192),
+                    executeTool = { name, json ->
+                        if (com.openminis.app.tools.SubAgentKind.blocks(kind, name)) {
+                            ToolExecutionResult("Error: $kind sub-agent cannot use $name.", false)
+                        } else {
                             executeTool(name, json, "", mutableListOf(), "", "")
-                        } finally {
-                            com.openminis.app.tools.WritePathGuard.restore(prev)
                         }
-                    }
-                },
-                onStep = { onStep(it) },
-                kind = kind,
-                writePaths = writePaths,
-                maxTurns = maxTurns,
-            )
+                    },
+                    onStep = { onStep(it) },
+                    kind = kind,
+                    writePaths = writePaths,
+                    maxTurns = maxTurns,
+                )
+            }
             val uiLog = if (liveLog.isNotEmpty()) {
                 liveLog.toString().trimEnd() + "\n---\n" + result.output
             } else {

@@ -40,9 +40,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.browser.BrowserHistoryStore
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.openminis.app.util.IsoTime
 import com.openminis.app.ui.components.MinisTextButton
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -177,7 +175,7 @@ fun BrowserHistorySheet(
                                     )
                                 }
                                 Text(
-                                    SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(entry.timestamp)),
+                                    IsoTime.formatPattern(entry.timestamp, "HH:mm"),
                                     fontSize = 11.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                                 )

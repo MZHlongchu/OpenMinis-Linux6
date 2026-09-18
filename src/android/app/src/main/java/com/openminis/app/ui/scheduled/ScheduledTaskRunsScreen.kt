@@ -41,9 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.R
 import com.openminis.app.scheduled.ScheduledRun
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.openminis.app.util.IsoTime
 
 /**
  * [T-android-scheduled-tasks-run-records] Execution log for one scheduled
@@ -183,4 +181,4 @@ private fun RunRow(run: ScheduledRun, onOpenSession: (String) -> Unit) {
 }
 
 private fun formatRunTime(ms: Long): String =
-    SimpleDateFormat("MMM d, HH:mm:ss", Locale.getDefault()).format(Date(ms))
+    IsoTime.formatPattern(ms, "MMM d, HH:mm:ss")

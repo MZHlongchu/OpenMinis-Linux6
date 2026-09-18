@@ -1,5 +1,8 @@
 package com.openminis.app.tools
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -33,5 +36,31 @@ class WritePathGuardTest {
         } finally {
             WritePathGuard.restore(prev)
         }
+    }
+
+    @Test
+    fun wrapShellExportsAllowList() {
+        val prev = WritePathGuard.swap(listOf("/tmp/out"))
+        try {
+            val wrapped = WritePathGuard.wrapShellCommand("echo hi")
+            assertTrue(wrapped.contains("MINIS_WRITE_PATHS='/tmp/out'"))
+            assertTrue(wrapped.contains("echo hi"))
+        } finally {
+            WritePathGuard.restore(prev)
+        }
+        assertEquals("echo hi", WritePathGuard.wrapShellCommand("echo hi"))
+    }
+
+    @Test
+    fun withPathsSurvivesDispatcherHop() = runBlocking {
+        WritePathGuard.withPaths(listOf("/tmp/out")) {
+            withContext(Dispatchers.Default) {
+                assertNull(WritePathGuard.denyReason("/tmp/out/a.txt"))
+                assertTrue(WritePathGuard.denyReason("/etc/passwd")!!.contains("write_paths"))
+                val wrapped = WritePathGuard.wrapShellCommand("true")
+                assertTrue(wrapped.contains("MINIS_WRITE_PATHS='/tmp/out'"))
+            }
+        }
+        assertNull(WritePathGuard.denyReason("/etc/passwd"))
     }
 }

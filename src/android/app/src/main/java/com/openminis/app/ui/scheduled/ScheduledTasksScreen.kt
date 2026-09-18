@@ -56,9 +56,7 @@ import com.openminis.app.ui.settings.SettingsSwitch
 import com.openminis.app.R
 import com.openminis.app.scheduled.ScheduledRepeatMode
 import com.openminis.app.scheduled.ScheduledTask
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.openminis.app.util.IsoTime
 
 /**
  * [T-android-scheduled-tasks-design / T-android-scheduled-tasks-run-records]
@@ -289,8 +287,7 @@ internal fun formatScheduleSummary(task: ScheduledTask): String {
         }
     }
     val next = task.nextTriggerMs()?.let {
-        val sdf = SimpleDateFormat("MMM d HH:mm", Locale.getDefault())
-        " · next ${sdf.format(Date(it))}"
+        " · next ${IsoTime.formatPattern(it, "MMM d HH:mm")}"
     } ?: ""
     return "$repeat $time$next"
 }

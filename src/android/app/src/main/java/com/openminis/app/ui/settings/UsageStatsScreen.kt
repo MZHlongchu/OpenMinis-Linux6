@@ -35,9 +35,7 @@ import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ProviderConfig
 import com.openminis.app.data.model.ProviderType
 import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.openminis.app.util.IsoTime
 
 /**
  * [T-token-attribution-snapshot] How trustworthy a row's model attribution is.
@@ -170,8 +168,6 @@ fun UsageStatsScreen(
         }
 
         val statsMap = mutableMapOf<String, ModelStats>()
-        val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-
         for (record in records) {
             val usage = try { JSONObject(record.tokenUsage) } catch (_: Exception) { continue }
             val input = usage.optLong("inputTokens", 0)
@@ -214,7 +210,7 @@ fun UsageStatsScreen(
             stats.outputTokens += output
             stats.cacheCreationTokens += cacheCr
             stats.cacheReadTokens += cacheRd
-            stats.distinctDays.add(dateFormat.format(Date(record.createdAt)))
+            stats.distinctDays.add(IsoTime.formatLocalDate(record.createdAt))
             stats.distinctSessions.add(record.sessionId)
         }
 

@@ -43,9 +43,7 @@ import com.openminis.app.data.repository.MemoryRepository
 import com.openminis.app.ui.settings.SettingsSection
 import com.openminis.app.ui.settings.SettingsValueRow
 import kotlinx.coroutines.delay
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.openminis.app.util.IsoTime
 import com.openminis.app.ui.components.MinisTextButton
 
 /**
@@ -496,9 +494,8 @@ private fun buildAutoInjectedItems(context: Context, memoryRepository: MemoryRep
     }
 
     // Today + yesterday
-    val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-    val today = dateFmt.format(Date())
-    val yesterday = dateFmt.format(Date(Date().time - 86400_000L))
+    val today = IsoTime.formatLocalDate()
+    val yesterday = IsoTime.formatLocalDate(System.currentTimeMillis() - 86400_000L)
 
     for (dateStr in listOf(today, yesterday)) {
         val fileName = "$dateStr.md"

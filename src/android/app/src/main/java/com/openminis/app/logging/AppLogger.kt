@@ -8,14 +8,12 @@ import java.io.FileWriter
 import java.io.OutputStream
 import java.io.PrintStream
 import java.io.PrintWriter
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.openminis.app.util.IsoTime
 
 /**
  * Daily-rotating file logger that mirrors iOS LoggingManager.
  * Writes log entries to files named yyyy-MM-dd.log in app's files/logs/ directory.
- * Retains logs for 14 days by default.
+ * Retains logs for 15 days by default.
  */
 object AppLogger {
 
@@ -25,8 +23,6 @@ object AppLogger {
     // (d83bc894). The previous 14 came from the March parity-scaffolding
     // batch with no recorded rationale — plain historical drift, not intent.
     private const val MAX_AGE_DAYS = 15
-    private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-    private val timestampFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
     private const val PREF_NAME = "logging_prefs"
     private const val KEY_ENABLED = "logging_enabled"
@@ -183,15 +179,8 @@ object AppLogger {
             val tag = rawLine.substring(slashIdx + 1, parenIdx).trim()
             if (tag.startsWith("Minis.") || tag == "AppLogger") return
         }
-        try {
-            val now = Date()
-            val today = dateFormat.format(now)
-            val w = getWriter(today)
-            w.println("[LOGCAT] $rawLine")
-            w.flush()
-        } catch (_: Exception) {
-            // Swallow — must not feed back into logcat or we loop forever.
-        }
+        val today = IsoTime.formatLocalDate()
+        appendFileLine(today, "[LOGCAT] $rawLine", quiet = true)
     }
 
     /**
@@ -256,16 +245,10 @@ object AppLogger {
     @Synchronized
     private fun writeFileLine(channel: String, line: String) {
         if (!enabled) return
-        try {
-            val now = Date()
-            val today = dateFormat.format(now)
-            val timestamp = timestampFormat.format(now)
-            val w = getWriter(today)
-            w.println("[$timestamp] [$channel] $line")
-            w.flush()
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to write captured line: ${e.message}")
-        }
+        val ms = System.currentTimeMillis()
+        val today = IsoTime.formatLocalDate(ms)
+        val timestamp = IsoTime.formatLocalTimeMillis(ms)
+        appendFileLine(today, "[$timestamp] [$channel] $line")
     }
 
     /**
@@ -301,9 +284,9 @@ object AppLogger {
     }
 
     private fun log(level: String, category: String, message: String) {
-        val now = Date()
-        val today = dateFormat.format(now)
-        val timestamp = timestampFormat.format(now)
+        val ms = System.currentTimeMillis()
+        val today = IsoTime.formatLocalDate(ms)
+        val timestamp = IsoTime.formatLocalTimeMillis(ms)
 
         // Also output to logcat
         val logcatTag = "Minis.$category"
@@ -316,12 +299,18 @@ object AppLogger {
 
         // Write to file (only if enabled)
         if (!enabled) return
+        appendFileLine(today, "[$timestamp] [$level] [$category] $message")
+    }
+
+    @Synchronized
+    private fun appendFileLine(today: String, line: String, quiet: Boolean = false) {
+        if (!enabled) return
         try {
             val w = getWriter(today)
-            w.println("[$timestamp] [$level] [$category] $message")
+            w.println(line)
             w.flush()
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to write log: ${e.message}")
+            if (!quiet) Log.w(TAG, "Failed to write log: ${e.message}")
         }
     }
 

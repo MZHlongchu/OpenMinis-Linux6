@@ -126,6 +126,9 @@ jobs:
         run: |
           chmod +x scripts/build_libunwind_aarch64.sh
           bash scripts/build_libunwind_aarch64.sh "$ANDROID_NDK_HOME"
+          A=$(find "$ANDROID_NDK_HOME" -path '*sysroot/usr/lib/aarch64-linux-android*' -name libunwind.a | head -n 1)
+          test -n "$A" && test -f "$A"
+          echo "aarch64 libunwind.a: $A"
 
       - name: Assemble release APK
         working-directory: src/android

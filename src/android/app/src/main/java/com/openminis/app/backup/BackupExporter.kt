@@ -14,9 +14,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
+import com.openminis.app.util.IsoTime
 import java.util.UUID
 
 /**
@@ -721,7 +719,7 @@ class BackupExporter(
     }
 
     private fun archive(staging: File, backupId: String): File {
-        val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(System.currentTimeMillis())
+        val stamp = IsoTime.formatCompactMinutes()
         // Minute-resolution alone collides when two exports run in the same
         // minute (trivially reachable when testing, or when a user retries with
         // a different selection) — the second would silently replace the first.
@@ -808,8 +806,6 @@ class BackupExporter(
         }.getOrDefault(1)
 
         /** ISO-8601 in UTC, matching Swift's `.iso8601` date encoding strategy. */
-        fun iso8601(millis: Long): String = SimpleDateFormat(
-            "yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US
-        ).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(millis)
+        fun iso8601(millis: Long): String = IsoTime.formatUtcSeconds(millis)
     }
 }

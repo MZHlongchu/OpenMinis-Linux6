@@ -9,13 +9,10 @@ import com.openminis.app.config.confirm.ConfirmOutcome
 import com.openminis.app.config.confirm.PendingConfigChange
 import com.openminis.app.config.confirm.PendingConfigChangeItem
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.util.IsoTime
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
 import java.util.UUID
 
 /**
@@ -33,10 +30,6 @@ object ConfigBridge {
     private const val TAG = "ConfigBridge"
     private const val DEFAULT_PAGE_SIZE = 20
     private const val MAX_PAGE_SIZE = 100
-
-    private val isoFormatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
-        timeZone = TimeZone.getTimeZone("UTC")
-    }
 
     /** First-line gate — returns true when the master switch is on. */
     fun isEnabled(): Boolean = MinisConfigPermissionStore.isEnabled
@@ -843,7 +836,7 @@ object ConfigBridge {
 
     private fun auditEntryDict(e: ConfigAuditEntry): JSONObject = JSONObject().apply {
         put("id", e.id)
-        put("at", isoFormatter.format(Date(e.at)))
+        put("at", IsoTime.formatUtcSeconds(e.at))
         put("actor", e.actor.raw)
         put("scope", e.scope)
         put("key", e.key)
@@ -851,7 +844,7 @@ object ConfigBridge {
         put("new", e.newValueJSON)
         put("status", e.status.raw)
         if (e.sessionId != null) put("session_id", e.sessionId)
-        if (e.confirmedAt != null) put("confirmed_at", isoFormatter.format(Date(e.confirmedAt)))
+        if (e.confirmedAt != null) put("confirmed_at", IsoTime.formatUtcSeconds(e.confirmedAt))
         if (e.revertOf != null) put("revert_of", e.revertOf)
         if (!e.caption.isNullOrEmpty()) put("caption", e.caption)
     }

@@ -1,15 +1,47 @@
 package com.openminis.app.tools
 
+import kotlinx.coroutines.ThreadContextElement
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.CoroutineContext
+
 /**
  * Restricts [FileWriteTool] / [FileEditTool] to prefixes assigned via
  * `run_subagent.write_paths` (拾忆 spawn_agent write_paths). Empty or absent
- * prefixes mean unrestricted. Thread-local so parallel sub-agents do not share
- * each other's allow-list; callers must [swap] on the same thread that executes
- * the write.
+ * prefixes mean unrestricted.
+ *
+ * Implemented as a [ThreadContextElement] so the allow-list survives
+ * `withContext` hops and so two parallel sub-agents on the same dispatcher
+ * thread cannot overwrite each other's prefixes. [swap]/[restore] remain for
+ * tests and any caller that is not inside a coroutine.
  */
 object WritePathGuard {
 
     private val allowed = ThreadLocal<List<String>?>()
+
+    class Scope(
+        prefixes: List<String>,
+    ) : ThreadContextElement<List<String>?> {
+        private val normalized = prefixes.map(::normalize).filter { it.startsWith("/") }
+
+        companion object Key : CoroutineContext.Key<Scope>
+
+        override val key: CoroutineContext.Key<Scope> get() = Key
+
+        override fun updateThreadContext(context: CoroutineContext): List<String>? {
+            val old = allowed.get()
+            if (normalized.isEmpty()) allowed.remove() else allowed.set(normalized)
+            return old
+        }
+
+        override fun restoreThreadContext(context: CoroutineContext, oldState: List<String>?) {
+            if (oldState.isNullOrEmpty()) allowed.remove() else allowed.set(oldState)
+        }
+    }
+
+    suspend fun <T> withPaths(prefixes: List<String>, block: suspend () -> T): T =
+        withContext(Scope(prefixes)) { block() }
+
+    fun current(): List<String> = allowed.get().orEmpty()
 
     fun swap(prefixes: List<String>?): List<String>? {
         val previous = allowed.get()
@@ -33,6 +65,18 @@ object WritePathGuard {
         val ok = prefixes.any { n == it || n.startsWith("$it/") }
         if (ok) return null
         return "Error: path $linuxPath is outside assigned write_paths (${prefixes.joinToString()})."
+    }
+
+    /**
+     * Export the allow-list into the guest shell so scripts can honour it.
+     * Does not `cd` — compilers and `ls /root` must keep working. File tools
+     * remain the hard gate.
+     */
+    fun wrapShellCommand(command: String): String {
+        val prefixes = current()
+        if (prefixes.isEmpty()) return command
+        val escaped = prefixes.joinToString(":") { it.replace("'", "'\\''") }
+        return "export MINIS_WRITE_PATHS='$escaped'\n$command"
     }
 
     fun parse(raw: String?): List<String> {

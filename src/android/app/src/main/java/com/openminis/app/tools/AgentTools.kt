@@ -54,12 +54,12 @@ object AgentTools {
         name = "run_subagent",
         description = """Dispatch a teammate sub-agent. You are the session coordinator: decompose, dispatch, accept, summarize — do not do all the work yourself.
 
-Each call MUST include a self-contained prompt (sub-agents cannot see this conversation): goal, workspace paths, relevant files, constraints, acceptance criteria. Note the member role and which skills to read.
+Each call MUST include a self-contained prompt (sub-agents cannot see this conversation) with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration. Nested run_subagent is blocked. Note the member role and which skills to read.
 
 kind: worker (default, can write), explore (read-only research), plan (read-only design). write_paths: comma-separated Linux prefixes the worker may file_write/file_edit. Independent slices: emit multiple run_subagent calls in ONE turn (they run in parallel up to the configured cap). Dependent phases: wait for results, verify against acceptance criteria, then dispatch the next phase. If a result fails acceptance, point out the gap and re-dispatch.""",
         parameters = mapOf(
             "tool_title" to AgentToolParam("string", "Short live-status title, e.g. 'Review RootfsManager'."),
-            "prompt" to AgentToolParam("string", "Complete self-contained task prompt for the sub-agent."),
+            "prompt" to AgentToolParam("string", "Self-contained brief with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration. Sub-agents cannot see this conversation and must not call run_subagent."),
             "role" to AgentToolParam("string", "Member role, e.g. 'Android reviewer', 'docs writer'."),
             "skills" to AgentToolParam("string", "Comma-separated skill ids the worker should read first."),
             "model" to AgentToolParam("string", "Optional model-entry id from the configured sub-agent pool. Omit to round-robin."),

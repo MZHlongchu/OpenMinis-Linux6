@@ -2,17 +2,14 @@ package com.openminis.app.sandbox.offload
 
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.util.IsoTime
 import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
-import java.text.SimpleDateFormat
 import java.util.Calendar
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
 
 /**
  * T188 — `minis-sessions-cli` offload handler. Lets the in-shell agent
@@ -94,8 +91,8 @@ class SessionsOffloadHandler(
         for (m in metas) {
             val s = JSONObject()
                 .put("session_id", m.id)
-                .put("started_at", DATE_FMT.format(Date(m.startedAt)))
-                .put("last_active", DATE_FMT.format(Date(m.lastActive)))
+                .put("started_at", IsoTime.formatMinutes(m.startedAt))
+                .put("last_active", IsoTime.formatMinutes(m.lastActive))
                 .put("message_count", m.messageCount)
             // Optional fields — only emit when non-null so the JSON
             // matches iOS's `(optional)` shape rather than carrying
@@ -139,7 +136,7 @@ class SessionsOffloadHandler(
                     .put("session_id", m.sessionId)
                     .put("message_id", m.messageId)
                     .put("role", m.role)
-                    .put("created_at", DATE_FMT.format(Date(m.createdAt)))
+                    .put("created_at", IsoTime.formatMinutes(m.createdAt))
                     .put("snippet", m.snippet),
             )
         }
@@ -198,7 +195,7 @@ class SessionsOffloadHandler(
             val obj = JSONObject()
                 .put("message_id", m.messageId)
                 .put("role", m.role)
-                .put("created_at", DATE_FMT.format(Date(m.createdAt)))
+                .put("created_at", IsoTime.formatMinutes(m.createdAt))
                 .put("text", m.text)
             // Only present when the stored text exceeded the cap, so normal
             // messages serialize byte-identically to before (iOS parity).
@@ -236,12 +233,7 @@ class SessionsOffloadHandler(
 
     private fun parseDate(raw: String?): Long? {
         if (raw.isNullOrBlank()) return null
-        return runCatching {
-            val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-            sdf.timeZone = TimeZone.getDefault()
-            sdf.isLenient = false
-            sdf.parse(raw)?.time
-        }.getOrNull()
+        return IsoTime.parseFlexible(raw)
     }
 
     /**
@@ -295,10 +287,6 @@ class SessionsOffloadHandler(
         // iOS NOFF_EXIT_INVALID_ARGS — the shell convention is exit 2
         // for invalid CLI args, distinct from exit 1 for runtime errors.
         private const val EXIT_INVALID_ARGS = 2
-
-        private val DATE_FMT = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).apply {
-            timeZone = TimeZone.getDefault()
-        }
 
         private const val HELP_TEXT = """minis-sessions-cli - Query historical chat sessions and messages
 

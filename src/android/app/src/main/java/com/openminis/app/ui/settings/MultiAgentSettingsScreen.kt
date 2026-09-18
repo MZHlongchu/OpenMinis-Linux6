@@ -19,7 +19,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -27,6 +29,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.openminis.app.MinisApp
 import com.openminis.app.R
+import com.openminis.app.data.PlanDiscussionPrefs
 import com.openminis.app.data.repository.MultiAgentSettings
 
 @Composable
@@ -49,6 +52,7 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
     val candidateIds = remember(candidates) { candidates.map { it.id }.toSet() }
     val liveSelectedIds = selectedIds.filter { it in candidateIds }
     val staleCount = selectedIds.size - liveSelectedIds.size
+    var discussionMode by remember { mutableStateOf(PlanDiscussionPrefs.mode()) }
 
     LaunchedEffect(configLoaded, candidateIds) {
         if (configLoaded) repo.retainLiveEntries(candidateIds)
@@ -165,6 +169,28 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                         // last row — no extra divider needed; SettingsSection cards handle it
                     }
                 }
+            }
+        }
+
+        SettingsSection(
+            header = stringResource(R.string.settings_plan_discussion_section),
+            footer = stringResource(R.string.settings_plan_discussion_footer),
+        ) {
+            val modes = listOf(
+                PlanDiscussionPrefs.Mode.OFF to R.string.settings_plan_discussion_off,
+                PlanDiscussionPrefs.Mode.AUTO to R.string.settings_plan_discussion_auto,
+                PlanDiscussionPrefs.Mode.ALWAYS to R.string.settings_plan_discussion_always,
+            )
+            modes.forEachIndexed { index, (mode, titleRes) ->
+                SettingsChoiceRow(
+                    title = stringResource(titleRes),
+                    selected = discussionMode == mode,
+                    onSelect = {
+                        discussionMode = mode
+                        PlanDiscussionPrefs.setMode(context, mode)
+                    },
+                    showDivider = index < modes.lastIndex,
+                )
             }
         }
     }

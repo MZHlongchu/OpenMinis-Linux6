@@ -15,10 +15,7 @@ import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
+import com.openminis.app.util.IsoTime
 
 /**
  * minis-browser-use — expose the agent's browser_use tool as a CLI inside the
@@ -345,11 +342,7 @@ class BrowserUseOffloadHandler(private val app: MinisApp) : NativeOffloadHandler
             ?: (payload as JSONArray).toString(2)
     }
 
-    private fun isoTimestamp(): String {
-        val fmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
-        fmt.timeZone = TimeZone.getDefault()
-        return fmt.format(Date())
-    }
+    private fun isoTimestamp(): String = IsoTime.formatOffset(System.currentTimeMillis())
 
     /**
      * [T-bg-overlay phase 2 fix] Human-readable browser sub-action status

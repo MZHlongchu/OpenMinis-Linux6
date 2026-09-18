@@ -5,11 +5,9 @@ import com.openminis.app.MinisApp
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.AgentToolParam
 import com.openminis.app.data.repository.ChatRepository
+import com.openminis.app.util.IsoTime
 import org.json.JSONArray
 import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
  * First-class session lookup (拾忆 `search_sessions` / `read_session`).
@@ -171,8 +169,5 @@ object SessionLookupTool {
     private fun repo(context: Context): ChatRepository? =
         (context.applicationContext as? MinisApp)?.chatRepositoryOrNull
 
-    private fun iso(ms: Long): String {
-        val fmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
-        return fmt.format(Date(ms))
-    }
+    private fun iso(ms: Long): String = IsoTime.formatOffset(ms)
 }

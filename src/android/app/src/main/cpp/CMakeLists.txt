@@ -20,13 +20,38 @@ target_include_directories(jieba_jni PRIVATE
 
 find_library(log-lib log)
 target_link_libraries(pty_bridge ${log-lib})
-# crash_handler.cpp uses _Unwind_Backtrace. NDK r28+ dropped shared
-# libunwind.so; scripts/build_libunwind_aarch64.sh installs libunwind.a
-# into the sysroot so -lunwind resolves.
-find_library(UNWIND_LIB unwind)
-if(UNWIND_LIB)
-    target_link_libraries(minis_crash_handler ${log-lib} ${UNWIND_LIB})
-else()
-    target_link_libraries(minis_crash_handler ${log-lib} unwind)
+
+# crash_handler.cpp uses _Unwind_Backtrace.
+# Do NOT find_library(unwind) / -lunwind: NDK llvm prebuilt puts a *host*
+# libunwind.so at toolchains/llvm/prebuilt/<host>/lib/libunwind.so.
+# 1.20-linux CI failed with:
+#   ld.lld: error: .../linux-x86_64/lib/libunwind.so is incompatible with aarch64linux
+# scripts/build_libunwind_aarch64.sh installs aarch64 libunwind.a into the
+# Android sysroot; link that archive by absolute path only.
+set(_unwind_lib "")
+set(_unwind_search
+    "${CMAKE_SYSROOT}/usr/lib/aarch64-linux-android/libunwind.a"
+    "${CMAKE_SYSROOT}/usr/lib/aarch64-linux-android/${ANDROID_PLATFORM_LEVEL}/libunwind.a"
+)
+if(DEFINED CMAKE_ANDROID_NDK)
+    file(GLOB _unwind_glob
+        "${CMAKE_ANDROID_NDK}/toolchains/llvm/prebuilt/*/sysroot/usr/lib/aarch64-linux-android/libunwind.a"
+        "${CMAKE_ANDROID_NDK}/toolchains/llvm/prebuilt/*/sysroot/usr/lib/aarch64-linux-android/*/libunwind.a"
+    )
+    list(APPEND _unwind_search ${_unwind_glob})
 endif()
+foreach(_c IN LISTS _unwind_search)
+    if(_c AND EXISTS "${_c}")
+        set(_unwind_lib "${_c}")
+        break()
+    endif()
+endforeach()
+if(NOT _unwind_lib)
+    message(FATAL_ERROR
+        "aarch64 libunwind.a not found under the Android sysroot. "
+        "Run scripts/build_libunwind_aarch64.sh against this NDK before assemble. "
+        "NDK=${CMAKE_ANDROID_NDK} SYSROOT=${CMAKE_SYSROOT}")
+endif()
+message(STATUS "Linking minis_crash_handler with ${_unwind_lib}")
+target_link_libraries(minis_crash_handler ${log-lib} "${_unwind_lib}")
 target_link_libraries(jieba_jni ${log-lib})

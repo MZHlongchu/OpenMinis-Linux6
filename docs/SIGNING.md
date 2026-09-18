@@ -37,5 +37,12 @@ calls `_Unwind_Backtrace`, so `scripts/build_libunwind_aarch64.sh` cross-
 compiles LLVM `libunwind.a` into the NDK sysroot. `scripts/build_apk_aarch64.sh`
 and CI run that script before Gradle.
 
-CI also copies `libunwind.a` (and `libunwind.so` if the NDK still has it)
-next to the APK as a **release asset**, not packed into the APK.
+CMake must link the **aarch64** `libunwind.a` by absolute path. Never pass
+bare `-lunwind`: NDK llvm prebuilt ships a *host* `libunwind.so` under
+`toolchains/llvm/prebuilt/<host>/lib/`, which 1.20-linux CI linked by
+mistake (`incompatible with aarch64linux`). Pin `ndkVersion` to the same
+r28 folder CI installs.
+
+CI also copies `libunwind.a` (and `libunwind.so` if the NDK still has it
+under an aarch64 sysroot path) next to the APK as a **release asset**,
+not packed into the APK.

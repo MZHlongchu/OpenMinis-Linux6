@@ -12,17 +12,15 @@ import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.ui.graphics.Color
+import com.openminis.app.util.IsoTime
 
 // [T-android-split-chat] Pure tool-label / duration / timestamp formatting
 // helpers extracted verbatim from ChatScreen.kt. `internal` so the rest of the
 // chat package (still in ChatScreen.kt) can call them across the file boundary.
 // No logic change — code moved as-is.
 
-internal val stepTimestampFormatter: java.text.SimpleDateFormat =
-    java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
-
 internal fun formatStepTimestamp(epochMs: Long): String =
-    stepTimestampFormatter.format(java.util.Date(epochMs))
+    IsoTime.formatHms(epochMs)
 
 // [T-step-timestamp v2 aa8b1128] Short "elapsed-or-final duration"
 // label for the tool detail header. Cross-platform format contract:

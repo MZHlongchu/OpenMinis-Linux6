@@ -6,10 +6,8 @@ import org.acra.data.CrashReportData
 import org.acra.ReportField
 import org.acra.sender.ReportSender
 import org.acra.sender.ReportSenderFactory
+import com.openminis.app.util.IsoTime
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
  * T283: Java/Kotlin crash → file. Writes a single text report into
@@ -28,7 +26,7 @@ class CrashFileSender : ReportSender {
 
     override fun send(context: Context, errorContent: CrashReportData) {
         val dir = File(context.filesDir, "logs").also { it.mkdirs() }
-        val stamp = STAMP_FMT.format(Date())
+        val stamp = IsoTime.formatFileStamp()
         val out = File(dir, "crash-$stamp.log")
 
         val body = buildString {
@@ -53,12 +51,6 @@ class CrashFileSender : ReportSender {
         out.writeText(body)
     }
 
-    companion object {
-        // Match LogManagementScreen's expected naming so the row sorts
-        // alongside the daily minis-YYYY-MM-DD.log files (which AppLogger
-        // sorts by `name` descending — newest first).
-        private val STAMP_FMT = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US)
-    }
 }
 
 /**

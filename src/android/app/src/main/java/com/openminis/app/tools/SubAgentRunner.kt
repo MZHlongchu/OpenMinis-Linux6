@@ -32,8 +32,9 @@ object SubAgentRunner {
         writePaths: List<String> = emptyList(),
         maxTurns: Int = MAX_TURNS,
     ): ToolExecutionResult {
+        val briefed = SubAgentBrief.wrap(userPrompt, kind = kind, role = role, writePaths = writePaths)
         val history = mutableListOf(
-            LLMMessage(role = LLMMessage.Role.USER, content = userPrompt),
+            LLMMessage(role = LLMMessage.Role.USER, content = briefed),
         )
         val turns = maxTurns.coerceIn(1, 24)
         val system = workerSystemPrompt(modelDisplayName, role, skillsHint, kind, writePaths)
@@ -185,7 +186,8 @@ object SubAgentRunner {
         } ?: ""
         val kindLine = "Kind: $kind.\n"
         val writeLine = if (writePaths.isNotEmpty()) {
-            "You may only file_write/file_edit under: ${writePaths.joinToString()}.\n"
+            "You may only file_write/file_edit under: ${writePaths.joinToString()}. " +
+                "Keep shell writes in those prefixes; MINIS_WRITE_PATHS is exported.\n"
         } else {
             ""
         }
@@ -195,13 +197,13 @@ object SubAgentRunner {
             "- Use tools immediately. Prefer file_read / file_edit / file_write / shell_execute."
         }
         return """You are a sub-agent ($kind), not the session coordinator. Model: $modelDisplayName.
-${roleLine}${skillsLine}${kindLine}${writeLine}You cannot see the parent conversation. Everything you need is in the user prompt: goal, workspace paths, relevant files, constraints, acceptance criteria.
+${roleLine}${skillsLine}${kindLine}${writeLine}You cannot see the parent conversation. The user prompt is a self-contained brief with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration.
 
 Rules:
 - Complete ONLY the assigned slice. Do not rewrite unrelated files.
-- Do not spawn further sub-agents.
+- Do not spawn further sub-agents. run_subagent is not available and will error if you try.
 $toolLine
-- When done, return a concise report: what changed, files touched, leftover risks, and whether acceptance criteria passed.
+- Follow the brief's Workflow, then return a concise report: what changed, files touched, leftover risks, and whether Expected result passed.
 - If you cannot meet the acceptance criteria, say so explicitly and list what failed.
 """
     }

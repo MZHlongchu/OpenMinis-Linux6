@@ -47,8 +47,8 @@ Groups:
   wait      appear | disappear | stable | activity
   event     watch | once
   notify    watch | once
-  dialog    detect | dismiss
-  extract   text | list | form
+  dialog    detect | watch | once | dismiss
+  extract   text | list | table | form
   service   status | ping
 
 Output: JSON envelope { ok, data | error: { code, message } }.
@@ -76,8 +76,8 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         private const val WAIT_HELP = "wait appear | disappear | stable | activity\n"
         private const val EVENT_HELP = "event watch [--type T] [--package P] [--duration ms] | event once [--type T] [--timeout ms]\n"
         private const val NOTIFY_HELP = "notify watch [--package P] [--text-contains S] [--duration ms] | notify once [--timeout ms]\n"
-        private const val DIALOG_HELP = "dialog detect | dialog dismiss [--confirm|--deny|--button TEXT]\n"
-        private const val EXTRACT_HELP = "extract text | list [--auto-scroll] | form\n"
+        private const val DIALOG_HELP = "dialog detect | dialog watch [--duration ms] | dialog once [--timeout ms] | dialog dismiss [--confirm|--deny|--button TEXT]\n"
+        private const val EXTRACT_HELP = "extract text | list [--auto-scroll] | table [--node id] | form\n"
     }
 
     override fun handle(request: NativeOffloadRequest): NativeOffloadResult {
@@ -936,29 +936,86 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             null      -> NativeOffloadResult(2, DIALOG_HELP)
             "detect"  -> dialogDetect(args)
             "dismiss" -> dialogDismiss(args)
-            "watch"   -> err(args, "NOT_IMPLEMENTED", "dialog watch: not implemented in v1; poll `dialog detect` instead")
+            "watch"   -> dialogWatch(args, once = false)
+            "once"    -> dialogWatch(args, once = true)
             else      -> NativeOffloadResult(2, "$TOOL dialog: unknown action\n$DIALOG_HELP")
         }
     }
 
     private fun dialogDetect(args: OffloadArgs): NativeOffloadResult {
+        val data = snapshotDialog() ?: return ok(args, JSONObject().put("hasDialog", false))
+        return ok(args, data)
+    }
+
+    private fun dialogWatch(args: OffloadArgs, once: Boolean): NativeOffloadResult {
+        svcOrThrow()
+        val duration = if (once) (args.getLong("timeout") ?: 30_000L)
+                       else (args.getLong("duration") ?: 30_000L)
+        val pkgFilter = args.get("package")
+        val deadline = System.currentTimeMillis() + duration.coerceAtMost(120_000L)
+        val sb = StringBuilder()
+        var lastFingerprint: String? = null
+        while (System.currentTimeMillis() < deadline) {
+            if (Thread.currentThread().isInterrupted) {
+                return err(args, "INTERRUPTED", "dialog watch cancelled")
+            }
+            val data = snapshotDialog()
+            if (data != null) {
+                if (pkgFilter != null && data.optString("packageName") != pkgFilter) {
+                    if (!sleepPoll()) return err(args, "INTERRUPTED", "dialog watch cancelled")
+                    continue
+                }
+                val fp = data.optString("className") + "|" + data.optString("message") + "|" +
+                    data.optJSONArray("buttons")?.toString()
+                if (fp != lastFingerprint) {
+                    lastFingerprint = fp
+                    if (once) return ok(args, data)
+                    sb.append(data.toString()).append('\n')
+                }
+            } else {
+                lastFingerprint = null
+            }
+            if (!sleepPoll()) return err(args, "INTERRUPTED", "dialog watch cancelled")
+        }
+        if (once) return ok(args, JSONObject().put("hasDialog", false).put("timedOut", true))
+        return NativeOffloadResult(0, sb.toString())
+    }
+
+    private fun sleepPoll(): Boolean {
+        return try {
+            Thread.sleep(150)
+            !Thread.currentThread().isInterrupted
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+    }
+
+    private fun snapshotDialog(): JSONObject? {
         val svc = svcOrThrow()
         var dialog: AccessibilityNodeInfo? = null
         for (root in svc.rootNodes()) {
             dialog = findFirstByClassNameContains(root, "Dialog", 30, 0)
+                ?: findFirstByClassNameContains(root, "AlertDialog", 30, 0)
             if (dialog != null) break
         }
-        if (dialog == null) return ok(args, JSONObject().put("hasDialog", false))
+        if (dialog == null) return null
         val buttons = JSONArray()
         collectClickableTexts(dialog, 10, 0, buttons, svc.nodeRegistry)
         val msg = StringBuilder()
         collectText(dialog, 5, 0, msg)
-        return ok(args, JSONObject()
+        val title = dialog.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+            ?: dialog.text?.toString()?.takeIf { it.isNotBlank() }
+            ?: ""
+        val (pkg, _) = svc.foregroundPackage()
+        return JSONObject()
             .put("hasDialog", true)
             .put("type", "app_dialog")
-            .put("title", "")
+            .put("title", title)
             .put("message", msg.toString().trim())
-            .put("buttons", buttons))
+            .put("buttons", buttons)
+            .put("packageName", pkg ?: "")
+            .put("className", dialog.className?.toString() ?: "")
     }
 
     private fun findFirstByClassNameContains(node: AccessibilityNodeInfo?, frag: String, maxDepth: Int, depth: Int): AccessibilityNodeInfo? {
@@ -1019,7 +1076,7 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             null    -> NativeOffloadResult(2, EXTRACT_HELP)
             "text"  -> extractText(args)
             "list"  -> extractList(args)
-            "table" -> err(args, "NOT_IMPLEMENTED", "extract table: not implemented in v1")
+            "table" -> extractTable(args)
             "form"  -> extractForm(args)
             else    -> NativeOffloadResult(2, "$TOOL extract: unknown action\n$EXTRACT_HELP")
         }
@@ -1085,6 +1142,124 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         val arr = JSONArray()
         for (v in items.values) arr.put(v)
         return ok(args, JSONObject().put("count", arr.length()).put("data", arr))
+    }
+
+    private fun extractTable(args: OffloadArgs): NativeOffloadResult {
+        val svc = svcOrThrow()
+        val nodeId = args.get("node")
+        val roots = if (nodeId != null) listOfNotNull(svc.nodeRegistry.get(nodeId)) else svc.rootNodes()
+        if (roots.isEmpty()) return err(args, "NODE_NOT_FOUND", "no roots / node=$nodeId")
+        var container: AccessibilityNodeInfo? = if (nodeId != null) roots.firstOrNull() else null
+        if (container == null || !isTableLike(container)) {
+            container = null
+            for (root in roots) {
+                container = findTableLike(root, 40, 0)
+                if (container != null) break
+            }
+        }
+        val rows = if (container != null && isStructuredTable(container)) {
+            structuredTableRows(container)
+        } else {
+            spatialTableRows(if (container != null) listOf(container) else roots)
+        }
+        if (rows.length() == 0 && container != null) {
+            val fallback = spatialTableRows(listOf(container))
+            if (fallback.length() > 0) {
+                val cols = (0 until fallback.length()).maxOf { fallback.optJSONArray(it)?.length() ?: 0 }
+                return ok(args, JSONObject().put("count", fallback.length()).put("columns", cols).put("rows", fallback).put("mode", "spatial"))
+            }
+        }
+        val cols = (0 until rows.length()).maxOfOrNull { rows.optJSONArray(it)?.length() ?: 0 } ?: 0
+        val mode = if (container != null && isStructuredTable(container)) "structured" else "spatial"
+        return ok(args, JSONObject().put("count", rows.length()).put("columns", cols).put("rows", rows).put("mode", mode))
+    }
+
+    private fun isTableLike(node: AccessibilityNodeInfo): Boolean {
+        val c = node.className?.toString() ?: return false
+        return c.contains("TableLayout") || c.contains("TableRow") ||
+            c.contains("GridView") || c.contains("GridLayout")
+    }
+
+    private fun isStructuredTable(node: AccessibilityNodeInfo): Boolean {
+        val c = node.className?.toString() ?: return false
+        return c.contains("TableLayout") || c.contains("GridView") || c.contains("GridLayout")
+    }
+
+    private fun findTableLike(node: AccessibilityNodeInfo?, maxDepth: Int, depth: Int): AccessibilityNodeInfo? {
+        if (node == null || depth > maxDepth) return null
+        if (isStructuredTable(node)) return node
+        for (i in 0 until node.childCount) {
+            findTableLike(node.getChild(i), maxDepth, depth + 1)?.let { return it }
+        }
+        return null
+    }
+
+    private fun structuredTableRows(container: AccessibilityNodeInfo): JSONArray {
+        val cls = container.className?.toString() ?: ""
+        if (cls.contains("TableLayout")) {
+            val rows = JSONArray()
+            for (i in 0 until container.childCount) {
+                val child = container.getChild(i) ?: continue
+                val row = JSONArray()
+                if ((child.className?.toString() ?: "").contains("TableRow") || child.childCount > 0) {
+                    for (j in 0 until child.childCount) {
+                        val cell = child.getChild(j) ?: continue
+                        val sb = StringBuilder()
+                        collectText(cell, 4, 0, sb)
+                        val text = sb.toString().trim()
+                        if (text.isNotEmpty()) row.put(text)
+                    }
+                } else {
+                    val sb = StringBuilder()
+                    collectText(child, 4, 0, sb)
+                    val text = sb.toString().trim()
+                    if (text.isNotEmpty()) row.put(text)
+                }
+                if (row.length() > 0) rows.put(row)
+            }
+            return rows
+        }
+        return spatialTableRows(listOf(container))
+    }
+
+    private data class TableCell(val text: String, val left: Int, val top: Int)
+
+    private fun spatialTableRows(roots: List<AccessibilityNodeInfo>): JSONArray {
+        val cells = ArrayList<TableCell>()
+        for (root in roots) collectTableCells(root, 40, 0, cells)
+        if (cells.isEmpty()) return JSONArray()
+        cells.sortWith(compareBy({ it.top }, { it.left }))
+        val clustered = ArrayList<ArrayList<TableCell>>()
+        val ySlop = 16
+        for (cell in cells) {
+            val row = clustered.lastOrNull()
+            val rowTop = row?.map { it.top }?.average()
+            if (row != null && rowTop != null && kotlin.math.abs(rowTop - cell.top) <= ySlop) {
+                row.add(cell)
+            } else {
+                clustered.add(arrayListOf(cell))
+            }
+        }
+        val rows = JSONArray()
+        for (row in clustered) {
+            row.sortBy { it.left }
+            val arr = JSONArray()
+            for (c in row) arr.put(c.text)
+            if (arr.length() > 0) rows.put(arr)
+        }
+        return rows
+    }
+
+    private fun collectTableCells(node: AccessibilityNodeInfo?, maxDepth: Int, depth: Int, out: ArrayList<TableCell>) {
+        if (node == null || depth > maxDepth) return
+        if (node.isVisibleToUser) {
+            val t = node.text?.toString()
+            if (!t.isNullOrBlank()) {
+                val r = Rect(); node.getBoundsInScreen(r)
+                out.add(TableCell(t.trim(), r.left, r.top))
+            }
+        }
+        for (i in 0 until node.childCount) collectTableCells(node.getChild(i), maxDepth, depth + 1, out)
     }
 
     private fun extractForm(args: OffloadArgs): NativeOffloadResult {

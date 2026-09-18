@@ -27,6 +27,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import com.openminis.app.util.IsoTime
 
 /**
  * Manages a single Android WebView for browser automation.
@@ -1662,9 +1663,6 @@ class BrowserUseManager(
         val defaultDomain = runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
 
         // expires (Unix seconds) → RFC-1123 "Expires=" date in GMT.
-        val httpDateFmt = java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", java.util.Locale.US)
-            .apply { timeZone = java.util.TimeZone.getTimeZone("GMT") }
-
         val setNames = mutableListOf<String>()
         val domainsTouched = linkedSetOf<String>()
         val failures = mutableListOf<String>()
@@ -1693,8 +1691,7 @@ class BrowserUseManager(
             // (EditThisCookie / Cookie-Editor, often fractional). <= 0 (Puppeteer's
             // -1, or 0) → session cookie (no Expires attribute).
             cookieNumber(raw, "expires", "expirationDate")?.takeIf { it > 0 }?.let { expires ->
-                val date = java.util.Date(expires.toLong() * 1000L)
-                sb.append("; Expires=").append(httpDateFmt.format(date))
+                sb.append("; Expires=").append(IsoTime.formatHttpDate(expires.toLong() * 1000L))
             }
             // sameSite accepted (Lax/Strict/None, any case) so exports including
             // it aren't rejected, but NOT applied yet — CookieManager.setCookie

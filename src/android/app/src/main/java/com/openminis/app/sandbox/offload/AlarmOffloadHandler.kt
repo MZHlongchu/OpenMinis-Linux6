@@ -11,11 +11,9 @@ import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
 import org.json.JSONObject
-import java.text.SimpleDateFormat
+import com.openminis.app.util.IsoTime
 import java.util.Calendar
 import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
 
 /**
  * android-alarm — schedule alarms and timers, list, or cancel them.
@@ -286,20 +284,8 @@ class AlarmOffloadHandler(private val context: Context) : NativeOffloadHandler {
      */
     private fun parseTimeArg(s: String): Pair<Int, Int>? {
         parseHHMM(s)?.let { return it }
-        // Try a few common ISO 8601 forms.
-        val patterns = listOf(
-            "yyyy-MM-dd'T'HH:mm:ss'Z'",
-            "yyyy-MM-dd'T'HH:mm:ssXXX",
-            "yyyy-MM-dd'T'HH:mm:ss",
-            "yyyy-MM-dd'T'HH:mm",
-        )
-        for (pat in patterns) {
-            val date = runCatching {
-                val sdf = SimpleDateFormat(pat, Locale.US)
-                if (pat.endsWith("'Z'")) sdf.timeZone = TimeZone.getTimeZone("UTC")
-                sdf.parse(s)
-            }.getOrNull() ?: continue
-            val cal = Calendar.getInstance().apply { time = date }
+        IsoTime.parseFlexible(s)?.let { ms ->
+            val cal = Calendar.getInstance().apply { timeInMillis = ms }
             return cal.get(Calendar.HOUR_OF_DAY) to cal.get(Calendar.MINUTE)
         }
         return null
@@ -329,10 +315,7 @@ class AlarmOffloadHandler(private val context: Context) : NativeOffloadHandler {
      * Format a Date as ISO 8601 `yyyy-MM-dd'T'HH:mm:ssXXX` to match
      * apple-alarm `noff_format_date`. Stable across locales.
      */
-    private fun formatIso(date: Date): String {
-        val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
-        return sdf.format(date)
-    }
+    private fun formatIso(date: Date): String = IsoTime.formatOffset(date.time)
 
     private fun buildSetEnvelope(
         label: String,

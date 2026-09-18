@@ -175,7 +175,7 @@
     <string name="settings_skills">Skills</string>
     <string name="settings_skills_subtitle">Manage Minis Agent skills and instructions</string>
     <string name="settings_multi_agent">Multi-agent</string>
-    <string name="settings_multi_agent_subtitle">Parallel sub-agents, concurrency cap, and team models</string>
+    <string name="settings_multi_agent_subtitle">Parallel sub-agents, concurrency cap, team models, and plan discussion</string>
     <string name="settings_multi_agent_section_dispatch">Dispatch</string>
     <string name="settings_multi_agent_enable">Enable multi-agent</string>
     <string name="settings_multi_agent_enable_subtitle">Main session model coordinates; teammates run via run_subagent</string>
@@ -188,6 +188,11 @@
     <string name="settings_multi_agent_footer_models">Select up to %1$d models (linked to the concurrency cap). Sub-agents round-robin this pool unless a call names a model. Leave empty to reuse the main session model.</string>
     <string name="settings_multi_agent_no_models">No enabled models yet. Add a provider first.</string>
     <string name="settings_multi_agent_stale_pruned">Dropped %1$d team-model picks whose providers no longer exist. Select again.</string>
+    <string name="settings_plan_discussion_section">Plan discussion</string>
+    <string name="settings_plan_discussion_off">Off</string>
+    <string name="settings_plan_discussion_auto">Auto (skip chitchat)</string>
+    <string name="settings_plan_discussion_always">Every message</string>
+    <string name="settings_plan_discussion_footer">Auto opens a shared board (main session and teammates) only for task-shaped messages. Every round is written into the chat. Off and Every message override that. Previously-on chats migrate to Every message.</string>
     <string name="settings_memory">Memory</string>
     <string name="settings_memory_subtitle">Persistent knowledge across sessions</string>
     <!-- [T-mcp-integration-android] MCP Integrations settings entry + management screen -->
@@ -722,6 +727,13 @@
     <string name="appearance_section_tool_preview">Tool Status Bar</string>
     <string name="appearance_tool_preview_footer">Show a live preview thumbnail alongside the tool status bar during Agent execution.</string>
     <string name="appearance_tool_preview_title">Tool Preview Window</string>
+    <string name="appearance_section_chat_chrome">Chat chrome</string>
+    <string name="appearance_chat_chrome_footer">Hide overlapping live-status UI so the transcript stays readable. Running tools still appear until they finish.</string>
+    <string name="appearance_show_floating_tool_bar">Floating tool status bar</string>
+    <string name="appearance_show_completed_tool_cards">Completed tool cards in transcript</string>
+    <string name="appearance_show_completed_tool_cards_subtitle">Off by default. Running tools still show.</string>
+    <string name="appearance_show_subagent_bar">Sub-agent live chips</string>
+    <string name="appearance_show_plan_banner">Plan-discussion banner</string>
     <string name="appearance_section_auto_focus_after_reply">Auto-Focus Input After Reply</string>
     <string name="appearance_auto_focus_after_reply_title">Auto-Focus Input After Reply</string>
     <string name="appearance_auto_focus_after_reply_footer">When on, the keyboard pops up automatically after the model finishes replying so the input is ready for a follow-up. On by default; turn off if you prefer to read the response without an unexpected keyboard.</string>
@@ -1365,7 +1377,7 @@
     <string name="chat_menu_fast_mode">Enable Fast Mode</string>
     <string name="chat_menu_auto_compact">Auto Compact</string>
     <string name="chat_menu_plan_discussion">Plan discussion</string>
-    <string name="plan_discussion_banner">Plan discussion is on — the next message will debate an approach, then start implementing.</string>
+    <string name="plan_discussion_banner">Plan discussion is on (Settings → Multi-agent). Task-shaped messages debate on a shared board first; every round is visible in chat.</string>
     <string name="settings_task_notifications_permission">Notification permission is required on Android 13+. If the toggle is on but you see no alerts, grant notifications for Minis Ultra.</string>
     <string name="settings_task_notifications_granted">Notification permission granted.</string>
     <string name="settings_task_notifications_denied">Notification permission denied — task alerts will not appear until you grant it.</string>

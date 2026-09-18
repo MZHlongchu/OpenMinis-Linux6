@@ -4,9 +4,7 @@ import android.content.Context
 import com.openminis.app.backup.BackupFormat
 import com.openminis.app.logging.AppLogger
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
+import com.openminis.app.util.IsoTime
 
 /**
  * Uploads a backup package to an rclone remote as ONE file, and reads packages
@@ -637,15 +635,7 @@ class RcloneChunkedUpload(private val context: Context) {
 
     private fun parseTime(s: String?): Long? {
         if (s.isNullOrEmpty()) return null
-        for (pattern in TIME_PATTERNS) {
-            runCatching {
-                val f = SimpleDateFormat(pattern, Locale.US).apply {
-                    timeZone = TimeZone.getTimeZone("UTC")
-                }
-                return f.parse(s)?.time
-            }
-        }
-        return null
+        return IsoTime.parseFlexible(s)
     }
 
     companion object {
@@ -670,10 +660,5 @@ class RcloneChunkedUpload(private val context: Context) {
          */
         const val PARTS_DIR = ".minis-parts"
 
-        private val TIME_PATTERNS = listOf(
-            "yyyy-MM-dd'T'HH:mm:ss.SSSSSSSSSXXX",
-            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
-            "yyyy-MM-dd'T'HH:mm:ssXXX",
-        )
     }
 }
