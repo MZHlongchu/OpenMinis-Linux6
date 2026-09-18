@@ -151,6 +151,7 @@
     <string name="settings_multi_agent_section_models">團隊模型</string>
     <string name="settings_multi_agent_footer_models">最多選擇 %1$d 個模型（與並行上限連動）。子代理預設在此池中輪詢；呼叫時可指定模型。留空則沿用主工作階段模型。</string>
     <string name="settings_multi_agent_no_models">還沒有已啟用的模型，請先新增服務提供者。</string>
+    <string name="settings_multi_agent_stale_pruned">已清除 %1$d 個失效的團隊模型（對應服務提供者已刪除），請重新勾選。</string>
     <string name="settings_memory">記憶</string>
     <string name="settings_memory_subtitle">跨工作階段的持續性知識</string>
     <string name="settings_mcp">MCP 整合</string>

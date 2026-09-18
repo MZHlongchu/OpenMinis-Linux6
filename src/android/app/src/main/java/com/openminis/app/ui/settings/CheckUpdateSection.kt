@@ -11,7 +11,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.SystemUpdate
+import com.openminis.app.sandbox.ExecutionCoordinator
+import com.openminis.app.service.AgentForegroundService
+import com.openminis.app.service.SessionActivityTracker
+import kotlinx.coroutines.Dispatchers
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
@@ -73,6 +78,7 @@ fun CheckUpdateSection() {
     var downloadProgress by remember { mutableStateOf<Float?>(null) }
     var downloadError by remember { mutableStateOf<String?>(null) }
     var awaitingInstallPerm by remember { mutableStateOf(false) }
+    var confirmSelfBuild by remember { mutableStateOf(false) }
 
     // Resume the install flow on every ON_RESUME. There are two cases:
     //
@@ -121,7 +127,7 @@ fun CheckUpdateSection() {
                 else R.string.check_update_check_button
             ),
             subtitle = statusMessage,
-            showDivider = false,
+            showDivider = true,
             onClick = if (checking) null else {
                 {
                     checking = true
@@ -153,6 +159,40 @@ fun CheckUpdateSection() {
                 }
             },
         )
+        SettingsRow(
+            icon = Icons.Outlined.Build,
+            iconColor = Color(0xFF5856D6),
+            title = stringResource(R.string.check_update_self_build),
+            subtitle = stringResource(R.string.check_update_self_build_sub),
+            showDivider = false,
+            onClick = { confirmSelfBuild = true },
+        )
+        if (confirmSelfBuild) {
+            AlertDialog(
+                onDismissRequest = { confirmSelfBuild = false },
+                title = { Text(stringResource(R.string.check_update_self_build_confirm_title)) },
+                text = { Text(stringResource(R.string.check_update_self_build_confirm_body)) },
+                confirmButton = {
+                    MinisTextButton(onClick = {
+                        confirmSelfBuild = false
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                SessionActivityTracker.setActive("self-build")
+                                AgentForegroundService.startService(context, 1, "self-build")
+                                ExecutionCoordinator.execute("self-build", "minis-self-build")
+                            } finally {
+                                SessionActivityTracker.setInactive("self-build")
+                            }
+                        }
+                    }) { Text(stringResource(R.string.check_update_self_build_run)) }
+                },
+                dismissButton = {
+                    MinisTextButton(onClick = { confirmSelfBuild = false }) {
+                        Text(stringResource(android.R.string.cancel))
+                    }
+                },
+            )
+        }
         if (showReleasesLink) {
             val linkLabel = stringResource(R.string.update_error_open_releases)
             val annotated = buildAnnotatedString {

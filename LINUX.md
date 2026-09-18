@@ -2,13 +2,13 @@
 
 本分支保留 OpenMinis 的 Agent + PRoot 沙箱，并加上偏 Linux 的工具链、主机 `su` 直通、POSIX 共享存储挂载，以及独立的 Android 包名，因此可以和官方 OpenMinis **并排安装**。
 
-启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。当前版本 **1.17-linux**（versionCode 29）。
+启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。当前版本 **1.19-linux**（versionCode 31）。
 
 滚动 APK：GitHub Releases 标签 `android-latest`，文件名 `minis-ultra-com.openminis.linux.apk`。关于页 / 检查更新走 fork `tall-1997/OpenMinis-Linux`；滚动包用 release body 里的 `versionCode` / `versionName`（以及 APK `updated_at`）判断是否比本机新。
 
-1.17：模型组在本轮需要识图时自动改用组内有视觉的成员；任务完成通知带「重试 / 备份 / 清理」沙箱按钮；`minis-toast`、`minis-clipboard`、无 TTY 时 `minis-open` 走 NativeOffload；沙箱可 `cat /run/minis-host-status.json`。详见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
+1.19：主机事件通道、动态 minis-notify、任务级能力路由、沙箱长任务 FGS、http_proxy 日志/切断、WebDAV 恢复向导、aarch64 一键编译。1.18：失效团队模型 ID；`minis-firewall` / `minis-doze` / `minis-ps`。详见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
-## 沙箱当服务器（第一档）
+## 沙箱当服务器
 
 客户机里可以直接驱动主机：
 
@@ -17,7 +17,19 @@ minis-toast 备份完成
 minis-clipboard get
 minis-clipboard set --text 'hello'
 minis-open --system https://example.com   # 无 TTY 时 http(s) 也会走 android-open
-cat /run/minis-host-status.json           # 温度、剩余空间、前台/后台、wakelock
+minis-firewall status
+minis-firewall set wifi-only              # 可选 --strict（整进程绑 Wi-Fi，含 LLM）
+minis-firewall log                        # 沙箱 http_proxy 记 CONNECT，无 VpnService
+minis-firewall cut                        # 一键切断沙箱出站
+minis-notify post --title 完成 --body ok --action-label 重试 --action-command /var/minis/hooks/retry.sh
+minis-on-event register battery_low /var/minis/hooks/pause.sh
+minis-doze status
+minis-doze request
+minis-ps
+cat /run/minis-host-status.json
+cat /run/android-events.jsonl
+cat /run/minis-netlog.jsonl
+cat /run/minis-proc.json
 ```
 
 任务完成通知上的「重试 / 备份 / 清理」会在对应会话沙箱执行预设命令（上次 shell、打包 workspace、清 `/tmp`）。

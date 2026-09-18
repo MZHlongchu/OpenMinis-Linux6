@@ -54,7 +54,13 @@ import com.openminis.app.sandbox.offload.OpenOffloadHandler
 import com.openminis.app.sandbox.offload.PhotosOffloadHandler
 import com.openminis.app.sandbox.offload.PlayerOffloadHandler
 import com.openminis.app.sandbox.offload.SpeakOffloadHandler
+import com.openminis.app.sandbox.offload.DozeOffloadHandler
+import com.openminis.app.sandbox.offload.FirewallOffloadHandler
+import com.openminis.app.sandbox.offload.HostEventOffloadHandler
+import com.openminis.app.sandbox.offload.MinisNotifyOffloadHandler
+import com.openminis.app.sandbox.offload.ProcfsOffloadHandler
 import com.openminis.app.sandbox.offload.ToastOffloadHandler
+import com.openminis.app.sandbox.HostEventHooks
 import com.openminis.app.sandbox.offload.SpeechOffloadHandler
 import com.openminis.app.sandbox.offload.WeatherOffloadHandler
 import com.openminis.app.service.SessionActivityTracker
@@ -493,6 +499,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         // Initialize sandbox singletons (does not trigger extraction)
         RootfsManager.getInstance(this)
         ExecutionCoordinator.init(this)
+        HostEventHooks.init(this)
         ExecutionCoordinator.envVarRepository = envVarRepository
 
         // Privacy Mode store + redactor wiring. Mirrors iOS
@@ -551,6 +558,11 @@ class MinisApp : Application(), ImageLoaderFactory {
         NativeOffloadServer.register("android-clipboard", clipboardOffload)
         NativeOffloadServer.register("minis-clipboard", clipboardOffload)
         NativeOffloadServer.register("minis-toast", ToastOffloadHandler(this))
+        NativeOffloadServer.register("minis-firewall", FirewallOffloadHandler(this))
+        NativeOffloadServer.register("minis-doze", DozeOffloadHandler(this))
+        NativeOffloadServer.register("minis-ps", ProcfsOffloadHandler())
+        NativeOffloadServer.register("minis-notify", MinisNotifyOffloadHandler(this))
+        NativeOffloadServer.register("minis-on-event", HostEventOffloadHandler())
         NativeOffloadServer.register("android-contacts", ContactsOffloadHandler(this))
         NativeOffloadServer.register("android-device", DeviceOffloadHandler(this))
         NativeOffloadServer.register("android-location", LocationOffloadHandler(this))
@@ -645,6 +657,20 @@ class MinisApp : Application(), ImageLoaderFactory {
         // Mirrors iOS BackgroundKeepAliveManager.postBackgroundTaskNotification.
         backgroundSettingsRepository = BackgroundSettingsRepository(this)
         multiAgentSettingsRepository = MultiAgentSettingsRepository(this)
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            kotlinx.coroutines.flow.combine(
+                providerRepository.configLoaded,
+                providerRepository.config,
+            ) { loaded, cfg -> loaded to cfg }.collect { (loaded, cfg) ->
+                if (!loaded) return@collect
+                val enabled = cfg.instances.associate { it.id to it.isEnabled }
+                val live = cfg.modelEntries
+                    .filter { !it.isHidden && enabled[it.providerInstanceId] == true }
+                    .map { it.id }
+                    .toSet()
+                multiAgentSettingsRepository.retainLiveEntries(live)
+            }
+        }
         backgroundTaskNotifier = BackgroundTaskNotifier(
             context = this,
             chatRepository = chatRepository,

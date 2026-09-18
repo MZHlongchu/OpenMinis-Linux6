@@ -55,6 +55,11 @@
     <string name="check_update_install_launch_failed">启动安装程序失败。请检查\"安装未知应用\"权限或手动打开下载的 APK。</string>
     <string name="check_update_install_hint">提示：如果安装时无任何反馈，可能是签名不匹配，请先卸载旧版本再重新点击下载。</string>
     <string name="check_update_open_install_settings">打开设置</string>
+    <string name="check_update_self_build">沙箱内自编译 APK（实验性）</string>
+    <string name="check_update_self_build_sub">需要数 GB 磁盘、NDK/SDK，并需确认。debug 签名无法覆盖不同证书的安装。</string>
+    <string name="check_update_self_build_confirm_title">在本机沙箱编译？</string>
+    <string name="check_update_self_build_confirm_body">实验性功能。可能下载数 GB 工具链，产物也无法覆盖 Play/CI 签名安装包（证书不一致）。悬浮窗 Stop 仍可取消任务。</string>
+    <string name="check_update_self_build_run">运行 minis-self-build</string>
     <string name="permissions_title">权限</string>
     <string name="permissions_reset_all">全部重置</string>
     <string name="permissions_reset_dialog_title">重置全部权限？</string>
@@ -153,6 +158,7 @@
     <string name="settings_multi_agent_section_models">团队模型</string>
     <string name="settings_multi_agent_footer_models">最多选择 %1$d 个模型（与并发上限联动）。子代理默认在此池中轮询；调用时可指定模型。留空则沿用主会话模型。</string>
     <string name="settings_multi_agent_no_models">还没有已启用的模型，请先添加服务商。</string>
+    <string name="settings_multi_agent_stale_pruned">已清除 %1$d 个失效的团队模型（对应服务商已删除），请重新勾选。</string>
     <string name="settings_memory">记忆</string>
     <string name="settings_memory_subtitle">跨会话保留的持久化知识</string>
     <string name="settings_mcp">MCP 集成</string>
@@ -1362,6 +1368,12 @@
     <string name="backup_choose_file_footer">从「文件」、云盘或任意已连接的存储中选择一个 .minisbak 文件。</string>
     <string name="backup_restore_destinations">备份目的地</string>
     <string name="backup_restore_destinations_footer">点击某个目的地即可浏览并选择备份。</string>
+    <string name="backup_restore_wizard_header">新设备恢复向导</string>
+    <string name="backup_restore_wizard_footer">三步：选 WebDAV/服务器，勾选会话 / 记忆 / 技能，输入口令后恢复。</string>
+    <string name="backup_restore_wizard_step1">1. 选择 WebDAV 或备份服务器</string>
+    <string name="backup_restore_wizard_step2">2. 勾选会话、记忆、技能</string>
+    <string name="backup_restore_wizard_step3">3. 输入口令并恢复</string>
+    <string name="backup_restore_wizard_start">从服务器开始…</string>
     <string name="backup_restore_other_sources">其他来源</string>
     <string name="backup_choose_server">从服务器选择…</string>
     <string name="backup_server_title">从服务器恢复</string>

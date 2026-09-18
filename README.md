@@ -6,12 +6,18 @@
 
 **你的私人、端侧 AI Agent（本仓库是 OpenMinis 的 Linux 沙箱 Android 分支）。**
 
-> **Minis Ultra** — `applicationId` `com.openminis.linux`，当前 **1.17-linux** / versionCode 29，可与官方 OpenMinis 并排安装。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。主机 `su`、工具链（`minis-dev-setup`）、POSIX `/sdcard` 挂载、Ubuntu 24.04 PRoot 客户机见 [LINUX.md](LINUX.md)。多智能体调度见设置 → 多智能体（`minis://settings/multi-agent`）。中国大陆编译 Android SDK / 切勿覆盖 aarch64 aapt2 见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。中文发行说明见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
+> **Minis Ultra** — `applicationId` `com.openminis.linux`，当前 **1.19-linux** / versionCode 31，可与官方 OpenMinis 并排安装。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。主机 `su`、工具链（`minis-dev-setup`）、POSIX `/sdcard` 挂载、Ubuntu 24.04 PRoot 客户机见 [LINUX.md](LINUX.md)。多智能体调度见设置 → 多智能体（`minis://settings/multi-agent`）。签名与 libunwind 见 [docs/SIGNING.md](docs/SIGNING.md)。中国大陆编译 Android SDK / 切勿覆盖 aarch64 aapt2 见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。中文发行说明见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ## 下载
 
-- **本版发行包**：[Releases `1.17-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.17-linux) → `minis-ultra-com.openminis.linux.apk`
+- **本版发行包（1.19-linux / versionCode 31）**：[Releases `1.19-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.19-linux) → `minis-ultra-com.openminis.linux.apk`
 - **滚动构建**：[Releases `android-latest`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest)（main 每次成功构建都会覆盖）
+
+侧载前允许「安装未知应用」。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本，见 [docs/SIGNING.md](docs/SIGNING.md)。
+
+### 1.19 要点
+
+主机反向事件通道、动态通知按钮、任务级模型改道、沙箱长任务保活、`http_proxy` 流量日志/一键切断（无 VpnService）、新设备 WebDAV 恢复向导、机内自编译入口、aarch64 一键脚本。完整说明：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 OpenMinis brings leading models — Claude, GPT, Gemini and more — into a native
 mobile experience, and gives them a real computer to work with: a full Linux
@@ -31,7 +37,7 @@ Official website: **[openminis.app](https://openminis.app)**
   <img alt="Download on the App Store" height="48" src="assets/badge-appstore.svg" />
 </a>
 &nbsp;
-<a href="https://github.com/OpenMinis/OpenMinis/releases">
+<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.19-linux">
   <img alt="Get the APK on GitHub" height="48" src="assets/badge-android.svg" />
 </a>
 
@@ -44,7 +50,7 @@ Official website: **[openminis.app](https://openminis.app)**
 | | |
 |---|---|
 | **Bring your own model** | Claude, GPT, Gemini and other providers, via your own API keys or account sign-in. |
-| **A real Linux shell** | A sandboxed Alpine Linux environment runs on-device — the agent can install packages, run scripts, and work with real files. |
+| **A real Linux shell** | A sandboxed Ubuntu 24.04 environment (PRoot) runs on-device — the agent can install packages, run scripts, and work with real files. |
 | **Device integration** | Health, Calendar, Reminders, Contacts, HomeKit, Bluetooth, Clipboard, Media, Alarms and more, exposed to the agent as tools. |
 | **Browser automation** | The agent can browse and interact with the web on your behalf. |
 | **Skills & memory** | Extensible skills plus persistent memory across sessions. |

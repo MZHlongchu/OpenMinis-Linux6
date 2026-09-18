@@ -77,6 +77,8 @@ object ExecutionCoordinator {
         timeout: Long = 600_000L,
         lineCallback: ((String) -> Unit)? = null
     ): CommandResult {
+        SandboxJobKeepAlive.onStart(appContext, sessionId, command)
+        try {
         // ConcurrentHashMap.getOrPut is not atomic, use putIfAbsent pattern
         val mutex = mutexes.getOrPut(sessionId) { Mutex() }
 
@@ -96,7 +98,7 @@ object ExecutionCoordinator {
 
             // Get or create shell — protected by globalLock to avoid duplicate creation
             val shell = getOrCreateShell(sessionId)
-            recordLastCommand(command)
+            recordLastCommand(sessionId, command)
 
             // Inject user-defined environment variables as a *full snapshot*
             // (T124a). Pass the previously-injected key set so applyEnvironment
@@ -127,10 +129,14 @@ object ExecutionCoordinator {
             CommandResult(output = output, exitCode = exitCode, durationMs = durationMs)
         }
         }
+        } finally {
+            SandboxJobKeepAlive.onEnd(appContext, sessionId)
+        }
     }
 
 
-    private fun recordLastCommand(command: String) {
+    private fun recordLastCommand(sessionId: String, command: String) {
+        if (sessionId.startsWith("__") || sessionId == "self-build") return
         if (!SandboxNotifyActions.shouldRecordLastCommand(command)) return
         val host = PRootKernel.resolveHostPath(SandboxNotifyActions.LAST_CMD_GUEST_PATH) ?: return
         try {

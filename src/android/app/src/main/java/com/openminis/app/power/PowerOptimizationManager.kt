@@ -61,17 +61,22 @@ object PowerOptimizationManager {
      * Returns true if an Activity was launched, false if no settings
      * page was available on this device.
      */
-    fun requestBatteryOptimizationExemption(activity: Activity): Boolean {
+    fun requestBatteryOptimizationExemption(activity: Activity): Boolean =
+        requestBatteryOptimizationExemptionFromContext(activity)
+
+    fun requestBatteryOptimizationExemptionFromContext(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
 
         val direct = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-            .setData(Uri.parse("package:${activity.packageName}"))
-        if (tryStartActivity(activity, direct)) {
+            .setData(Uri.parse("package:${context.packageName}"))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (tryStartActivity(context, direct)) {
             AppLogger.info(TAG, "battery-opt direct dialog launched")
             return true
         }
         val list = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-        if (tryStartActivity(activity, list)) {
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (tryStartActivity(context, list)) {
             AppLogger.info(TAG, "battery-opt list page launched (fallback)")
             return true
         }
@@ -129,7 +134,10 @@ object PowerOptimizationManager {
      * (in which case the caller should fall back to the stock app
      * details page via [openAppDetailsSettings]).
      */
-    fun openOemAutostartSettings(activity: Activity): Boolean {
+    fun openOemAutostartSettings(activity: Activity): Boolean =
+        openOemAutostartSettingsFromContext(activity)
+
+    fun openOemAutostartSettingsFromContext(context: Context): Boolean {
         val candidates: List<ComponentName> = when (Vendor.current()) {
             Vendor.XIAOMI -> listOf(
                 // MIUI 12+
@@ -164,7 +172,7 @@ object PowerOptimizationManager {
                 this.component = component
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            if (tryStartActivity(activity, intent)) {
+            if (tryStartActivity(context, intent)) {
                 AppLogger.info(TAG, "OEM autostart settings launched: ${component.flattenToShortString()}")
                 return true
             }
@@ -181,8 +189,8 @@ object PowerOptimizationManager {
         return tryStartActivity(activity, intent)
     }
 
-    private fun tryStartActivity(activity: Activity, intent: Intent): Boolean = try {
-        activity.startActivity(intent)
+    private fun tryStartActivity(context: Context, intent: Intent): Boolean = try {
+        context.startActivity(intent)
         true
     } catch (_: ActivityNotFoundException) {
         false

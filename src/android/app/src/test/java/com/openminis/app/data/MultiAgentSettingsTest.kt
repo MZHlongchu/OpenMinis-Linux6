@@ -36,4 +36,20 @@ class MultiAgentSettingsTest {
         assertEquals("x", MultiAgentSettings.pickModelId(emptyList(), "x", 0))
         assertNull(MultiAgentSettings.pickModelId(emptyList(), null, 0))
     }
+
+    @Test
+    fun retainLive_dropsDeletedProviderIdsSoCapFreesUp() {
+        val stored = listOf("aa9ff554-gone", "live-a", "live-b")
+        val live = setOf("live-a", "live-b", "live-c")
+        assertEquals(listOf("live-a", "live-b"), MultiAgentSettings.retainLive(stored, live, 3))
+        assertEquals(emptyList<String>(), MultiAgentSettings.retainLive(stored, emptySet(), 3))
+    }
+
+    @Test
+    fun teamModelNames_omitsStaleIdsInsteadOfPrintingUuids() {
+        val stored = listOf("aa9ff554-gone", "live-a")
+        val names = mapOf("live-a" to "GPT")
+        assertEquals("GPT", MultiAgentSettings.teamModelNames(stored, names))
+        assertEquals("the main session model", MultiAgentSettings.teamModelNames(stored, emptyMap()))
+    }
 }

@@ -16,8 +16,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -38,10 +40,18 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
     val maxConcurrent by repo.maxConcurrent.collectAsState()
     val selectedIds by repo.selectedModelEntryIds.collectAsState()
     val config by providerRepo.config.collectAsState()
+    val configLoaded by providerRepo.configLoaded.collectAsState()
 
     val instancesById = config.instances.associateBy { it.id }
     val candidates = config.modelEntries.filter { entry ->
         !entry.isHidden && instancesById[entry.providerInstanceId]?.isEnabled == true
+    }
+    val candidateIds = remember(candidates) { candidates.map { it.id }.toSet() }
+    val liveSelectedIds = selectedIds.filter { it in candidateIds }
+    val staleCount = selectedIds.size - liveSelectedIds.size
+
+    LaunchedEffect(configLoaded, candidateIds) {
+        if (configLoaded) repo.retainLiveEntries(candidateIds)
     }
 
     SettingsScaffold(
@@ -111,10 +121,19 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                 )
             } else {
+                if (staleCount > 0) {
+                    Text(
+                        stringResource(R.string.settings_multi_agent_stale_pruned, staleCount),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
+                }
                 candidates.forEachIndexed { index, entry ->
                     val instance = instancesById[entry.providerInstanceId]
-                    val selected = entry.id in selectedIds
-                    val atCap = !selected && selectedIds.size >= maxConcurrent
+                    val selected = entry.id in liveSelectedIds
+                    val atCap = !selected && liveSelectedIds.size >= maxConcurrent
+                    val rowEnabled = enabled && (selected || !atCap)
                     val label = buildString {
                         append(entry.model.displayName)
                         instance?.label?.takeIf { it.isNotBlank() }?.let { append(" · ").append(it) }
@@ -122,18 +141,16 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable(enabled = enabled && (selected || !atCap)) {
-                                if (enabled) repo.toggleModelEntry(entry.id)
+                            .clickable(enabled = rowEnabled) {
+                                repo.toggleModelEntry(entry.id, candidateIds)
                             }
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Checkbox(
                             checked = selected,
-                            onCheckedChange = {
-                                if (enabled) repo.toggleModelEntry(entry.id)
-                            },
-                            enabled = enabled && (selected || !atCap),
+                            onCheckedChange = null,
+                            enabled = rowEnabled,
                         )
                         Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                             Text(label, style = MaterialTheme.typography.bodyLarge)

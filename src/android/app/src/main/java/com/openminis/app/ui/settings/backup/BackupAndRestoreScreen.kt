@@ -794,6 +794,29 @@ private fun RestoreTab(
     }
 
     if (pending == null) {
+        SettingsSection(
+            header = stringResource(R.string.backup_restore_wizard_header),
+            footer = stringResource(R.string.backup_restore_wizard_footer),
+        ) {
+            Text(
+                stringResource(R.string.backup_restore_wizard_step1),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+            Text(
+                stringResource(R.string.backup_restore_wizard_step2),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+            Text(
+                stringResource(R.string.backup_restore_wizard_step3),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+            MinisButton(
+                onClick = onChooseRestoreServer,
+                modifier = Modifier.padding(16.dp),
+            ) {
+                Text(stringResource(R.string.backup_restore_wizard_start))
+            }
+        }
         // [T-android-restore-destinations] The configured destinations, listed
         // here rather than hidden behind a picker dialog. iOS shows them on
         // the restore screen for the obvious reason: the backup a user wants

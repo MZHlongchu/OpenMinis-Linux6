@@ -52,8 +52,25 @@ class MultiAgentSettingsRepository(context: Context) {
         writeSelectedIds(trimmed)
     }
 
-    fun toggleModelEntry(id: String) {
-        val current = _selectedModelEntryIds.value
+    /**
+     * Drop ids that are no longer selectable (deleted provider, hidden model,
+     * disabled instance). No-op when the live set is unchanged.
+     */
+    fun retainLiveEntries(liveIds: Set<String>) {
+        val next = MultiAgentSettings.retainLive(
+            _selectedModelEntryIds.value,
+            liveIds,
+            _maxConcurrent.value,
+        )
+        if (next != _selectedModelEntryIds.value) writeSelectedIds(next)
+    }
+
+    fun toggleModelEntry(id: String, liveIds: Set<String>? = null) {
+        val current = if (liveIds == null) {
+            _selectedModelEntryIds.value
+        } else {
+            MultiAgentSettings.retainLive(_selectedModelEntryIds.value, liveIds, _maxConcurrent.value)
+        }
         val next = if (id in current) {
             current.filter { it != id }
         } else {
@@ -102,6 +119,20 @@ object MultiAgentSettings {
     fun trimSelected(ids: List<String>, max: Int): List<String> {
         val cap = clampConcurrent(max)
         return ids.filter { it.isNotBlank() }.distinct().take(cap)
+    }
+
+    /** Keep only ids that still exist in [liveIds], then re-apply the concurrency cap. */
+    fun retainLive(stored: List<String>, liveIds: Set<String>, max: Int): List<String> {
+        return trimSelected(stored.filter { it in liveIds }, max)
+    }
+
+    /**
+     * Labels for the system-prompt "Team models:" line. Stale ids (deleted
+     * providers) are omitted instead of printing raw UUIDs.
+     */
+    fun teamModelNames(stored: List<String>, liveNamesById: Map<String, String>): String {
+        val names = stored.mapNotNull { id -> liveNamesById[id]?.takeIf { it.isNotBlank() } }
+        return if (names.isEmpty()) "the main session model" else names.joinToString(", ")
     }
 
     /**

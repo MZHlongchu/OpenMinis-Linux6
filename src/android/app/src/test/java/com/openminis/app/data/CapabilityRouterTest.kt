@@ -3,6 +3,7 @@ package com.openminis.app.data
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ModelEntry
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CapabilityRouterTest {
@@ -50,5 +51,19 @@ class CapabilityRouterTest {
     fun `neededForImages`() {
         assertEquals(emptySet<ModelCapability>(), CapabilityRouter.neededForImages(false))
         assertEquals(setOf(ModelCapability.IMAGE_INPUT), CapabilityRouter.neededForImages(true))
+    }
+
+    @Test
+    fun `neededForTask infers image from text`() {
+        val need = CapabilityRouter.neededForTask("请识图这张截图", hasImage = false)
+        assertEquals(setOf(ModelCapability.IMAGE_INPUT), need)
+    }
+
+    @Test
+    fun `decide exposes reason when pool has no vision`() {
+        val a = entry("a", "text")
+        val d = CapabilityRouter.decide(listOf(a), setOf(ModelCapability.IMAGE_INPUT), "a")
+        assertEquals(listOf("a"), d.members.map { it.id })
+        assertTrue(d.reason!!.contains("no group member"))
     }
 }

@@ -59,6 +59,11 @@
     <string name="check_update_install_launch_failed">Failed to launch installer. Check \"install unknown apps\" permission or open the downloaded APK manually.</string>
     <string name="check_update_install_hint">Tip: If installation gives no feedback, the signature may not match — uninstall the previous version first, then download again.</string>
     <string name="check_update_open_install_settings">Open Settings</string>
+    <string name="check_update_self_build">Build APK in sandbox (experimental)</string>
+    <string name="check_update_self_build_sub">Needs multi-GB disk, NDK/SDK, and user confirmation. Debug-signed APKs cannot replace a differently signed install.</string>
+    <string name="check_update_self_build_confirm_title">Run in-device self-build?</string>
+    <string name="check_update_self_build_confirm_body">This is experimental. It can download multi-GB toolchains into the sandbox and will not produce an APK that replaces a Play/CI-signed install (certificate mismatch). Overlay Stop still cancels the job.</string>
+    <string name="check_update_self_build_run">Run minis-self-build</string>
 
     <!-- Permissions (Settings → Permissions) -->
     <string name="permissions_title">Permissions</string>
@@ -182,6 +187,7 @@
     <string name="settings_multi_agent_section_models">Team models</string>
     <string name="settings_multi_agent_footer_models">Select up to %1$d models (linked to the concurrency cap). Sub-agents round-robin this pool unless a call names a model. Leave empty to reuse the main session model.</string>
     <string name="settings_multi_agent_no_models">No enabled models yet. Add a provider first.</string>
+    <string name="settings_multi_agent_stale_pruned">Dropped %1$d team-model picks whose providers no longer exist. Select again.</string>
     <string name="settings_memory">Memory</string>
     <string name="settings_memory_subtitle">Persistent knowledge across sessions</string>
     <!-- [T-mcp-integration-android] MCP Integrations settings entry + management screen -->
@@ -1495,6 +1501,12 @@
     <string name="backup_choose_file_footer">Pick a .minisbak file from Files, Drive, or any connected storage.</string>
     <string name="backup_restore_destinations">Backup Destinations</string>
     <string name="backup_restore_destinations_footer">Tap a destination to browse it and pick a backup.</string>
+    <string name="backup_restore_wizard_header">New device restore</string>
+    <string name="backup_restore_wizard_footer">Three steps: pick a WebDAV/server, tick sessions / memory / skills, then restore with the passphrase.</string>
+    <string name="backup_restore_wizard_step1">1. Choose WebDAV or a backup server</string>
+    <string name="backup_restore_wizard_step2">2. Tick sessions, memory, and skills</string>
+    <string name="backup_restore_wizard_step3">3. Enter the passphrase and restore</string>
+    <string name="backup_restore_wizard_start">Start from server…</string>
     <string name="backup_restore_other_sources">Other Sources</string>
     <string name="backup_choose_server">Choose from Server…</string>
     <string name="backup_server_title">Restore from Server</string>

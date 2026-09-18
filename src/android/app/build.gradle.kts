@@ -36,8 +36,8 @@ android {
         applicationId = "com.openminis.linux"
         minSdk = 26
         targetSdk = 35
-        versionCode = 29
-        versionName = "1.17-linux"
+        versionCode = 31
+        versionName = "1.19-linux"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -68,6 +68,19 @@ android {
         }
     }
 
+    val uploadStorePath = System.getenv("MINIS_UPLOAD_STORE_FILE")
+    val hasUploadKeystore = !uploadStorePath.isNullOrBlank() && file(uploadStorePath).isFile
+    signingConfigs {
+        if (hasUploadKeystore) {
+            create("releaseUpload") {
+                storeFile = file(uploadStorePath!!)
+                storePassword = System.getenv("MINIS_UPLOAD_STORE_PASSWORD") ?: ""
+                keyAlias = System.getenv("MINIS_UPLOAD_KEY_ALIAS") ?: ""
+                keyPassword = System.getenv("MINIS_UPLOAD_KEY_PASSWORD") ?: ""
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -75,7 +88,13 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            // Debug-signed APKs cannot replace a differently signed install
+            // (UpdateChecker 1.17). Use MINIS_UPLOAD_* env when a real keystore exists.
+            signingConfig = if (hasUploadKeystore) {
+                signingConfigs.getByName("releaseUpload")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 

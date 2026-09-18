@@ -188,9 +188,8 @@ object PRootKernel {
         // were known at app launch.
         applyMountedFoldersSnapshot(context)
 
-        HostStatusPublisher.start(context, rootfsManager.rootfsDir)
-
         isBooted = true
+        HostStatusPublisher.start(context, rootfsManager.rootfsDir)
         Log.i(TAG, "PRoot kernel booted " +
             "rootfs=${rootfsManager.rootfsDir.absolutePath} " +
             "nativeLibDir=$nativeLibDir " +
@@ -642,7 +641,7 @@ object PRootKernel {
      * [ExecutionCoordinator.broadcastProxyChange].
      */
     fun updateProxy(context: Context): Map<String, String> {
-        val env = systemProxyEnv(context)
+        val env = SandboxHttpProxy.envBlock() ?: systemProxyEnv(context)
         customEnvironment.putAll(env)
         val hasProxy = env["http_proxy"].orEmpty().isNotEmpty()
         Log.i(TAG, "Updated proxy — ${if (hasProxy) "active=${env["http_proxy"]}" else "cleared"}")

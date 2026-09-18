@@ -1,0 +1,16 @@
+#!/bin/sh
+# Experimental in-device APK rebuild. Needs huge free space, NDK/SDK, and
+# produces an APK that will NOT replace a Play/CI-signed install (cert mismatch).
+set -eu
+echo "minis-self-build: experimental — confirm this is what you want."
+echo "This does not fetch the OpenMinis source tree automatically."
+echo "If ANDROID_HOME / NDK are missing, install via minis-android-sdk-setup first."
+echo "Signature: debug-signed APKs will fail UpdateChecker / PackageManager replace."
+if [ ! -d /opt/android-sdk ] && [ -z "${ANDROID_HOME:-}" ]; then
+  echo "hint: run minis-android-sdk-setup  (multi-GB download)"
+fi
+if [ -x /usr/local/bin/minis-android-sdk-setup ]; then
+  echo "sdk helper: /usr/local/bin/minis-android-sdk-setup"
+fi
+echo "done (no APK built — source tree not mounted). See Settings → App Update."
+exit 0

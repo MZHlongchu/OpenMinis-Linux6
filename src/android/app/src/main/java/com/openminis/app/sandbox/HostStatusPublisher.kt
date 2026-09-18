@@ -26,12 +26,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  * scripts can `cat` host extras (temperature, free storage, fg/bg, wakelock)
  * without walking `ubuntu-rootfs` and without a NativeOffload round-trip.
  *
- * Refreshed every [INTERVAL_MS]. Uses StatFs only — never recursive dirSize.
+ * Refreshed on host events plus a [INTERVAL_MS] heartbeat. Uses StatFs only — never recursive dirSize.
  */
 object HostStatusPublisher {
 
     private const val TAG = "HostStatusPublisher"
-    private const val INTERVAL_MS = 30_000L
+    private const val INTERVAL_MS = 60_000L
     private const val RELATIVE_PATH = "run/minis-host-status.json"
 
     private val started = AtomicBoolean(false)
@@ -41,6 +41,10 @@ object HostStatusPublisher {
 
     fun start(context: Context, rootfsDir: File) {
         writeOnce(context, rootfsDir)
+        HostEventHooks.init(context)
+        HostEventBridge.start(context, rootfsDir)
+        SandboxJobKeepAlive.writeResumeHint(context, rootfsDir)
+        SandboxFirewall.syncHttpProxy(context)
         if (!started.compareAndSet(false, true)) return
         val app = context.applicationContext
         job = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
@@ -62,6 +66,14 @@ object HostStatusPublisher {
             if (!tmp.renameTo(target)) {
                 target.writeText(json)
                 tmp.delete()
+            }
+            val procJson = ProcfsSnapshot.snapshot().toString()
+            val procTarget = File(runDir, "minis-proc.json")
+            val procTmp = File(runDir, "minis-proc.json.tmp")
+            procTmp.writeText(procJson)
+            if (!procTmp.renameTo(procTarget)) {
+                procTarget.writeText(procJson)
+                procTmp.delete()
             }
         } catch (t: Throwable) {
             Log.w(TAG, "write failed: ${t.message}")
@@ -96,6 +108,19 @@ object HostStatusPublisher {
         } catch (t: Throwable) {
             json.put("storage_error", t.message ?: "StatFs unavailable")
         }
+        json.put("event_log", "/run/android-events.jsonl")
+        json.put("http_proxy", SandboxHttpProxy.envBlock()?.get("http_proxy") ?: JSONObject.NULL)
+        json.put("firewall", SandboxFirewall.snapshot(context))
+        json.put("doze", DozeSnapshot.json(context))
+        val proc = ProcfsSnapshot.snapshot()
+        json.put(
+            "proc",
+            JSONObject()
+                .put("self_pid", proc.opt("self_pid"))
+                .put("self_uid", proc.opt("self_uid"))
+                .put("readable_count", proc.opt("readable_count"))
+                .put("hidepid", proc.opt("hidepid")),
+        )
         return json
     }
 }

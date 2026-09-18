@@ -4809,10 +4809,13 @@ class ChatViewModel(
         // enabledMemberEntries (still used by the settings UI) deliberately
         // does not — "switched on" is the right question there, "usable right
         // now" is the right question here.
-        val available = CapabilityRouter.pickMembers(
+        val decision = CapabilityRouter.decide(
             providerRepository.availableMemberEntries(group),
             needed,
+            preferredEntryId,
         )
+        decision.reason?.let { SessionActivityTracker.updateToolStatus(it.take(80)) }
+        val available = decision.members
         if (available.isEmpty()) return false
 
         // preferredEntryId comes from a prior session binding ("user picked
@@ -6508,7 +6511,10 @@ class ChatViewModel(
         val currentAttachments = _attachments.value
         val groupIdForCaps = _selectedGroupId.value
         if (!groupIdForCaps.isNullOrBlank()) {
-            val neededCaps = CapabilityRouter.neededForImages(currentAttachments.any { it.isImage })
+            val neededCaps = CapabilityRouter.neededForTask(
+                trimmed,
+                currentAttachments.any { it.isImage },
+            )
             resolveProviderFromGroup(
                 groupIdForCaps,
                 _activeEntryId.value,
@@ -10291,14 +10297,10 @@ class ChatViewModel(
         }
         val toolListSubAgentBullet = if (multiAgentSettings.enabled.value) {
             val pool = multiAgentSettings.selectedModelEntryIds.value
-            val names = if (pool.isEmpty()) {
-                "the main session model"
-            } else {
-                val cfg = providerRepository.config.value
-                pool.map { id ->
-                    cfg.modelEntries.find { it.id == id }?.model?.displayName ?: id
-                }.joinToString(", ")
-            }
+            val names = MultiAgentSettings.teamModelNames(
+                pool,
+                providerRepository.config.value.modelEntries.associate { it.id to it.model.displayName },
+            )
             val cap = multiAgentSettings.maxConcurrent.value
             "\n- run_subagent: Dispatch a teammate. You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Each prompt MUST be self-contained (goal, workspace paths, relevant files, constraints, acceptance criteria) because sub-agents cannot see this conversation. Note the member role and skills to read. Independent work: emit multiple run_subagent calls in ONE turn (they run in parallel, cap=" + cap + "). Dependent phases: finish and accept before starting the next. After a teammate returns, verify against acceptance criteria; if it fails, name the gap and re-dispatch. Each member may only change their assigned files. Team models: " + names + ". Settings: minis://settings/multi-agent"
         } else {
@@ -10324,7 +10326,7 @@ Memory system (currently DISABLED):
 - If the user asks why earlier memories aren't visible, or asks you to save something, tell them memory is currently disabled and point them at the /memory slash command or [Settings → Memory](minis://settings/memory) to re-enable it.
 - SOUL.md (personality / identity) is unaffected by this toggle; the persona section above still applies."""
         }
-        val base = identitySection + """You should proactively use shell commands to accomplish the user's tasks — installing packages (`apt-get install -y` or the `yum`/`dnf` apt shims), writing and running scripts, compiling with gcc, and any other operations a Linux terminal can perform. Guest is Ubuntu 24.04 arm64 (glibc) under PRoot with bash. For gcc/python3/git/ffmpeg/jdk/gradle run `minis-dev-setup` once. For Android SDK run `minis-android-sdk-setup` (aarch64 aapt2 and Java sdkmanager are bundled; sdkmanager fetches android-35/36 android.jar; CMake 3.22.1 and NDK r28+ must be aarch64 — never Google linux x86_64 packages). If apt/dpkg fails creating temp files, TMPDIR must be /tmp not the Android cache dir; run `minis-dev-setup` to install ca-certificates and repair broken deps. Privileged host commands: prefer `su -c` / `android-su` (Magisk/KernelSU); if host su is missing or denied, the same command falls back to Shizuku automatically. Keep using `android-shizuku-cli` for Shizuku-only Android APIs.
+        val base = identitySection + """You should proactively use shell commands to accomplish the user's tasks — installing packages (`apt-get install -y` or the `yum`/`dnf` apt shims), writing and running scripts, compiling with gcc, and any other operations a Linux terminal can perform. Guest is Ubuntu 24.04 arm64 (glibc) under PRoot with bash. For gcc/python3/git/ffmpeg/jdk/gradle run `minis-dev-setup` once. For Android SDK run `minis-android-sdk-setup` (aarch64 aapt2 and Java sdkmanager are bundled; sdkmanager fetches android-35/36 android.jar; CMake 3.22.1 and NDK r28+ must be aarch64 — never Google linux x86_64 packages). If apt/dpkg fails creating temp files, TMPDIR must be /tmp not the Android cache dir; run `minis-dev-setup` to install ca-certificates and repair broken deps. Privileged host commands: prefer `su -c` / `android-su` (Magisk/KernelSU); if host su is missing or denied, the same command falls back to Shizuku automatically. Keep using `android-shizuku-cli` for Shizuku-only Android APIs. Host extras (no LSPosed): `minis-firewall status|set allow|wifi-only|deny` (optional `--strict` binds the process to Wi-Fi; uid DROP is not auto-applied because it would kill the LLM), `minis-doze status|request`, `minis-ps`; `cat /run/minis-host-status.json` and `/run/minis-proc.json`. Guest `/proc` is Android hidepid — other UIDs are invisible.
 
 Available tools:
 - shell_execute: Run any shell command. Each invocation is an isolated process with stdout/stderr captured. Prefer this for most tasks — it is a real Linux environment with persistent filesystem. Common tools (python3, pip, curl, wget, git, ssh, etc.) can be installed via `apt-get install -y`; Python packages via pip install. Use `which <cmd>` to check if a tool is already installed before running apt-get — many packages persist across sessions. When you need to wait before checking results (e.g. polling, waiting for a process), use the `delay` parameter instead of `sleep` in the command — delay blocks the agent flow without occupying the shell, so other concurrent tasks can use it during the wait. This avoids resource contention. Execution discipline for long-running or dispatched work: make tool calls immediately instead of describing intentions, and keep working until the task is complete. Without a scheduler or timed-callback tool, `delay` is your ONLY wait mechanism within a turn — to follow up on something still running, chain delay-then-check calls at a task-appropriate interval until you have the result or hit a sensible retry cap. NEVER end a turn with a promise of future action: 'I'll keep monitoring', 'will sync the result later', and ending right after a single still-running status check with 'let's keep waiting' are all the same violation — once your turn ends, NOTHING runs until the user's next message. If polling to completion is genuinely not worth blocking the turn, close honestly instead: state that the task keeps running in the background, that you will only learn its outcome when the user next messages (or they ask you to check), and — if something must fire on a schedule beyond this conversation — point them to the options under 'Scheduled tasks' later in this prompt (native alarm reminder or a system-level schedule; those notify the USER, they do not wake you).
@@ -12586,7 +12588,11 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         val mainMax = (mainEntry?.model?.maxOutputTokens ?: currentModel?.maxOutputTokens ?: 4096).coerceIn(256, 8192)
         val mainMember = PlanDiscussionOrchestrator.Member(mainName, "facilitator", provider, mainMax)
         val stances = listOf("architect", "skeptic", "implementer", "operator")
-        val pool = multiAgentSettings.selectedModelEntryIds.value
+        val pool = MultiAgentSettings.retainLive(
+            multiAgentSettings.selectedModelEntryIds.value,
+            config.modelEntries.map { it.id }.toSet(),
+            multiAgentSettings.maxConcurrent.value,
+        )
         val members = mutableListOf<PlanDiscussionOrchestrator.Member>()
         if (pool.isNotEmpty()) {
             pool.forEachIndexed { i, id ->
@@ -12709,9 +12715,13 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         val skills = args.optString("skills", "").trim().ifEmpty { null }
         val requested = args.optString("model", "").trim().ifEmpty { null }
         val title = args.optString("tool_title", "").trim()
-        val pool = multiAgentSettings.selectedModelEntryIds.value
-        val pickedId = MultiAgentSettings.pickModelId(pool, requested, subAgentRoundRobin.getAndIncrement())
         val config = providerRepository.config.value
+        val pool = MultiAgentSettings.retainLive(
+            multiAgentSettings.selectedModelEntryIds.value,
+            config.modelEntries.map { it.id }.toSet(),
+            multiAgentSettings.maxConcurrent.value,
+        )
+        val pickedId = MultiAgentSettings.pickModelId(pool, requested, subAgentRoundRobin.getAndIncrement())
         val entry = when {
             pickedId != null -> config.modelEntries.find {
                 it.id == pickedId ||

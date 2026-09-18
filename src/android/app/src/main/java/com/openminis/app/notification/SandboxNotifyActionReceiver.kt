@@ -21,7 +21,7 @@ class SandboxNotifyActionReceiver : BroadcastReceiver() {
         if (intent.action != SandboxNotifyActions.ACTION) return
         val sessionId = intent.getStringExtra(SandboxNotifyActions.EXTRA_SESSION_ID).orEmpty()
         val action = intent.getStringExtra(SandboxNotifyActions.EXTRA_ACTION).orEmpty()
-        val command = SandboxNotifyActions.commandFor(action)
+        val command = SandboxNotifyActions.commandFor(action, context)
         if (sessionId.isBlank() || command == null) {
             AppLogger.warning(TAG, "ignored action=$action sessionBlank=${sessionId.isBlank()}")
             return
