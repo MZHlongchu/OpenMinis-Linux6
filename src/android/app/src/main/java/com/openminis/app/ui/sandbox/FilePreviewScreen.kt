@@ -93,7 +93,7 @@ import java.io.File
 import java.io.OutputStream
 import com.openminis.app.ui.components.MinisTextButton
 
-private const val MAX_TEXT_PREVIEW_BYTES = 512_000 // 500 KB
+private const val MAX_TEXT_PREVIEW_BYTES = 512_000 // 500 KB; markdown compose splits at BoundedText.MAX_COMPOSE_BLOCK_CHARS
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

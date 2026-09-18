@@ -106,7 +106,6 @@ private fun BlockContent(
     baseStyle: TextStyle,
     mathSpans: List<MarkdownParser.MathSpan> = emptyList(),
 ) {
-    android.util.Log.d("MdRender", "BlockContent: ${block::class.simpleName}")
     when (block) {
         is MarkdownParser.Block.Heading -> HeadingBlock(block, color)
         is MarkdownParser.Block.Paragraph -> ParagraphBlock(block.content, color, baseStyle, mathSpans)
@@ -700,7 +699,6 @@ private fun resolveMediaFile(url: String): File? {
         else -> null
     }
     val ok = hostFile?.let { it.exists() && it.isFile } == true
-    android.util.Log.d("MdMedia", "resolveMediaFile url=$url -> host=${hostFile?.absolutePath} exists=$ok")
     return hostFile?.takeIf { ok }
 }
 
@@ -718,7 +716,6 @@ private fun filenameFromUrl(url: String): String {
  * bundling ExoPlayer for a fullscreen experience.
  */
 private fun openMediaExternally(context: Context, file: File, mime: String) {
-    android.util.Log.d("MdMedia", "openMediaExternally file=${file.absolutePath} mime=$mime")
     val authority = context.packageName + ".fileprovider"
     val uri = try {
         androidx.core.content.FileProvider.getUriForFile(context, authority, file)
@@ -760,7 +757,6 @@ private fun MinisImageBlock(block: MarkdownParser.Block.Image) {
 
 @Composable
 private fun MinisVideoBlock(block: MarkdownParser.Block.Video) {
-    android.util.Log.d("MdMedia", "MinisVideoBlock url=${block.url} alt=${block.alt}")
     val context = LocalContext.current
     val file = remember(block.url) { resolveMediaFile(block.url) }
     val filename = remember(block.url) { filenameFromUrl(block.url) }
@@ -771,7 +767,6 @@ private fun MinisVideoBlock(block: MarkdownParser.Block.Video) {
     // Generate a thumbnail frame off the main thread via MediaMetadataRetriever.
     val thumbnail by produceState<Bitmap?>(initialValue = null, key1 = file?.absolutePath) {
         val f = file ?: run {
-            android.util.Log.d("MdMedia", "video thumbnail skipped (no file)")
             value = null
             return@produceState
         }
@@ -780,7 +775,6 @@ private fun MinisVideoBlock(block: MarkdownParser.Block.Video) {
             try {
                 retriever.setDataSource(f.absolutePath)
                 val bmp = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                android.util.Log.d("MdMedia", "video thumbnail for ${f.name} -> ${bmp?.width}x${bmp?.height}")
                 bmp
             } catch (t: Throwable) {
                 android.util.Log.w("MdMedia", "video thumbnail failed: ${t.message}")

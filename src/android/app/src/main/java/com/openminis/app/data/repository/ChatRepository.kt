@@ -715,8 +715,13 @@ class ChatRepository(internal val dao: ChatDao) {
     }
 
     companion object {
+        // Session-list preview only needs ~100 chars. Regex.replace on a
+        // 500 KB parts_json body was a leftover ICU Matcher.reset path.
+        private const val PREVIEW_CLEAN_CHARS = 400
+
         private fun cleanPreview(raw: String): String {
-            return stripSystemReminders(raw)
+            val src = if (raw.length <= PREVIEW_CLEAN_CHARS) raw else raw.take(PREVIEW_CLEAN_CHARS)
+            return stripSystemReminders(src)
                 .replace(Regex("[\r\n]+"), " ")      // newlines → space
                 .replace(Regex("#{1,6}\\s"), "")      // headings: ## Title → Title
                 .replace(Regex("\\*{1,3}|_{1,3}"), "")// bold/italic markers

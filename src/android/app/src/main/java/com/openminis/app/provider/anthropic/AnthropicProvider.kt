@@ -188,6 +188,7 @@ class AnthropicProvider(
         var currentToolId: String? = null
         var currentToolName: String? = null
         val toolInputBuffer = StringBuilder()
+        var lastSentToolInputLen = 0
 
         try {
             var line: String?
@@ -217,6 +218,7 @@ class AnthropicProvider(
                             currentToolId = contentBlock.safeOptString("id", "")
                             currentToolName = contentBlock.safeOptString("name", "")
                             toolInputBuffer.clear()
+                            lastSentToolInputLen = 0
                             android.util.Log.d("ToolChain[Provider]", "→ ToolUseStart id=$currentToolId name=$currentToolName")
                             send(LLMStreamChunk.ToolUseStart(currentToolId!!, currentToolName!!))
                         }
@@ -237,10 +239,13 @@ class AnthropicProvider(
                                 if (partial.isNotEmpty() && currentToolId != null) {
                                     toolInputBuffer.append(partial)
                                     val n = toolInputBuffer.length
-                                    if (com.openminis.app.text.BoundedText.shouldLogLengthStride(n)) {
-                                        android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=$currentToolId accumulated=${n}chars")
+                                    if (com.openminis.app.text.BoundedText.shouldCommitLengthStride(n, lastSentToolInputLen)) {
+                                        lastSentToolInputLen = n
+                                        if (com.openminis.app.text.BoundedText.shouldLogLengthStride(n)) {
+                                            android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=$currentToolId accumulated=${n}chars")
+                                        }
+                                        send(LLMStreamChunk.ToolInputDelta(currentToolId!!, toolInputBuffer.toString()))
                                     }
-                                    send(LLMStreamChunk.ToolInputDelta(currentToolId!!, toolInputBuffer.toString()))
                                 }
                             }
                         }
@@ -257,6 +262,7 @@ class AnthropicProvider(
                             currentToolId = null
                             currentToolName = null
                             toolInputBuffer.clear()
+                            lastSentToolInputLen = 0
                         }
                     }
                     "message_delta" -> {

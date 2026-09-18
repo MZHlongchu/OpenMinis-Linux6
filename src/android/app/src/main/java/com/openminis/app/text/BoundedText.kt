@@ -34,6 +34,13 @@ object BoundedText {
     /** ToolInputDelta logcat stride (chars of accumulated JSON). */
     const val TOOL_INPUT_DELTA_LOG_STRIDE = 2_048
 
+    /**
+     * Max chars in one Compose `Text` / markdown block. A 512 KB file preview
+     * (or an expanded fence) must still parse, but a single Paragraph of that
+     * size will stall measure on the UI thread.
+     */
+    const val MAX_COMPOSE_BLOCK_CHARS = 8_192
+
     /** Extra room for ERROR/WARN after the daily file hits [MAX_LOG_FILE_BYTES]. */
     const val MAX_LOG_OVERFLOW_BYTES = 512L * 1024
 
@@ -116,6 +123,41 @@ object BoundedText {
         if (length <= 64) return true
         if (stride <= 0) return false
         return length % stride < 32
+    }
+
+    /**
+     * Snapshot accumulated tool JSON only when it grows across a 2 KB bucket
+     * (plus every growth in the first 64 chars, so `tool_title` still lands).
+     * Avoids `StringBuilder.toString()` on every SSE token — that copy is
+     * O(n) per token, O(n²) over a large file_write.
+     */
+    fun shouldCommitLengthStride(
+        length: Int,
+        lastCommitted: Int,
+        stride: Int = TOOL_INPUT_DELTA_LOG_STRIDE,
+    ): Boolean {
+        if (length <= lastCommitted) return false
+        if (lastCommitted == 0 || length <= 64) return true
+        if (stride <= 0) return true
+        return length / stride > lastCommitted / stride
+    }
+
+    /** Split a huge paragraph/code body so LazyColumn can compose viewport chunks. */
+    fun splitForCompose(text: String, maxChars: Int = MAX_COMPOSE_BLOCK_CHARS): List<String> {
+        if (text.length <= maxChars) return listOf(text)
+        val out = ArrayList<String>((text.length + maxChars - 1) / maxChars)
+        var i = 0
+        while (i < text.length) {
+            val end = minOf(i + maxChars, text.length)
+            var cut = end
+            if (end < text.length) {
+                val nl = text.lastIndexOf('\n', end - 1)
+                if (nl > i + maxChars / 2) cut = nl + 1
+            }
+            out.add(text.substring(i, cut))
+            i = cut
+        }
+        return out
     }
 
     /**

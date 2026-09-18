@@ -60,4 +60,14 @@ class ChatRepositoryTest {
         val raw = "# Heading\n**bold** and `code` and a [link](https://example.com)"
         assertEquals(raw, ChatRepository.stripSystemReminders(raw))
     }
+
+    @Test
+    fun `extractTextPreview does not regex a 200k body`() {
+        val body = "Hello world " + "x".repeat(200_000)
+        val json = """[{"type":"text","value":"$body"}]"""
+        val preview = ChatRepository.extractTextPreview(json)
+        org.junit.Assert.assertNotNull(preview)
+        org.junit.Assert.assertTrue(preview!!.length <= 100)
+        org.junit.Assert.assertTrue(preview.startsWith("Hello world"))
+    }
 }

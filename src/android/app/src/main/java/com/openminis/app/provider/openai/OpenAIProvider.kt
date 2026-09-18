@@ -894,13 +894,13 @@ class OpenAIProvider private constructor(
         }
 
         // Chat Completions: tool calls are streamed as deltas keyed by index.
-        data class ToolCallAccumulator(var id: String = "", var name: String = "", val args: StringBuilder = StringBuilder(), var started: Boolean = false)
+        data class ToolCallAccumulator(var id: String = "", var name: String = "", val args: StringBuilder = StringBuilder(), var started: Boolean = false, var lastSentArgsLen: Int = 0)
         val toolCallAccumulators = mutableMapOf<Int, ToolCallAccumulator>()
         // Responses API: function_call items are keyed by their item_id (fc_…). We store
         // the call_id separately because the agent loop needs the call_id to correlate
         // tool results, but the next request must echo back the item_id verbatim — so we
         // emit a combined "callId|fcId" identifier that splitResponsesAPIIds() unpacks.
-        data class ResponsesToolCallAccumulator(var callId: String = "", var name: String = "", val args: StringBuilder = StringBuilder(), var started: Boolean = false)
+        data class ResponsesToolCallAccumulator(var callId: String = "", var name: String = "", val args: StringBuilder = StringBuilder(), var started: Boolean = false, var lastSentArgsLen: Int = 0)
         val responsesToolCalls = mutableMapOf<String, ResponsesToolCallAccumulator>()
         // One-shot info log the first time the Responses API streams a reasoning
         // delta — useful for confirming the Thinking pipeline is wired up when
@@ -1093,8 +1093,12 @@ class OpenAIProvider private constructor(
                             val acc = responsesToolCalls[itemId]
                             if (acc != null && delta.isNotEmpty()) {
                                 acc.args.append(delta)
-                                val combined = combineResponsesAPIIds(acc.callId, itemId)
-                                send(LLMStreamChunk.ToolInputDelta(combined, acc.args.toString()))
+                                val n = acc.args.length
+                                if (com.openminis.app.text.BoundedText.shouldCommitLengthStride(n, acc.lastSentArgsLen)) {
+                                    acc.lastSentArgsLen = n
+                                    val combined = combineResponsesAPIIds(acc.callId, itemId)
+                                    send(LLMStreamChunk.ToolInputDelta(combined, acc.args.toString()))
+                                }
                             } else if (acc == null) {
                                 // Pre-T107 this branch silently dropped the entire tool call
                                 // because no accumulator was set up — leaving the model with
@@ -1355,10 +1359,13 @@ class OpenAIProvider private constructor(
                                 // Emit input delta
                                 if (acc.id.isNotEmpty() && acc.args.isNotEmpty()) {
                                     val n = acc.args.length
-                                    if (com.openminis.app.text.BoundedText.shouldLogLengthStride(n)) {
-                                        android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=${acc.id} accumulated=${n}chars")
+                                    if (com.openminis.app.text.BoundedText.shouldCommitLengthStride(n, acc.lastSentArgsLen)) {
+                                        acc.lastSentArgsLen = n
+                                        if (com.openminis.app.text.BoundedText.shouldLogLengthStride(n)) {
+                                            android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=${acc.id} accumulated=${n}chars")
+                                        }
+                                        send(LLMStreamChunk.ToolInputDelta(acc.id, acc.args.toString()))
                                     }
-                                    send(LLMStreamChunk.ToolInputDelta(acc.id, acc.args.toString()))
                                 }
                             }
                         }

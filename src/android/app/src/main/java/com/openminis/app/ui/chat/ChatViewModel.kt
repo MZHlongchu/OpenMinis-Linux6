@@ -472,7 +472,7 @@ class ChatViewModel(
         private const val COMPACT_KEEP_RECENT_USER_TURNS = 3
         /// Max per-tool-call retained `accumulated` JSON snapshots from
         /// `ToolInputDelta`. Drained on preflight failure for diagnosis.
-        private const val TOOL_INPUT_CHUNK_RING_MAX = 10
+        private const val TOOL_INPUT_CHUNK_RING_MAX = 2
         /** Auto-retry backoff schedule (seconds). Mirrors iOS retryDelays, scaled to task spec: 1s → 2s → 4s. */
         private val AUTO_RETRY_DELAYS_SEC = com.openminis.app.provider.HttpRetryAfter.DELAYS_SEC
 

@@ -98,6 +98,32 @@ class BoundedTextTest {
     }
 
     @Test
+    fun `tool input snapshot commits first growth then 2KB buckets`() {
+        assertTrue(BoundedText.shouldCommitLengthStride(1, 0))
+        assertTrue(BoundedText.shouldCommitLengthStride(20, 1))
+        assertTrue(BoundedText.shouldCommitLengthStride(64, 20))
+        assertFalse(BoundedText.shouldCommitLengthStride(80, 64))
+        assertFalse(BoundedText.shouldCommitLengthStride(2_047, 64))
+        assertTrue(BoundedText.shouldCommitLengthStride(2_048, 64))
+        assertFalse(BoundedText.shouldCommitLengthStride(2_048, 2_048))
+        assertFalse(BoundedText.shouldCommitLengthStride(3_000, 2_048))
+        assertTrue(BoundedText.shouldCommitLengthStride(4_096, 2_048))
+        assertFalse(BoundedText.shouldCommitLengthStride(50, 80))
+    }
+
+    @Test
+    fun `splitForCompose prefers newline breaks under the cap`() {
+        val a = "a".repeat(5_000) + "\n"
+        val b = "b".repeat(5_000)
+        val chunks = BoundedText.splitForCompose(a + b, maxChars = 8_192)
+        assertTrue(chunks.size >= 2)
+        assertTrue(chunks.all { it.length <= 8_192 })
+        assertEquals(a + b, chunks.joinToString(""))
+        val tiny = BoundedText.splitForCompose("hi")
+        assertEquals(listOf("hi"), tiny)
+    }
+
+    @Test
     fun `selectPrewarmFragments never adds a giant fragment`() {
         val giant = "G".repeat(BoundedText.MAX_PREWARM_FRAGMENT_CHARS + 1)
         val small = "ok"
