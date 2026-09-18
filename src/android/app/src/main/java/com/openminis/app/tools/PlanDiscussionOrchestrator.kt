@@ -45,7 +45,11 @@ object PlanDiscussionOrchestrator {
             board.append("\nRecent conversation:\n").append(conversationExcerpt.take(6000)).append("\n")
         }
 
-        onProgress("主会话正在提出实现方式…")
+        suspend fun push(status: String) {
+            onProgress(liveMarkdown(status, userText, board.toString()))
+        }
+
+        push("主会话正在提出实现方式…")
         val proposal = speak(
             member = main,
             tools = tools,
@@ -58,9 +62,9 @@ object PlanDiscussionOrchestrator {
         val panel = members.ifEmpty { listOf(main.copy(stance = "critic")) }
         repeat(ROUNDS) { round ->
             val n = round + 1
-            onProgress("计划讨论 第 $n/$ROUNDS 轮")
+            push("计划讨论 第 $n/$ROUNDS 轮")
             for (m in panel) {
-                onProgress("${m.displayName}（${m.stance}）发言中…")
+                push("${m.displayName}（${m.stance}）发言中…")
                 val turn = speak(
                     member = m,
                     tools = tools,
@@ -74,7 +78,7 @@ object PlanDiscussionOrchestrator {
             }
         }
 
-        onProgress("主会话正在合成方案…")
+        push("主会话正在合成方案…")
         val synthesis = speak(
             member = main,
             tools = tools,
@@ -86,11 +90,26 @@ object PlanDiscussionOrchestrator {
 
         val md = buildString {
             append("## 计划讨论\n\n")
-            append("下面是主会话提案、各模型独立立场（可互看全文）经过 ${ROUNDS} 轮讨论后的合成。请你自行判断要不要按此实现；讨论开关开着时下一条消息会再走一轮。\n\n")
+            append("下面是主会话提案、各模型独立立场（可互看全文）经过 ${ROUNDS} 轮讨论后的合成。本轮讨论结束后会按该方案开始执行。若要跳过讨论，请关闭聊天菜单中的「计划讨论」。\n\n")
             append("### 主会话提案\n\n").append(proposal.trim()).append("\n\n")
             append("### 合成方案\n\n").append(synthesis.trim()).append("\n")
+            append("\n---\n讨论结束，本轮将按该方案开始执行。\n")
         }
         return Result(markdown = md, transcript = board.toString())
+    }
+
+    fun liveMarkdown(status: String, userText: String, board: String): String {
+        return buildString {
+            appendLine("## 计划讨论（进行中）")
+            appendLine()
+            appendLine("**状态：** $status")
+            appendLine()
+            appendLine("**任务：** ${userText.trim().take(500)}")
+            appendLine()
+            if (board.isNotBlank()) {
+                appendLine(board.takeLast(12_000))
+            }
+        }
     }
 
     private suspend fun speak(

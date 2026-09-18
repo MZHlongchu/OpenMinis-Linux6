@@ -5,7 +5,7 @@
 
 **你的私人、端侧 AI Agent。**
 
-> **本仓库是 OpenMinis-Linux 分支** — Android 应用 **Minis Ultra**（`applicationId` 为 `com.openminis.linux`），可与官方 OpenMinis 并排安装。主机 `su`、工具链（`minis-dev-setup`）、POSIX `/sdcard` 挂载、Ubuntu 24.04 PRoot 客户机见 [LINUX.md](LINUX.md)。多智能体调度见设置 → 多智能体（`minis://settings/multi-agent`）。中国大陆编译 Android SDK / 切勿覆盖 aarch64 aapt2 见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。
+> **本仓库是 OpenMinis-Linux 分支** — Android 应用 **Minis Ultra**（`applicationId` 为 `com.openminis.linux`，当前 **1.16-linux** / versionCode 28），可与官方 OpenMinis 并排安装。滚动 APK：Releases `android-latest` → `minis-ultra-com.openminis.linux.apk`。主机 `su`、工具链（`minis-dev-setup`）、POSIX `/sdcard` 挂载、Ubuntu 24.04 PRoot 客户机见 [LINUX.md](LINUX.md)。多智能体调度见设置 → 多智能体（`minis://settings/multi-agent`）。中国大陆编译 Android SDK / 切勿覆盖 aarch64 aapt2 见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。中文发行说明见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 OpenMinis brings leading models — Claude, GPT, Gemini and more — into a native
 mobile experience, and gives them a real computer to work with: a full Linux

@@ -896,6 +896,7 @@
     <string name="storage_overview_shell">Shell 容器</string>
     <string name="storage_overview_database">对话数据库</string>
     <string name="storage_overview_sessions">会话文件</string>
+    <string name="storage_scanning">扫描中…</string>
     <string name="storage_section_sessions">会话</string>
     <string name="storage_no_sessions">无会话</string>
     <string name="storage_section_minis_files">Minis 文件</string>
@@ -1228,6 +1229,7 @@
     <string name="chat_menu_fast_mode">启用高速模式</string>
     <string name="chat_menu_auto_compact">自动压缩</string>
     <string name="chat_menu_plan_discussion">计划讨论</string>
+    <string name="plan_discussion_banner">计划讨论已开启：下一条消息会先开会讨论方案，再开始执行。</string>
     <string name="settings_task_notifications_permission">Android 13+ 需要通知权限。若开关已开但仍无通知，请允许 Minis Ultra 发送通知。</string>
     <string name="settings_task_notifications_granted">已授予通知权限。</string>
     <string name="settings_task_notifications_denied">通知权限被拒绝 — 未授权前不会弹出任务提醒。</string>

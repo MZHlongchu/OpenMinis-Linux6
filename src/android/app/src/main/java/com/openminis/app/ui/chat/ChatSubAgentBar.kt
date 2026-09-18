@@ -53,6 +53,10 @@ fun SubAgentLiveBar(
                         SubAgentActivityTracker.Status.FAILED -> " · fail"
                     },
                 )
+                if (m.status == SubAgentActivityTracker.Status.RUNNING && m.lastStep.isNotBlank()) {
+                    append(" · ")
+                    append(m.lastStep.take(48))
+                }
             }
             Text(
                 text = label,

@@ -24,6 +24,7 @@ object SubAgentActivityTracker {
         val startedAtMs: Long,
         val finishedAtMs: Long? = null,
         val error: String? = null,
+        val lastStep: String = "",
     )
 
     private val _members = MutableStateFlow<List<Member>>(emptyList())
@@ -52,6 +53,14 @@ object SubAgentActivityTracker {
         )
         _members.value = _members.value + member
         return id
+    }
+
+    fun updateStep(id: String, step: String) {
+        val clipped = step.replace('\n', ' ').trim().take(160)
+        if (clipped.isEmpty()) return
+        _members.value = _members.value.map { m ->
+            if (m.id != id) m else m.copy(lastStep = clipped)
+        }
     }
 
     fun finish(id: String, success: Boolean, error: String? = null, nowMs: Long = System.currentTimeMillis()) {

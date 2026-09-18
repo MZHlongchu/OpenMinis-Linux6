@@ -16,4 +16,13 @@ class SubAgentActivityTrackerTest {
         SubAgentActivityTracker.clearSession("s1")
         assertTrue(SubAgentActivityTracker.membersFor("s1").isEmpty())
     }
+
+    @Test
+    fun updateStepShowsOnRunningMember() {
+        SubAgentActivityTracker.clearSession("s2")
+        val id = SubAgentActivityTracker.start("s2", "Research", "worker", "gpt")
+        SubAgentActivityTracker.updateStep(id, "▶ shell_execute ls -la")
+        assertEquals("▶ shell_execute ls -la", SubAgentActivityTracker.membersFor("s2").first().lastStep)
+        SubAgentActivityTracker.clearSession("s2")
+    }
 }

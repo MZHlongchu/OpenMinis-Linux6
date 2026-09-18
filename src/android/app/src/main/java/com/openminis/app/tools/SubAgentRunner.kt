@@ -27,6 +27,7 @@ object SubAgentRunner {
         tools: List<AgentToolDefinition>,
         maxTokens: Int,
         executeTool: suspend (name: String, argsJson: String) -> ToolExecutionResult,
+        onStep: suspend (String) -> Unit = {},
     ): ToolExecutionResult {
         val history = mutableListOf(
             LLMMessage(role = LLMMessage.Role.USER, content = userPrompt),
@@ -35,7 +36,8 @@ object SubAgentRunner {
         val report = StringBuilder()
 
         try {
-            repeat(MAX_TURNS) {
+            repeat(MAX_TURNS) { turnIdx ->
+                runCatching { onStep("turn ${turnIdx + 1}/$MAX_TURNS") }
                 val textSb = StringBuilder()
                 val toolCalls = mutableListOf<Triple<String, String, JSONObject>>()
                 provider.streamMessage(
@@ -57,9 +59,14 @@ object SubAgentRunner {
                 if (text.isNotEmpty()) {
                     if (report.isNotEmpty()) report.append("\n\n")
                     report.append(text)
+                    val snippet = text.replace('\n', ' ').trim().take(160)
+                    if (snippet.isNotEmpty()) {
+                        runCatching { onStep("· $snippet") }
+                    }
                 }
 
                 if (toolCalls.isEmpty()) {
+                    runCatching { onStep("done") }
                     val out = report.toString().ifBlank { text.ifBlank { "(sub-agent finished with empty output)" } }
                     return ToolExecutionResult(truncate(out), true)
                 }
@@ -90,13 +97,18 @@ object SubAgentRunner {
                         )
                         continue
                     }
+                    val argsJson = args.toString()
+                    runCatching { onStep("▶ $name ${previewToolArgs(argsJson)}") }
                     val result = try {
-                        executeTool(name, args.toString())
+                        executeTool(name, argsJson)
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
                         ToolExecutionResult("Error: ${e.message ?: e.javaClass.simpleName}", false)
                     }
+                    val mark = if (result.success) "✓" else "✗"
+                    val preview = result.output.replace('\n', ' ').trim().take(120)
+                    runCatching { onStep("$mark $name $preview") }
                     resultParts.add(
                         AgentContentPart.ToolResult(
                             id = id,
@@ -131,6 +143,23 @@ object SubAgentRunner {
                 append("Sub-agent failed: ${e.message ?: e.javaClass.simpleName}")
             }
             return ToolExecutionResult(truncate(msg), false)
+        }
+    }
+
+    fun previewToolArgs(argsJson: String): String {
+        return try {
+            val o = JSONObject(argsJson)
+            val raw = when {
+                o.has("command") -> o.optString("command")
+                o.has("path") -> o.optString("path")
+                o.has("query") -> o.optString("query")
+                o.has("url") -> o.optString("url")
+                o.has("pattern") -> o.optString("pattern")
+                else -> argsJson
+            }
+            raw.replace('\n', ' ').trim().take(80)
+        } catch (_: Exception) {
+            argsJson.replace('\n', ' ').trim().take(80)
         }
     }
 

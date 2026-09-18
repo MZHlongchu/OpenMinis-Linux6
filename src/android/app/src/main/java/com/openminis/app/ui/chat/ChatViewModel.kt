@@ -5776,16 +5776,25 @@ class ChatViewModel(
                 val fallbackProviders = buildFallbackProviders(launchedProvider)
                 try {
                     AppLogger.info(TAG_STREAM, "$label runAgentLoop CALL")
-                    if (PlanDiscussionPrefs.isEnabled()) {
+                    val planMarkdown = if (PlanDiscussionPrefs.isEnabled()) {
                         runPlanDiscussion(launchedProvider)
                     } else {
-                        runAgentLoop(
-                            provider = launchedProvider,
-                            systemPrompt = systemPrompt,
-                            fallbackProviders = fallbackProviders,
-                            fallbackStrategy = activeFallbackStrategy,
-                        )
+                        null
                     }
+                    val promptForLoop = if (!planMarkdown.isNullOrBlank()) {
+                        systemPrompt +
+                            "\n\n## Agreed plan from Plan Discussion\n" +
+                            "The user enabled Plan Discussion. A multi-model discussion already produced this plan. Follow it unless the latest user message contradicts it. Do not re-run a discussion.\n\n" +
+                            planMarkdown
+                    } else {
+                        systemPrompt
+                    }
+                    runAgentLoop(
+                        provider = launchedProvider,
+                        systemPrompt = promptForLoop,
+                        fallbackProviders = fallbackProviders,
+                        fallbackStrategy = activeFallbackStrategy,
+                    )
                     AppLogger.info(TAG_STREAM, "$label runAgentLoop RETURN normal")
                 } catch (e: CancellationException) {
                     AppLogger.info(TAG_STREAM, "$label runAgentLoop CANCELLED")
@@ -8978,7 +8987,7 @@ class ChatViewModel(
                             async {
                                 val peerStr = peerArgs.toString()
                                 val peerResult = sem.withPermit {
-                                    executeRunSubAgent(peerStr)
+                                    executeRunSubAgent(peerStr, peerId, allToolBlocks, assistantId, accumulatedText)
                                 }
                                 synchronized(parallelSubResults) { parallelSubResults[peerId] = peerResult }
                             }
@@ -9327,7 +9336,7 @@ class ChatViewModel(
             "browser_use" -> executeBrowserUseTool(argsJson)
             "memory_write" -> executeMemoryWriteTool(argsJson)
             "memory_get" -> executeMemoryGetTool(argsJson)
-            "run_subagent" -> executeRunSubAgent(argsJson)
+            "run_subagent" -> executeRunSubAgent(argsJson, toolId, toolBlocks, assistantId, currentText)
             com.openminis.app.tools.WebSearchTool.NAME -> com.openminis.app.tools.WebSearchTool.execute(argsJson, context)
             com.openminis.app.tools.AskUserQuestion.NAME, com.openminis.app.tools.AskUserQuestion.ALIAS -> executeAskUserQuestion(argsJson)
             else -> ToolExecutionResult("Unknown tool: $name", false)
@@ -9855,10 +9864,16 @@ class ChatViewModel(
                 toolBlocksImmutable.indices.any { i ->
                     prev.toolBlocks[i].toolStatus != toolBlocksImmutable[i].toolStatus
                 }
+            val toolContentChanged = prev != null &&
+                prev.toolBlocks.size == toolBlocksImmutable.size &&
+                toolBlocksImmutable.indices.any { i ->
+                    prev.toolBlocks[i].content != toolBlocksImmutable[i].content
+                }
             val structuralChange = prev == null ||
                 prev.toolBlocks.size != toolBlocksImmutable.size ||
                 prev.isAwaitingModelResponse != isAwaitingModelResponse ||
-                toolStatusChanged
+                toolStatusChanged ||
+                toolContentChanged
             val now = System.currentTimeMillis()
             val elapsed = now - st.lastFlushMs
             val throttle = streamFlushThrottleMs(content.length)
@@ -12527,7 +12542,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             .replace("\\\\", "\\")
 
 
-    private suspend fun runPlanDiscussion(provider: LLMProvider) {
+    private suspend fun runPlanDiscussion(provider: LLMProvider): String {
         val assistantId = java.util.UUID.randomUUID().toString()
         withContext(Dispatchers.Main) {
             _messages.value = _messages.value + ChatMessage(
@@ -12585,7 +12600,12 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 },
                 onProgress = { msg ->
                     withContext(Dispatchers.Main) {
-                        SessionActivityTracker.updateToolStatus(msg, "plan_discussion", true, msg)
+                        val overlay = msg.lineSequence()
+                            .firstOrNull { it.startsWith("**状态：**") }
+                            ?.removePrefix("**状态：**")
+                            ?.trim()
+                            ?: "计划讨论"
+                        SessionActivityTracker.updateToolStatus(overlay, "plan_discussion", true, overlay)
                         _messages.value = _messages.value.map {
                             if (it.id == assistantId) {
                                 it.copy(content = msg, isAwaitingModelResponse = true, isStreaming = true)
@@ -12605,7 +12625,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                     } else it
                 }
             }
-            return
+            return ""
         }
         val partsJson = "[{\"type\":\"text\",\"value\":" + escapeJson(result.markdown) + "}]"
         val persisted = chatRepository.appendMessage(activeSessionId, "assistant", partsJson)
@@ -12620,9 +12640,35 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 ) else it
             }
         }
+        return result.markdown
     }
 
-    private suspend fun executeRunSubAgent(argsJson: String): ToolExecutionResult {
+    private suspend fun publishRunSubagentLog(
+        toolId: String,
+        assistantId: String,
+        currentText: String,
+        toolBlocks: MutableList<AssistantBlock>?,
+        log: String,
+    ) {
+        if (toolId.isEmpty() || assistantId.isEmpty() || toolBlocks == null) return
+        synchronized(toolBlocks) {
+            val i = toolBlocks.indexOfFirst { it.id == toolId }
+            if (i >= 0) {
+                toolBlocks[i] = toolBlocks[i].copy(content = log)
+            }
+        }
+        withContext(Dispatchers.Main) {
+            updateAssistantMessage(assistantId, currentText, true, toolBlocks.toList())
+        }
+    }
+
+    private suspend fun executeRunSubAgent(
+        argsJson: String,
+        toolId: String = "",
+        toolBlocks: MutableList<AssistantBlock>? = null,
+        assistantId: String = "",
+        currentText: String = "",
+    ): ToolExecutionResult {
         if (!multiAgentSettings.enabled.value) {
             return ToolExecutionResult("Multi-agent dispatch is disabled in Settings → Multi-agent.", false)
         }
@@ -12664,6 +12710,22 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             model = entry.model.displayName,
         )
         return try {
+            val liveLog = StringBuilder()
+            var lastUiMs = 0L
+            suspend fun onStep(line: String) {
+                val clipped = line.trim()
+                if (clipped.isEmpty()) return
+                liveLog.append(clipped).append('\n')
+                if (liveLog.length > 24_000) {
+                    liveLog.delete(0, liveLog.length - 20_000)
+                }
+                com.openminis.app.service.SubAgentActivityTracker.updateStep(trackerId, clipped)
+                val now = System.currentTimeMillis()
+                val important = clipped.startsWith("▶") || clipped.startsWith("✓") || clipped.startsWith("✗") || clipped.startsWith("turn ")
+                if (!important && now - lastUiMs < 250L) return
+                lastUiMs = now
+                publishRunSubagentLog(toolId, assistantId, currentText, toolBlocks, liveLog.toString())
+            }
             val result = SubAgentRunner.run(
                 provider = provider,
                 modelDisplayName = entry.model.displayName,
@@ -12680,7 +12742,14 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 executeTool = { name, json ->
                     executeTool(name, json, "", mutableListOf(), "", "")
                 },
+                onStep = { onStep(it) },
             )
+            val uiLog = if (liveLog.isNotEmpty()) {
+                liveLog.toString().trimEnd() + "\n---\n" + result.output
+            } else {
+                result.output
+            }
+            publishRunSubagentLog(toolId, assistantId, currentText, toolBlocks, uiLog)
             com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, result.success)
             result.copy(toolTitle = title.ifEmpty { "Sub-agent · ${entry.model.displayName}" })
         } catch (e: Exception) {

@@ -983,6 +983,7 @@
     <string name="storage_overview_shell">Shell Container</string>
     <string name="storage_overview_database">Chat Database</string>
     <string name="storage_overview_sessions">Session Files</string>
+    <string name="storage_scanning">Scanning…</string>
     <string name="storage_section_sessions">Sessions</string>
     <string name="storage_no_sessions">No sessions</string>
     <string name="storage_section_minis_files">Minis Files</string>
@@ -1347,6 +1348,7 @@
     <string name="chat_menu_fast_mode">Enable Fast Mode</string>
     <string name="chat_menu_auto_compact">Auto Compact</string>
     <string name="chat_menu_plan_discussion">Plan discussion</string>
+    <string name="plan_discussion_banner">Plan discussion is on — the next message will debate an approach, then start implementing.</string>
     <string name="settings_task_notifications_permission">Notification permission is required on Android 13+. If the toggle is on but you see no alerts, grant notifications for Minis Ultra.</string>
     <string name="settings_task_notifications_granted">Notification permission granted.</string>
     <string name="settings_task_notifications_denied">Notification permission denied — task alerts will not appear until you grant it.</string>

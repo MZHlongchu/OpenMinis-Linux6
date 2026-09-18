@@ -2,7 +2,11 @@
 
 本分支保留 OpenMinis 的 Agent + PRoot 沙箱，并加上偏 Linux 的工具链、主机 `su` 直通、POSIX 共享存储挂载，以及独立的 Android 包名，因此可以和官方 OpenMinis **并排安装**。
 
-启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。
+启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。当前版本 **1.16-linux**（versionCode 28）。
+
+滚动 APK：GitHub Releases 标签 `android-latest`，文件名 `minis-ultra-com.openminis.linux.apk`。
+
+1.16 修复：子 Agent 工具详情会流式显示步骤；计划讨论开启时聊天页有横幅、讨论过程写入消息，结束后同一轮按方案执行；存储页不再因走完整 `ubuntu-rootfs` 卡在扫描。详见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ## 客户机系统
 

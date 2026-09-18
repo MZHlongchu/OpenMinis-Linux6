@@ -43,6 +43,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
+import com.openminis.app.data.StorageScanner
 import com.openminis.app.data.db.ChatDao
 import com.openminis.app.data.db.ChatSessionEntity
 import kotlinx.coroutines.Dispatchers
@@ -71,6 +72,7 @@ fun StorageManagementScreen(
     val scope = rememberCoroutineScope()
 
     var isLoading by remember { mutableStateOf(true) }
+    var shellScanning by remember { mutableStateOf(true) }
     var shellSize by remember { mutableLongStateOf(0L) }
     var dbSize by remember { mutableLongStateOf(0L) }
     var sessions by remember { mutableStateOf<List<SessionStorageInfo>>(emptyList()) }
@@ -78,27 +80,44 @@ fun StorageManagementScreen(
     fun reload() {
         scope.launch {
             isLoading = true
-            withContext(Dispatchers.IO) {
-                shellSize = directorySize(File(context.filesDir, "ubuntu-rootfs"))
+            shellScanning = true
+            val cached = withContext(Dispatchers.IO) {
                 dbSize = databaseSize(context)
-
                 val allSessions = chatDao.listSessions()
-                val sessionsDir = File(context.filesDir, "minis-sessions")
-                val mediaDir = File(context.filesDir, "media")
-
-                val mediaSizes = mediaSizesBySession(mediaDir, allSessions.map { it.id }.toSet())
-
                 sessions = allSessions.map { session ->
-                    val minisDir = File(sessionsDir, session.id)
                     SessionStorageInfo(
                         id = session.id,
                         title = session.title,
-                        minisSize = directorySize(minisDir),
+                        minisSize = 0L,
+                        mediaSize = 0L,
+                    )
+                }
+                StorageScanner.cachedRootfsBytes(context)
+            }
+            if (cached > 0L) shellSize = cached
+            isLoading = false
+            val filled = withContext(Dispatchers.IO) {
+                val sessionsDir = File(context.filesDir, "minis-sessions")
+                val mediaDir = File(context.filesDir, "media")
+                val snapshot = sessions
+                val mediaSizes = StorageScanner.mediaSizesBySession(mediaDir, snapshot.map { it.id }.toSet())
+                snapshot.map { session ->
+                    SessionStorageInfo(
+                        id = session.id,
+                        title = session.title,
+                        minisSize = StorageScanner.directorySize(File(sessionsDir, session.id)),
                         mediaSize = mediaSizes[session.id] ?: 0L,
                     )
                 }.sortedByDescending { it.totalSize }
             }
-            isLoading = false
+            sessions = filled
+            val rootSize = withContext(Dispatchers.IO) {
+                val size = StorageScanner.directorySizePreferDu(File(context.filesDir, "ubuntu-rootfs"))
+                StorageScanner.saveRootfsBytes(context, size)
+                size
+            }
+            shellSize = rootSize
+            shellScanning = false
         }
     }
 
@@ -111,7 +130,12 @@ fun StorageManagementScreen(
             StorageOverviewRow(
                 color = Color(0xFF8E8E93),
                 label = stringResource(R.string.storage_overview_shell),
-                value = Formatter.formatFileSize(context, shellSize),
+                value = when {
+                    shellScanning && shellSize > 0L ->
+                        Formatter.formatFileSize(context, shellSize) + " · " + stringResource(R.string.storage_scanning)
+                    shellScanning -> stringResource(R.string.storage_scanning)
+                    else -> Formatter.formatFileSize(context, shellSize)
+                },
                 onClick = onRootfsClick,
                 showDivider = true,
             )
@@ -184,8 +208,8 @@ fun SessionStorageDetailScreen(
         scope.launch {
             withContext(Dispatchers.IO) {
                 session = chatDao.getSession(sessionId)
-                minisSize = directorySize(File(sessionsDir, sessionId))
-                val mediaSizes = mediaSizesBySession(mediaDir, setOf(sessionId))
+                minisSize = StorageScanner.directorySize(File(sessionsDir, sessionId))
+                val mediaSizes = StorageScanner.mediaSizesBySession(mediaDir, setOf(sessionId))
                 mediaSize = mediaSizes[sessionId] ?: 0L
             }
         }
@@ -357,15 +381,6 @@ private fun StorageOverviewRow(
     }
 }
 
-private fun directorySize(dir: File): Long {
-    if (!dir.exists()) return 0L
-    var total = 0L
-    dir.walkTopDown().forEach { file ->
-        if (file.isFile) total += file.length()
-    }
-    return total
-}
-
 private fun databaseSize(context: Context): Long {
     val dbFile = context.getDatabasePath("minis.db")
     var size = if (dbFile.exists()) dbFile.length() else 0L
@@ -374,21 +389,6 @@ private fun databaseSize(context: Context): Long {
     if (wal.exists()) size += wal.length()
     if (shm.exists()) size += shm.length()
     return size
-}
-
-private fun mediaSizesBySession(mediaDir: File, sessionIds: Set<String>): Map<String, Long> {
-    if (!mediaDir.exists()) return emptyMap()
-    val sizes = mutableMapOf<String, Long>()
-    mediaDir.walkTopDown().forEach { file ->
-        if (file.isFile) {
-            val parent = file.parentFile ?: return@forEach
-            val sid = parent.name
-            if (sessionIds.contains(sid)) {
-                sizes[sid] = (sizes[sid] ?: 0L) + file.length()
-            }
-        }
-    }
-    return sizes
 }
 
 private fun deleteSessionMedia(mediaDir: File, sessionId: String) {
