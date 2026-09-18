@@ -2,6 +2,8 @@ package com.openminis.app.ui.chat
 
 import android.util.Log
 import com.openminis.app.data.model.ModelEntry
+import com.openminis.app.data.model.hasImageInput
+import com.openminis.app.service.SessionActivityTracker
 import com.openminis.app.data.repository.MultiAgentSettings
 import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.ProviderFactory
