@@ -21,7 +21,7 @@
    设置 → 外观：浮动工具栏、工具预览、已完成工具卡（默认关）、子代理芯片、计划讨论横幅。进行中的工具仍显示。
 
 4. **修复 1.20-linux CI**  
-   `libminis_crash_handler.so` 曾链到 NDK 主机 `linux-x86_64/lib/libunwind.so`（与 aarch64 不兼容）。现固定 `ndkVersion = 28.0.13004108`，CMake 只按绝对路径链接 sysroot 里的 aarch64 `libunwind.a`。
+   `libminis_crash_handler.so` 曾链到 NDK 主机 `linux-x86_64/lib/libunwind.so`（与 aarch64 不兼容）。现固定 `ndkVersion = 28.0.13004108`，CMake 只按绝对路径链接 sysroot 里的 aarch64 `libunwind.a`，并用 `-Wl,--no-dependent-libraries` 忽略 LLVM 写入的 `pthread` 依赖（Bionic 无独立 libpthread）。
 
 1.20-linux 标签仍在，但该次 GitHub Actions 没有产出 APK。请改下 **1.21-linux**。
 

@@ -41,7 +41,7 @@ CMake must link the **aarch64** `libunwind.a` by absolute path. Never pass
 bare `-lunwind`: NDK llvm prebuilt ships a *host* `libunwind.so` under
 `toolchains/llvm/prebuilt/<host>/lib/`, which 1.20-linux CI linked by
 mistake (`incompatible with aarch64linux`). Pin `ndkVersion` to the same
-r28 folder CI installs.
+r28 folder CI installs. LLVM libunwind.a may embed a pthread dependent-libraries tag; Bionic has no libpthread, so crash_handler links with -Wl,--no-dependent-libraries.
 
 CI also copies `libunwind.a` (and `libunwind.so` if the NDK still has it
 under an aarch64 sysroot path) next to the APK as a **release asset**,

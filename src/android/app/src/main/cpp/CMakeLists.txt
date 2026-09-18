@@ -53,5 +53,9 @@ if(NOT _unwind_lib)
         "NDK=${CMAKE_ANDROID_NDK} SYSROOT=${CMAKE_SYSROOT}")
 endif()
 message(STATUS "Linking minis_crash_handler with ${_unwind_lib}")
+# LLVM libunwind.a objects may carry .llvm.dependent-libraries = pthread.
+# Bionic has no libpthread (pthread is in libc); NDK 28 lld then fails with
+# "unable to find library from dependent library specifier: pthread".
+target_link_options(minis_crash_handler PRIVATE -Wl,--no-dependent-libraries)
 target_link_libraries(minis_crash_handler ${log-lib} "${_unwind_lib}")
 target_link_libraries(jieba_jni ${log-lib})
