@@ -152,7 +152,11 @@
     <string name="settings_multi_agent_attempts_subtitle">端點暫時錯誤最多重試 %1$d 次（1 = 不重試；重試會輪換池內端點）</string>
     <string name="settings_multi_agent_decrease">減少</string>
     <string name="settings_multi_agent_increase">增加</string>
-    <string name="settings_multi_agent_footer_dispatch">主工作階段模型是任務協調者：拆解、分派、驗收、彙總，而不是獨自完成全部工作。相互獨立的任務可並行；有依賴的階段必須驗收後再進入下一階段。</string>
+    <string name="settings_multi_agent_footer_dispatch">主工作階段模型是任務協調者：拆解、分派、驗收、彙總，而不是獨自完成全部工作。相互獨立的任務可並行；有依賴的階段必須驗收後再進入下一階段。子代理轪次由協調者按任務分配（簡單約 10，複雜 40–60），固定 200 轪失控保護，不支援手動調整。</string>
+    <string name="settings_multi_agent_enter_value">輸入數值</string>
+    <string name="settings_multi_agent_value_range">範圍 %1$d – %2$d</string>
+    <string name="settings_multi_agent_confirm">確定</string>
+    <string name="settings_multi_agent_cancel">取消</string>
     <string name="settings_multi_agent_section_models">團隊模型</string>
     <string name="settings_multi_agent_footer_models">有幾個並行上限就產生幾條設定（目前 %1$d）。為每個子代理選擇模型，留空則使用主工作階段模型。同一波第 N 個平行 spawn_agent 成員使用第 N 個子代理的模型；呼叫時仍可指定模型。</string>
     <string name="settings_multi_agent_slot">子代理 %1$d</string>

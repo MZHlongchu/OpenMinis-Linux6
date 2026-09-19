@@ -8,8 +8,11 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -56,6 +59,13 @@ fun AskUserQuestionsCard(
                 style = MaterialTheme.typography.titleSmall,
             )
             Spacer(Modifier.height(12.dp))
+            // Scrollable question area, height-capped so the submit/skip buttons
+            // below stay pinned and reachable even with long questions/options.
+            Column(
+                Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
             questions.forEachIndexed { i, q ->
                 val header = q.header.ifBlank { q.question }
                 Text(header, style = MaterialTheme.typography.labelLarge)
@@ -104,6 +114,7 @@ fun AskUserQuestionsCard(
                     label = { Text(stringResource(R.string.ask_user_other)) },
                 )
                 if (i < questions.lastIndex) Spacer(Modifier.height(16.dp))
+            }
             }
             Spacer(Modifier.height(16.dp))
             MinisButton(

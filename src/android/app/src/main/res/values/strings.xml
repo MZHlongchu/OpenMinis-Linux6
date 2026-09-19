@@ -188,7 +188,11 @@
     <string name="settings_multi_agent_attempts_subtitle">Up to %1$d attempts on transient endpoint errors (1 = no retry; retries rotate pool endpoints)</string>
     <string name="settings_multi_agent_decrease">Decrease</string>
     <string name="settings_multi_agent_increase">Increase</string>
-    <string name="settings_multi_agent_footer_dispatch">The main chat model is the coordinator. It decomposes, dispatches, accepts and summarizes — it should not do all the work itself. Independent tasks run in parallel; dependent phases wait for acceptance.</string>
+    <string name="settings_multi_agent_footer_dispatch">The main chat model is the coordinator. It decomposes, dispatches, accepts and summarizes — it should not do all the work itself. Independent tasks run in parallel; dependent phases wait for acceptance. Sub-agent turn budget is assigned by the coordinator per task (simple ≈ 10, complex 40–60) with a fixed 200-turn runaway guard, and is not user-adjustable.</string>
+    <string name="settings_multi_agent_enter_value">Enter value</string>
+    <string name="settings_multi_agent_value_range">Range %1$d – %2$d</string>
+    <string name="settings_multi_agent_confirm">OK</string>
+    <string name="settings_multi_agent_cancel">Cancel</string>
     <string name="settings_multi_agent_section_models">Team models</string>
     <string name="settings_multi_agent_footer_models">One row per concurrent teammate (linked to the cap of %1$d). Pick a model for each sub-agent, or leave it on the main session model. The N-th parallel spawn_agent member uses sub-agent N. A call may still name a model.</string>
     <string name="settings_multi_agent_slot">Sub-agent %1$d</string>

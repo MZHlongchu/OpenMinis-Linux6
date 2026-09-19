@@ -1,21 +1,26 @@
 package com.openminis.app.ui.settings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.Remove
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -27,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.openminis.app.MinisApp
 import com.openminis.app.R
@@ -106,10 +112,12 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                     ) {
                         Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.settings_multi_agent_decrease))
                     }
-                    Text(
-                        maxConcurrent.toString(),
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.padding(horizontal = 4.dp),
+                    EditableStepperValue(
+                        value = maxConcurrent,
+                        min = MultiAgentSettings.MIN_CONCURRENT,
+                        max = MultiAgentSettings.MAX_CONCURRENT,
+                        enabled = enabled,
+                        onValueChange = { repo.setMaxConcurrent(it) },
                     )
                     IconButton(
                         onClick = { repo.setMaxConcurrent(maxConcurrent + 1) },
@@ -120,27 +128,6 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                 }
             }
 
-            // Sub-agent turn budget is now assigned by the coordinator (spawn_agent
-            // max_turns / auto-size), not capped here — see SubAgentKind.clampTurns.
-            // This row only documents the fixed runaway guard.
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                    Text(
-                        stringResource(R.string.settings_multi_agent_turns),
-                        style = MaterialTheme.typography.bodyLarge,
-                    )
-                    Text(
-                        stringResource(R.string.settings_multi_agent_turns_subtitle_v2),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -166,10 +153,12 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                     ) {
                         Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.settings_multi_agent_decrease))
                     }
-                    Text(
-                        subagentMaxAttempts.toString(),
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.padding(horizontal = 4.dp),
+                    EditableStepperValue(
+                        value = subagentMaxAttempts,
+                        min = MultiAgentSettings.MIN_SUBAGENT_ATTEMPTS,
+                        max = MultiAgentSettings.MAX_SUBAGENT_ATTEMPTS,
+                        enabled = enabled,
+                        onValueChange = { repo.setSubagentMaxAttempts(it) },
                     )
                     IconButton(
                         onClick = { repo.setSubagentMaxAttempts(subagentMaxAttempts + 1) },
@@ -290,5 +279,63 @@ private fun slotModelLabel(
     append(entry.model.displayName)
     instancesById[entry.providerInstanceId]?.label?.takeIf { it.isNotBlank() }?.let {
         append(" · ").append(it)
+    }
+}
+
+/**
+ * A numeric stepper value that is ALSO directly editable: tapping the number
+ * opens a small dialog with a numeric field. Fixes the "only +/- works, cannot
+ * type a value" complaint. Out-of-range / non-numeric input disables Confirm.
+ */
+@Composable
+private fun EditableStepperValue(
+    value: Int,
+    min: Int,
+    max: Int,
+    enabled: Boolean,
+    onValueChange: (Int) -> Unit,
+) {
+    var editing by remember { mutableStateOf(false) }
+    Text(
+        value.toString(),
+        style = MaterialTheme.typography.titleMedium,
+        color = if (enabled) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier
+            .padding(horizontal = 4.dp)
+            .clickable(enabled = enabled) { editing = true },
+    )
+    if (editing) {
+        var text by remember { mutableStateOf(value.toString()) }
+        val parsed = text.trim().toIntOrNull()
+        val valid = parsed != null && parsed in min..max
+        AlertDialog(
+            onDismissRequest = { editing = false },
+            title = { Text(stringResource(R.string.settings_multi_agent_enter_value)) },
+            text = {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { input -> text = input.filter { it.isDigit() }.take(3) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    label = { Text(stringResource(R.string.settings_multi_agent_value_range, min, max)) },
+                    isError = text.isNotEmpty() && !valid,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        parsed?.let { onValueChange(it) }
+                        editing = false
+                    },
+                    enabled = valid,
+                ) { Text(stringResource(R.string.settings_multi_agent_confirm)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { editing = false }) {
+                    Text(stringResource(R.string.settings_multi_agent_cancel))
+                }
+            },
+        )
     }
 }

@@ -1,3 +1,29 @@
+# OpenMinis-Linux 1.30-linux
+
+- versionCode **42**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a；有 `MINIS_UPLOAD_*` 则用上传证书，否则仍为 debug-signed）
+- 签名说明：[docs/SIGNING.md](SIGNING.md)
+
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本。
+
+## 本版
+
+多智能体设置与提问卡片的 UI 修复。
+
+1. **步进器可直接输入数值**
+   并发数、重试次数两个步进器的数字本身可点击，弹出数字键盘输入框；越界/非数字时“确定”置灰。+/- 仍保留。
+
+2. **轮次上限项降级为说明文案**
+   原“子代理轮次上限”独立设置行本就不可调，删掉；说明并入 section 脚注——由协调者按任务分配，固定 200 轮失控保护。少占一行，信息不丢。
+
+3. **提问卡片按钮不再被遮挡**
+   原整卡不可滚动，问题多/选项长时把底部“提交/跳过”挤出屏幕且无法滑动。现问题区加 `heightIn(max=420dp)` + 可滚动，按钮固定底部始终可见可点。
+
+---
+
 # OpenMinis-Linux 1.29-linux
 
 - versionCode **41**
