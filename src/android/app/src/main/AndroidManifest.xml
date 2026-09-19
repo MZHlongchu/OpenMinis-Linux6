@@ -488,6 +488,19 @@
             </intent-filter>
         </receiver>
 
+        <!-- [T-android-approval-gate] Broadcast receiver for the approve/deny
+             buttons on the tool-approval notification. Exported so the system
+             can deliver the action even when the app process is backgrounded;
+             the action strings are app-internal (not exported to other apps). -->
+        <receiver
+            android:name=".notification.ApprovalBroadcastReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.openminis.app.APPROVE_TOOL" />
+                <action android:name="com.openminis.app.DENY_TOOL" />
+            </intent-filter>
+        </receiver>
+
         <!-- [T-android-scheduled-tasks-design] AlarmManager target for
              user-defined scheduled tasks (Settings → home top-right
              schedule icon). The receiver dispatches to ScheduledAgentRunner

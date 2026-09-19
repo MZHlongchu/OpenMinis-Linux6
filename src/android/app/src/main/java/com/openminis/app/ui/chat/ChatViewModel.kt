@@ -73,6 +73,8 @@ import com.openminis.app.data.PlanDiscussionPrefs
 import com.openminis.app.data.PlanDiscussionTrigger
 import com.openminis.app.MinisApp
 import com.openminis.app.offload.OffloadPermissionManager
+import com.openminis.app.service.ApprovalGate
+import com.openminis.app.notification.ApprovalNotifier
 import com.openminis.app.service.SessionActivityTracker
 import com.openminis.app.service.SessionConcurrencyManager
 import kotlinx.coroutines.CancellationException
@@ -1244,6 +1246,7 @@ class ChatViewModel(
             ),
             memoryEnabled = _memoryEnabled.value,
             subAgentEnabled = multiAgentSettings.enabled.value,
+            codeGraphEnabled = true,
         )
 
     /**
@@ -1781,6 +1784,29 @@ class ChatViewModel(
 
     val currentModelMaxOutputTokens: Int?
         get() = currentModel?.maxOutputTokens
+
+    // [T-context-ring] Live context token counter for the input-composer ring.
+    val contextUsage = MutableStateFlow(com.openminis.app.data.model.ContextUsage(0L, 0L))
+
+    /** Recompute contextUsage from the latest agent history. Called after appending messages. */
+    fun refreshContextUsage() {
+        var usedChars = 0L
+        for (msg in agentHistory) {
+            for (part in msg.contentParts) {
+                when (part) {
+                    is AgentContentPart.Text -> usedChars += part.text.length
+                    is AgentContentPart.ToolUse -> usedChars += part.input.toString().length
+                    is AgentContentPart.ToolResult -> {
+                        usedChars += part.content.length
+                    }
+                    is AgentContentPart.ImageData -> {}
+                }
+            }
+        }
+        val estTokens = (usedChars / 3.5).toLong()
+        val window = currentModelContextWindow?.toLong() ?: 0L
+        contextUsage.value = com.openminis.app.data.model.ContextUsage(estTokens, window)
+    }
 
     // ── Session token usage (iOS parity: TokenUsageSheet data) ─────────────
 
@@ -6647,6 +6673,8 @@ class ChatViewModel(
                 contentParts = userContentParts,
                 dbMessageId = persistedUser.id,
             ))
+            // [T-context-ring] Refresh after user appends.
+            refreshContextUsage()
 
             // Refresh OAuth token if needed before sending (mirrors iOS validAccessToken)
             if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
@@ -9274,6 +9302,8 @@ class ChatViewModel(
         } else {
             AppLogger.info(TAG_STREAM, "runAgentLoop EXIT (loop body ended naturally)")
         }
+        // [T-context-ring] Refresh the live token ring after the turn settles.
+        refreshContextUsage()
     }
 
     /**
@@ -9365,12 +9395,24 @@ class ChatViewModel(
                 }
                 result
             }
-            FileWriteTool.NAME -> FileWriteTool.execute(argsJson, activeSessionId, context).also {
-                if (it.success) maybeReloadSkillsForPath(argsJson)
-            }
-            FileEditTool.NAME -> FileEditTool.execute(argsJson, activeSessionId, context).also {
-                if (it.success) maybeReloadSkillsForPath(argsJson)
-            }
+            FileWriteTool.NAME -> runCatching {
+                val id = ApprovalGate.requestApproval()
+                com.openminis.app.notification.ApprovalNotifier(context).notifyApproval(
+                    id, "file_write", "agent writes to local filesystem"
+                )
+                val approved = ApprovalGate.waitFor(id)
+                if (!approved) return@runCatching ToolExecutionResult("User rejected file_write", false, "file_write")
+                FileWriteTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
+            }.getOrElse { ToolExecutionResult("Approval failed: " + it.message, false, name) }
+            FileEditTool.NAME -> runCatching {
+                val id = ApprovalGate.requestApproval()
+                com.openminis.app.notification.ApprovalNotifier(context).notifyApproval(
+                    id, "file_edit", "agent edits local filesystem"
+                )
+                val approved = ApprovalGate.waitFor(id)
+                if (!approved) return@runCatching ToolExecutionResult("User rejected file_edit", false, "file_edit")
+                FileEditTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
+            }.getOrElse { ToolExecutionResult("Approval failed: " + it.message, false, name) }
             // T178: pass sessionId + context so read_image routes through
             // resolveSessionHostPath like file_read/write/edit do — without
             // these, the tool consults the global last-writer-wins
@@ -9389,6 +9431,32 @@ class ChatViewModel(
             )
             com.openminis.app.tools.SessionLookupTool.READ -> com.openminis.app.tools.SessionLookupTool.executeRead(argsJson, context)
             com.openminis.app.tools.AskUserQuestion.NAME, com.openminis.app.tools.AskUserQuestion.ALIAS -> executeAskUserQuestion(argsJson)
+            CodeGraphTool.NAME -> {
+                val args = JSONObject(argsJson).let {
+                    mapOfNotNull(
+                        "action" to it.optString("action").takeIf { a -> a.isNotBlank() },
+                        "name" to it.optString("name").takeIf { a -> a.isNotBlank() },
+                        "path" to it.optString("path").takeIf { a -> a.isNotBlank() },
+                    )
+                }
+                ToolExecutionResult(
+                    output = runCatching {
+                        CodeGraphTool.execute(
+                            args = args,
+                            sessionId = activeSessionId,
+                            context = context,
+                            dao = AppDatabase.getInstance(context).codeIndexDao(),
+                            resolvePath = { path ->
+                                com.openminis.app.sandbox.PRootKernel.resolveSessionHostPath(
+                                    activeSessionId, path, context
+                                )?.path
+                            },
+                        )
+                    }.getOrElse { e -> "code_graph 执行失败: ${e.message}" },
+                    success = true,
+                    toolTitle = "code_graph",
+                )
+            }
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
         if (!result.success) {
@@ -10475,6 +10543,15 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         // to the memory feature.
         val globalMemoryFragment = if (memoryOn) memoryRepository?.loadGlobalMemoryFragment() else null
         val dailyMemoryFragment = if (memoryOn) memoryRepository?.loadRecentDailyMemoryFragment() else null
+        // [T-memory-recall] Lightweight FTS recall: search ALL historical memory
+        // entries for keywords from the latest user message, inject top-4 hits.
+        // No embedding service: keyword density + recency + recall-count scoring.
+        val recalledMemoryFragment = if (memoryOn) {
+            val engine = com.openminis.app.data.repository.MemoryRecallEngine.fromContext(context)
+            val query = _messages.value.lastOrNull { it.role == "user" && !it.isQueued }?.content.orEmpty()
+            val hits = engine?.recall(query) ?: emptyList()
+            engine?.formatAsPromptFragment(hits) ?: ""
+        } else null
         // Standing, user-approved evolution rules. Not gated by memoryOn (same as SOUL.md).
         val learnedSample = _messages.value.lastOrNull { it.role == "user" }?.content
         val learnedScene = com.openminis.app.evolution.SceneClassifier.classify(
@@ -10493,7 +10570,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             "[XSessionDiag] prompt/memory: session=${activeSessionId.take(8)} " +
                 "memoryEnabled=$memoryOn " +
                 "globalChars=${globalMemoryFragment?.length ?: 0} " +
-                "dailyChars=${dailyMemoryFragment?.length ?: 0}",
+                "dailyChars=${dailyMemoryFragment?.length ?: 0} recallChars=${recalledMemoryFragment?.length ?: 0}",
         )
 
         return buildString {
@@ -10517,6 +10594,10 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             if (learnedPrefsFragment != null) {
                 append("\n\n")
                 append(learnedPrefsFragment)
+            }
+            if (recalledMemoryFragment != null && recalledMemoryFragment.isNotBlank()) {
+                append("\n\n")
+                append(recalledMemoryFragment)
             }
             // Runtime context goes last so the prefix above stays byte-stable
             // across requests within the same day. Keep ordering deterministic

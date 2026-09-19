@@ -28,6 +28,7 @@ object AgentTools {
         // AIChatViewModel.makeAgentTools(memoryEnabled:).
         memoryEnabled: Boolean = true,
         subAgentEnabled: Boolean = false,
+        codeGraphEnabled: Boolean = false,
     ): List<AgentToolDefinition> = buildList {
         add(shellExecuteDefinition())
         add(FileReadTool.definition())
@@ -45,6 +46,9 @@ object AgentTools {
             add(memoryWriteDefinition())
             add(memoryGetDefinition())
         }
+        if (codeGraphEnabled) {
+            add(CodeGraphTool.definition())
+        }
         if (subAgentEnabled) {
             add(runSubAgentDefinition())
         }
@@ -58,6 +62,7 @@ object AgentTools {
      */
     fun makeSubAgentExtraTools(): List<AgentToolDefinition> = buildList {
         add(GrepSourceTool.definition())
+        add(CodeGraphTool.definition())
     }
 
     private fun runSubAgentDefinition(): AgentToolDefinition {

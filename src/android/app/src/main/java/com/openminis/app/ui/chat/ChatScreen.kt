@@ -6607,6 +6607,14 @@ fun ChatScreen(
 
                         Spacer(modifier = Modifier.width(8.dp))
 
+                        // [T-context-ring] Token consumption ring beside the composer.
+                        val contextUsage by viewModel.contextUsage.collectAsState()
+                        ContextRing(
+                            usage = contextUsage,
+                            modifier = Modifier.padding(end = 4.dp),
+                            onClick = { showTokenUsageSheet = true },
+                        )
+
                         // Right: 3-state Send / Enqueue / Stop button (mirrors iOS sendButton).
                         //   • streaming + hasText  → SEND (routes through viewModel.sendMessage,
                         //     which dispatches to enqueuePrompt since _isStreaming is true).

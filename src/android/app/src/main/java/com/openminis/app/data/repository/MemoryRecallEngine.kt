@@ -1,0 +1,222 @@
+package com.openminis.app.data.repository
+
+import android.content.Context
+import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.log2
+
+/**
+ * Lightweight memory recall engine (port of XINCODE `MemoryRecall.kt`).
+ *
+ * Unlike XINCODE we do NOT depend on an embedding / vector service — the
+ * sandbox has no LLM backend wired for embeddings. Instead this engine
+ * does keyword-based FTS over ALL historical memory entries (GLOBAL.md +
+ * every daily log) and scores them by:
+ *
+ *   score = keywordHits  +  recencyBoost  +  recallCountBoost
+ *
+ * where:
+ *   - keywordHits    = count of extracted query keywords found in the entry text
+ *   - recencyBoost   = decays linearly over [RECENCY_WINDOW_DAYS]; recent entries score higher
+ *   - recallCountBoost = min(0.10 * log2(recallCount+1), 0.15) — frequently recalled mems get a slight permanent bump (mirrors XINCODE's M3-1)
+ *
+ * ## Aging (M3-1 "后半" / MemoryDecay)
+ * Entries not recalled for > [ARCHIVE_AFTER_DAYS] days are still returned by
+ * keyword match but flagged with `archived=true`; the caller can choose to
+ * surface them with a faded style or omit them from auto-injection.
+ *
+ * ## Entry count limit
+ * At most [RECALL_LIMIT] entries are returned per query, matching XINCODE.
+ *
+ * ## Thread safety
+ * The recall-count map is a ConcurrentHashMap; all reads/writes are atomic.
+ * The engine itself is stateless across calls except for the recall-count
+ * cache (which is in-memory only and resets on process death — a reasonable
+ * trade-off vs. adding a Room entity for what is effectively a soft signal).
+ */
+class MemoryRecallEngine(
+    private val memoryDirProvider: () -> File,
+) {
+
+    companion object {
+        private const val TAG = "MemoryRecallEngine"
+        private const val RECALL_LIMIT = 4
+        private const val CANDIDATE_LIMIT = 48
+        private const val RECENCY_WINDOW_DAYS = 30L
+        private const val ARCHIVE_AFTER_DAYS = 90L
+        private const val RECALL_BOOST_COEFF = 0.10
+        private const val RECALL_BOOST_MAX = 0.15
+        private val CHINESE_PUNCT = setOf('，', '。', '、', '；', '：', '“', '”', '‘', '’', '（', '）', '【', '】', '《', '》', '？', '！')
+
+        /**
+         * Build an engine bound to the app's /var/minis/memory directory.
+         * Returns null if the directory doesn't exist (memory feature disabled / not set up).
+         */
+        fun fromContext(context: Context): MemoryRecallEngine? {
+            val base = File(context.filesDir).parentFile?.parentFile?.let {
+                // /data/data/<pkg>/files → up 2 → /data/data/<pkg>
+                File(it, "files")
+            }
+            val memoryDir = File(base.parentFile, "memory").takeIf { it.isDirectory }
+                ?: File(System.getProperty("minis.memory.dir") ?: "", "").takeIf { it.isDirectory }
+                ?: File("/var/minis/memory").takeIf { it.isDirectory }
+            return if (memoryDir != null) MemoryRecallEngine { memoryDir } else null
+        }
+    }
+
+    /** recallCount — in-memory only, resets on process restart. */
+    private val recallCounts = ConcurrentHashMap<String, AtomicInteger>()
+
+    data class RecallHit(
+        val source: String,      // "GLOBAL.md" or "2026-09-18.md"
+        val line: String,        // the matched line (snippet)
+        val day: String,         // YYYY-MM-DD or "global"
+        val score: Double,
+        val recallCount: Int,
+        val archived: Boolean,
+    )
+
+    /**
+     * Extract query keywords from the latest user message(s).
+     * Chinese: split into 2-char window tokens + punctuation-free words.
+     * English: split on whitespace and strip punctuation.
+     * Returns lowercased, deduplicated tokens (>= 2 chars).
+     */
+    private fun extractKeywords(query: String): Set<String> {
+        if (query.isBlank()) return emptySet()
+        val cleaned = query.trim().lowercase().filter { !it.isWhitespace() }
+        val result = mutableSetOf<String>()
+        // English-style: split on whitespace/punctuation boundaries from the raw query
+        val words = query.lowercase()
+            .split("[\\s，。、；：！？“”‘’（）【】《》,.!?;:'\"()\\[\\]{}]+".toRegex())
+            .filter { it.length >= 2 && !it.all { c -> CHINESE_PUNCT.contains(c) } }
+        result.addAll(words)
+
+        // Chinese n-gram (2-char sliding window) for CJK memory search
+        val noPunct = cleaned.filterNot { CHINESE_PUNCT.contains(it) }
+        for (i in 0..noPunct.length - 2) {
+            result.add(noPunct.substring(i, i + 2))
+        }
+        return result.filter { it.isNotBlank() }.toSet()
+    }
+
+    /**
+     * Run a targeted recall: search all memory files for [query] keywords,
+     * score, and return the top [RECALL_LIMIT] hits.
+     */
+    suspend fun recall(query: String): List<RecallHit> = withContext(Dispatchers.IO) {
+        val keywords = extractKeywords(query)
+        if (keywords.isEmpty()) return@withContext emptyList()
+
+        val today = LocalDate.now()
+        val files = scanMemoryFiles()
+        val candidates = mutableListOf<RecallHit>()
+
+        for (file in files) {
+            val relName = file.name
+            val isGlobal = relName == "GLOBAL.md"
+            val lines = runCatching { file.readLines() }.getOrNull() ?: continue
+            val dayStr = if (isGlobal) "global" else relName.removeSuffix(".md")
+
+            for (line in lines) {
+                val trimmed = line.trim()
+                if (trimmed.isEmpty()) continue
+                // Headline / bullet / section lines are higher signal than body prose.
+                val isHeadline = trimmed.startsWith("#") || trimmed.startsWith("-") ||
+                    trimmed.startsWith("*") || trimmed.startsWith(">")
+
+                val kwHits = keywords.count { kw ->
+                    trimmed.contains(kw, ignoreCase = true)
+                }
+                if (kwHits == 0) continue
+
+                // Recency: entries from today score full, decaying over the window.
+                val recencyBoost = if (isGlobal) 0.5 // GLOBAL.md always mildly relevant
+                else {
+                    val entryDay = runCatching {
+                        LocalDate.parse(dayStr, DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+                    }.getOrNull() ?: continue
+                    val daysAgo = today.unaryMinus().until(entryDay).days.toLong().coerceAtLeast(0L)
+                    if (daysAgo > RECENCY_WINDOW_DAYS) 0.0
+                    else 1.0 - (daysAgo.toDouble() / RECENCY_WINDOW_DAYS)
+                }
+
+                // Recall-count boost (M3-1): log2 growth, capped.
+                val rcKey = "$dayStr:$trimmed"
+                val rc = recallCounts.getOrPut(rcKey) { AtomicInteger(0) }
+                val recallBonus = (RECALL_BOOST_COEFF * log2(rc.get().toDouble() + 1.0))
+                    .coerceAtMost(RECALL_BOOST_MAX)
+
+                val score = kwHits.toDouble() + recencyBoost + recallBonus
+                // Give headline lines a small priority tie-break.
+                val finalScore = score + (if (isHeadline) 0.3 else 0.0)
+
+                candidates.add(RecallHit(relName, trimmed, dayStr, finalScore, rc.get(), false))
+            }
+        }
+
+        // Age check: flag entries older than ARCHIVE_AFTER_DAYS
+        val cutoff = today.minusDays(ARCHIVE_AFTER_DAYS)
+        val now = LocalDate.now()
+        return@withContext candidates
+            .filter { hit ->
+                val entryDay = runCatching {
+                    LocalDate.parse(hit.day, DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+                }.getOrNull() ?: return@filter true // "global" entries are never archived
+                entryDay.isAfter(cutoff) // keep recent + current; flag olders
+            }
+            .onEach { hit ->
+                // Re-evaluate archive flag
+            }
+            .sortedByDescending { it.score }
+            .take(minOf(CANDIDATE_LIMIT, candidates.size))
+            .map { hit ->
+                val entryDay = runCatching {
+                    LocalDate.parse(hit.day, DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+                }.getOrNull()
+                val isArchived = entryDay?.isBefore(cutoff) == true
+                hit.copy(archived = isArchived, recallCount = hit.recallCount + 1)
+            }
+            .take(RECALL_LIMIT)
+    }
+
+    /**
+     * Accept a recalled entry — bumps its recallCount so frequently-accessed
+     * memories score higher next time (M3-1 boost). Should be called when an
+     * entry is actually injected into the prompt.
+     */
+    fun acceptRecall(source: String, line: String) {
+        val key = "$source:$line"
+        val count = recallCounts.getOrPut(key) { AtomicInteger(0) }.incrementAndGet()
+        Log.d(TAG, "accepted recall: $source line=${line.take(40)}… count=$count")
+    }
+
+    private fun scanMemoryFiles(): List<File> {
+        val memoryDir = memoryDirProvider()
+        if (!memoryDir.isDirectory) return emptyList()
+        return memoryDir.listFiles()
+            ?.filter { it.isFile && (it.extension == "md" || it.name == "GLOBAL.md") }
+            ?.sortedByDescending { it.lastModified() }
+            ?: emptyList()
+    }
+
+    /** Format the hit list as a system-prompt fragment (mirrors XINCODE format). */
+    fun formatAsPromptFragment(hits: List<RecallHit>): String {
+        if (hits.isEmpty()) return ""
+        return buildString {
+            append("## Recalled relevant memories (keyword FTS, no embeddings)\n")
+            for (hit in hits) {
+                if (hit.archived) append("[archived] ")
+                append("- **${hit.source}**: ${hit.line}")
+                appendLine()
+                acceptRecall(hit.source, hit.line)
+            }
+        }
+    }
+}

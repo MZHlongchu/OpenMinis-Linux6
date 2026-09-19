@@ -1155,6 +1155,8 @@
     <string name="notif_n_tasks_running">%1$d 項工作執行中</string>
     <string name="notif_in_session">工作階段中</string>
     <string name="notif_task_completed_channel_name">工作完成</string>
+    <string name="notif_approval_channel_name">工具審批</string>
+    <string name="notif_approval_channel_desc">Agent 請求敏感工具呼叫的審批</string>
     <string name="notif_task_completed_channel_description">當應用程式在背景時，Agent 工作階段結束後發出通知。</string>
     <string name="notif_task_completed_default_title">工作已完成</string>
     <string name="notif_task_completed_body">點擊以開啟對話並閱讀回覆。</string>

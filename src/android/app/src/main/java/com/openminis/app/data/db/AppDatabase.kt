@@ -6,6 +6,9 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.openminis.app.data.db.CodeIndexDao
+import com.openminis.app.data.db.CodeSymbolEntity
+import com.openminis.app.data.db.CodeEdgeEntity
 
 @Database(
     entities = [
@@ -14,8 +17,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CompactMarkerEntity::class,
         WebAppShortcutEntity::class,
         FolderEntity::class,
+        CodeSymbolEntity::class,
+        CodeEdgeEntity::class,
+        KanbanTaskEntity::class,
     ],
-    version = 12,
+    version = 14,
     // [T-android-downgrade-compat] Kept ON so MigrationTestHelper and CI can
     // validate every migration (and its downgrade counterpart) against the
     // committed schema json. Without it the upgrade/downgrade chain has no
@@ -25,6 +31,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 abstract class AppDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
     abstract fun webAppShortcutDao(): WebAppShortcutDao
+    abstract fun codeIndexDao(): CodeIndexDao
+    abstract fun kanbanTaskDao(): KanbanTaskDao
 
     companion object {
         @Volatile
@@ -301,6 +309,94 @@ abstract class AppDatabase : RoomDatabase() {
          * [com.openminis.app.data.db.DatabaseVersionGuard], which is the
          * backstop for exactly this case.
          */
+        /**
+         * [T-code-graph] Adds the code_symbols and code_edges tables for the
+         * lightweight code index used by CodeGraphTool. Pure additive — no
+         * existing entity is modified and no data is rewritten.
+         */
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS code_symbols (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        root TEXT NOT NULL,
+                        filePath TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        qualifiedName TEXT NOT NULL DEFAULT '',
+                        kind TEXT NOT NULL DEFAULT '',
+                        startLine INTEGER NOT NULL DEFAULT 0,
+                        endLine INTEGER NOT NULL DEFAULT 0,
+                        signature TEXT NOT NULL DEFAULT '',
+                        indexedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_code_symbols_root ON code_symbols(root)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_code_symbols_name ON code_symbols(name)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_code_symbols_filePath ON code_symbols(filePath)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS code_edges (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        root TEXT NOT NULL,
+                        filePath TEXT NOT NULL,
+                        kind TEXT NOT NULL DEFAULT '',
+                        fromName TEXT NOT NULL DEFAULT '',
+                        toName TEXT NOT NULL DEFAULT '',
+                        line INTEGER NOT NULL DEFAULT 0
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_code_edges_root ON code_edges(root)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_code_edges_fromName ON code_edges(fromName)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_code_edges_toName ON code_edges(toName)")
+            }
+        }
+
+        /**
+         * Downgrade 13 → 12. Intentionally a no-op: the two code index tables
+         * remain on disk so the index survives a version round-trip and the
+         * next 1.31+ upgrade doesn't need to rebuild from scratch.
+         */
+        val MIGRATION_13_12 = object : Migration(13, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // No-op. See T-code-graph downgrade policy.
+            }
+        }
+
+        /**
+         * [T-kanban] Adds the kanban_tasks table for the task board.
+         * Pure additive — no existing entity is modified and no data is rewritten.
+         */
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS kanban_tasks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT,
+                        status TEXT NOT NULL DEFAULT 'todo',
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * Downgrade 14 → 13. Intentionally a no-op: the kanban_tasks table
+         * remains on disk so tasks survive a version round-trip. The older
+         * build simply won't see the column, which is the safe fallback.
+         */
+        val MIGRATION_14_13 = object : Migration(14, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // No-op.
+            }
+        }
+
         val MIGRATION_12_11 = object : Migration(12, 11) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // Intentionally empty. See the doc comment above — the four
@@ -321,7 +417,8 @@ abstract class AppDatabase : RoomDatabase() {
                     .addMigrations(
                         MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
                         MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
-                        MIGRATION_11_12, MIGRATION_12_11,
+                        MIGRATION_11_12, MIGRATION_12_11, MIGRATION_12_13, MIGRATION_13_12,
+                        MIGRATION_13_14, MIGRATION_14_13,
                     )
                     .build()
                     .also { INSTANCE = it }

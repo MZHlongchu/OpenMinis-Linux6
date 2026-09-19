@@ -37,6 +37,7 @@ object SubAgentKind {
         // grep_source is read-only source recon — exactly what explore/plan are
         // for, so it must be allowed here or those kinds lose their best lookup.
         GrepSourceTool.NAME,
+        CodeGraphTool.NAME,
     )
 
     private val ALWAYS_DENY = setOf(

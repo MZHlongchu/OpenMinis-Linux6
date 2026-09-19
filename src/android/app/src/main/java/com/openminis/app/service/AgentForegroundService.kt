@@ -75,6 +75,10 @@ class AgentForegroundService : Service() {
         // framework.jar (const-string "android.requestPromotedOngoing").
         private const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
         private const val ACTION_STOP = "com.openminis.app.STOP_AGENT_SERVICE"
+        private const val ACTION_APPROVE = "com.openminis.app.APPROVE_TOOL"
+        private const val ACTION_DENY = "com.openminis.app.DENY_TOOL"
+        private const val ACTION_INTERRUPT = "com.openminis.app.INTERRUPT_AGENT"
+        private const val EXTRA_APPROVAL_ID = "approval_request_id"
 
         /**
          * Starts or updates the foreground service with current status.
@@ -218,6 +222,18 @@ class AgentForegroundService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_APPROVE || intent?.action == ACTION_DENY) {
+            // [T-android-notif-approval] Approval notification action fallback.
+            // PendingIntent targets ApprovalBroadcastReceiver (getBroadcast), which
+            // calls ApprovalGate.approve/deny directly. This service handler catches
+            // intents routed to onStartCommand instead.
+            val id = intent.getStringExtra(EXTRA_APPROVAL_ID)
+            if (id != null) {
+                if (intent.action == ACTION_APPROVE) ApprovalGate.approve(id)
+                else ApprovalGate.deny(id)
+            }
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_STOP) {
             // T50: the notification's Stop action — also cancel every
             // running agent loop. Without this, stopSelf() alone leaves
@@ -228,6 +244,11 @@ class AgentForegroundService : Service() {
             // streamJob start.
             SessionActivityTracker.cancelAllActiveStreams()
             stopSelf()
+            return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_INTERRUPT) {
+            // [T-android-interrupt] Pause the running agent loop.
+            SessionActivityTracker.cancelAllActiveStreams()
             return START_NOT_STICKY
         }
 
@@ -851,6 +872,15 @@ class AgentForegroundService : Service() {
                 android.R.drawable.ic_menu_close_clear_cancel,
                 getString(R.string.bg_service_stop_action),
                 stopPendingIntent,
+            )
+            // Interrupt: pause the agent loop.
+            val interruptIntent = Intent(ACTION_INTERRUPT)
+            val interruptPi = PendingIntent.getService(
+                this, 1, interruptIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            builder.addAction(
+                android.R.drawable.ic_menu_manage, "Pause", interruptPi,
             )
         }
 
