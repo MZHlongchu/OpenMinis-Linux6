@@ -24,6 +24,9 @@ object SubAgentRunner {
     /** Fraction at which the agent is ordered to stop calling tools and write up. */
     private const val FORCE_FRACTION = 0.95
 
+    /** Cap on a single tool-result / report chunk kept in history (tail kept). */
+    private const val MAX_REPORT_CHARS = 12_000
+
     suspend fun run(
         provider: LLMProvider,
         modelDisplayName: String,
