@@ -40,6 +40,13 @@ class MultiAgentSettingsRepository(context: Context) {
     )
     val subagentMaxTurns: StateFlow<Int> = _subagentMaxTurns.asStateFlow()
 
+    private val _subagentMaxAttempts = MutableStateFlow(
+        MultiAgentSettings.clampAttempts(
+            prefs.getInt(KEY_SUBAGENT_MAX_ATTEMPTS, MultiAgentSettings.DEFAULT_SUBAGENT_ATTEMPTS),
+        ),
+    )
+    val subagentMaxAttempts: StateFlow<Int> = _subagentMaxAttempts.asStateFlow()
+
     fun setEnabled(value: Boolean) {
         prefs.edit().putBoolean(KEY_ENABLED, value).apply()
         _enabled.value = value
@@ -59,6 +66,12 @@ class MultiAgentSettingsRepository(context: Context) {
         val clamped = MultiAgentSettings.clampTurns(value)
         prefs.edit().putInt(KEY_SUBAGENT_MAX_TURNS, clamped).apply()
         _subagentMaxTurns.value = clamped
+    }
+
+    fun setSubagentMaxAttempts(value: Int) {
+        val clamped = MultiAgentSettings.clampAttempts(value)
+        prefs.edit().putInt(KEY_SUBAGENT_MAX_ATTEMPTS, clamped).apply()
+        _subagentMaxAttempts.value = clamped
     }
 
     fun setSelectedModelEntryIds(ids: List<String>) {
@@ -119,6 +132,7 @@ class MultiAgentSettingsRepository(context: Context) {
         private const val KEY_MAX_CONCURRENT = "max_concurrent"
         private const val KEY_MODEL_IDS = "model_entry_ids"
         private const val KEY_SUBAGENT_MAX_TURNS = "subagent_max_turns"
+        private const val KEY_SUBAGENT_MAX_ATTEMPTS = "subagent_max_attempts"
         private const val DEFAULT_ENABLED = true
     }
 }
@@ -130,10 +144,15 @@ object MultiAgentSettings {
     const val MIN_SUBAGENT_TURNS = 1
     const val MAX_SUBAGENT_TURNS = 60
     const val DEFAULT_SUBAGENT_TURNS = 60
+    const val MIN_SUBAGENT_ATTEMPTS = 1
+    const val MAX_SUBAGENT_ATTEMPTS = 5
+    const val DEFAULT_SUBAGENT_ATTEMPTS = 3
 
     fun clampConcurrent(n: Int): Int = n.coerceIn(MIN_CONCURRENT, MAX_CONCURRENT)
 
     fun clampTurns(n: Int): Int = n.coerceIn(MIN_SUBAGENT_TURNS, MAX_SUBAGENT_TURNS)
+
+    fun clampAttempts(n: Int): Int = n.coerceIn(MIN_SUBAGENT_ATTEMPTS, MAX_SUBAGENT_ATTEMPTS)
 
     /**
      * Pad or truncate [ids] to [max] slots. Empty strings are kept (unassigned

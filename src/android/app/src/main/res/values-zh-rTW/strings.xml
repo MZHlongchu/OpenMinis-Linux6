@@ -148,6 +148,8 @@
     <string name="settings_multi_agent_turns">子代理輪次上限</string>
     <string name="settings_multi_agent_turns_subtitle">硬上限 %1$d 輪（簡單約 10，複雜 40–60，最高 60）</string>
     <string name="settings_multi_agent_turns_subtitle_v2">由協調者按任務分配（簡單約 10，複雜 40–60）；固定 200 輪失控保護</string>
+    <string name="settings_multi_agent_attempts">子代理重試次數</string>
+    <string name="settings_multi_agent_attempts_subtitle">端點暫時錯誤最多重試 %1$d 次（1 = 不重試；重試會輪換池內端點）</string>
     <string name="settings_multi_agent_decrease">減少</string>
     <string name="settings_multi_agent_increase">增加</string>
     <string name="settings_multi_agent_footer_dispatch">主工作階段模型是任務協調者：拆解、分派、驗收、彙總，而不是獨自完成全部工作。相互獨立的任務可並行；有依賴的階段必須驗收後再進入下一階段。</string>

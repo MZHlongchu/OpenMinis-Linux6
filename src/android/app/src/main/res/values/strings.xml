@@ -184,6 +184,8 @@
     <string name="settings_multi_agent_turns">Sub-agent turn limit</string>
     <string name="settings_multi_agent_turns_subtitle">Hard cap %1$d turns (simple ≈ 10, complex 40–60, max 60)</string>
     <string name="settings_multi_agent_turns_subtitle_v2">Coordinator-assigned per task (simple ≈ 10, complex 40–60); fixed 200-turn runaway guard</string>
+    <string name="settings_multi_agent_attempts">Sub-agent retry attempts</string>
+    <string name="settings_multi_agent_attempts_subtitle">Up to %1$d attempts on transient endpoint errors (1 = no retry; retries rotate pool endpoints)</string>
     <string name="settings_multi_agent_decrease">Decrease</string>
     <string name="settings_multi_agent_increase">Increase</string>
     <string name="settings_multi_agent_footer_dispatch">The main chat model is the coordinator. It decomposes, dispatches, accepts and summarizes — it should not do all the work itself. Independent tasks run in parallel; dependent phases wait for acceptance.</string>

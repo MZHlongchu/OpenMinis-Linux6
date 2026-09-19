@@ -1,3 +1,32 @@
+# OpenMinis-Linux 1.28-linux
+
+- versionCode **40**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a；有 `MINIS_UPLOAD_*` 则用上传证书，否则仍为 debug-signed）
+- 签名说明：[docs/SIGNING.md](SIGNING.md)
+
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本。
+
+## 本版
+
+子代理失败重试韧性（与 1.27 轮次预算合并）。在 1.27 “单个子代理跑几轮”之外，补上“失败重试几次”。
+
+1. **有界重试循环**
+   `runOneSubAgent` 改为有界重试：端点临时错误（429 / 截断流 / EOF）按次数重试，退避 2s→5s 带随机抖动，尊重 `RateLimited.retryAfterSeconds`。`CancellationException` 绝不重试。
+
+2. **重试轮换池内端点**
+   新增 `pickRetryEntry`：重试时换到**不同 provider 实例** 的池内 entry，避开被限流的中转，不连续打同一端点。新增 `isUpstreamTruncation` 识别上游截断。
+
+3. **重试次数可调**
+   设置 → 多智能体新增“子代理重试次数”步进器（`subagent_max_attempts`，1–5，默认 3，1 = 关闭重试）。
+
+4. **失败不连坐兄弟**
+   最终失败用 return 不 throw，避免异常逃逸裫 fan-out 的 `awaitAll` 连带取消同批其他 lane；重试成功结果带 `(recovered on attempt N/M via X)` 前缀。
+
+---
+
 # OpenMinis-Linux 1.27-linux
 
 - versionCode **39**

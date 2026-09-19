@@ -155,6 +155,8 @@
     <string name="settings_multi_agent_turns">子代理轮次上限</string>
     <string name="settings_multi_agent_turns_subtitle">硬上限 %1$d 轮（简单约 10，复杂 40–60，最高 60）</string>
     <string name="settings_multi_agent_turns_subtitle_v2">由协调者按任务分配（简单约 10，复杂 40–60）；固定 200 轮失控保护</string>
+    <string name="settings_multi_agent_attempts">子代理重试次数</string>
+    <string name="settings_multi_agent_attempts_subtitle">端点临时错误最多重试 %1$d 次（1 = 不重试；重试会轮换池内端点）</string>
     <string name="settings_multi_agent_decrease">减少</string>
     <string name="settings_multi_agent_increase">增加</string>
     <string name="settings_multi_agent_footer_dispatch">主会话模型是任务协调者：拆解、分派、验收、汇总，而不是独自完成全部工作。相互独立的任务并行，有依赖的阶段必须验收后再进入下一阶段。</string>

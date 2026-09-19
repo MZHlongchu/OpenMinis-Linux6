@@ -44,6 +44,9 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
 
     val enabled by repo.enabled.collectAsState()
     val maxConcurrent by repo.maxConcurrent.collectAsState()
+    // Turn budget is coordinator-assigned (1.27 unclamp); only the retry-attempts
+    // stepper still reads a repo StateFlow here.
+    val subagentMaxAttempts by repo.subagentMaxAttempts.collectAsState()
     val selectedIds by repo.selectedModelEntryIds.collectAsState()
     val config by providerRepo.config.collectAsState()
     val configLoaded by providerRepo.configLoaded.collectAsState()
@@ -136,6 +139,44 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                    Text(
+                        stringResource(R.string.settings_multi_agent_attempts),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    Text(
+                        stringResource(R.string.settings_multi_agent_attempts_subtitle, subagentMaxAttempts),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = { repo.setSubagentMaxAttempts(subagentMaxAttempts - 1) },
+                        enabled = enabled && subagentMaxAttempts > MultiAgentSettings.MIN_SUBAGENT_ATTEMPTS,
+                    ) {
+                        Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.settings_multi_agent_decrease))
+                    }
+                    Text(
+                        subagentMaxAttempts.toString(),
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.padding(horizontal = 4.dp),
+                    )
+                    IconButton(
+                        onClick = { repo.setSubagentMaxAttempts(subagentMaxAttempts + 1) },
+                        enabled = enabled && subagentMaxAttempts < MultiAgentSettings.MAX_SUBAGENT_ATTEMPTS,
+                    ) {
+                        Icon(Icons.Outlined.Add, contentDescription = stringResource(R.string.settings_multi_agent_increase))
+                    }
                 }
             }
         }
