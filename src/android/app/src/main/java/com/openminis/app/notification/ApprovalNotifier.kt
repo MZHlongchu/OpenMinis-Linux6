@@ -10,7 +10,6 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.openminis.app.R
-import kotlinx.coroutines.runBlocking
 import com.openminis.app.service.ApprovalGate
 
 /**
@@ -26,19 +25,45 @@ import com.openminis.app.service.ApprovalGate
  * If POST_NOTIFICATIONS is not granted, this silently no-ops (the tool
  * dispatch path should fall back to running the tool or returning a
  * user-error message).
+ *
+ * ## Notification clearing contract
+ *
+ * The approval notification is cleared on every resolution path:
+ * - **Approve / Deny tap**: [ApprovalBroadcastReceiver.onReceive] calls the
+ *   companion [cancelApproval] after forwarding the result to [ApprovalGate].
+ * - **Timeout**: [ApprovalGate.waitFor] returns `false`; callers in
+ *   `ChatViewModel` must call [cancelApproval] after a `false` result so the
+ *   stale buttons are removed. (The [ApprovalBroadcastReceiver] fallback —
+ *   see AgentForegroundService ACTION_APPROVE/DENY branch — also clears it
+ *   when an intent is routed to the service instead of the receiver.)
+ *
+ * The clearing responsibility is intentionally on the caller side for timeout:
+ * [ApprovalGate] is process-local and cannot reach the notification manager,
+ * so it cannot clear the bar on its own. [ApprovalBroadcastReceiver] clears
+ * it on user tap because it runs in the broadcast path with a `Context`.
  */
 class ApprovalNotifier(private val context: Context) {
 
     companion object {
-        private const val CHANNEL_ID = "minis_approval"
         private const val TAG = "ApprovalNotifier"
+        const val CHANNEL_ID = "minis_approval"
+
+        const val ACTION_APPROVE = "com.openminis.app.APPROVE_TOOL"
+        const val ACTION_DENY    = "com.openminis.app.DENY_TOOL"
+        const val EXTRA_REQUEST_ID = "approval_request_id"
 
         // Different requestCode per action so the system doesn't collapse them
         // into a single PendingIntent (which would make approve/deny indistinguishable).
         private const val REQ_APPROVE = 0x1A1
         private const val REQ_DENY    = 0x1B2
-        private const val NOTIF_ID    = 0x2C3
+        private const val NOTIF_BASE = 0x2C300
 
+        fun notificationId(requestId: String): Int = NOTIF_BASE xor requestId.hashCode()
+
+        /**
+         * Creates the notification channel [CHANNEL_ID] if it hasn't been created yet.
+         * Safe to call from any thread before posting the approval notification.
+         */
         fun ensureChannel(ctx: Context) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
             val mgr = ContextCompat.getSystemService(ctx, NotificationManager::class.java) ?: return
@@ -54,6 +79,27 @@ class ApprovalNotifier(private val context: Context) {
                     lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
                 }
             )
+        }
+
+        /**
+         * Cancels the approval notification by [NOTIF_ID].
+         *
+         * **Clearing responsibility**: this is the single method that removes
+         * the notification bar entry on every resolution path. It is called:
+         *  - from [ApprovalBroadcastReceiver.onReceive] after a user tap
+         *    (the receiver reaches the notification manager directly).
+         *  - from ChatViewModel when [ApprovalGate.waitFor] returns `false`
+         *    (timeout path) — ApprovalGate is process-local and cannot
+         *    clear the notification itself, so the caller MUST call this.
+         *
+         * Passing a `Context` (rather than relying on the instance holder)
+         * lets the caller invoke it from the receiver without constructing a
+         * full ApprovalNotifier.
+         */
+        fun cancelApproval(ctx: Context, requestId: String) {
+            try {
+                NotificationManagerCompat.from(ctx).cancel(notificationId(requestId))
+            } catch (_: Exception) { /* nothing to cancel */ }
         }
     }
 
@@ -75,6 +121,7 @@ class ApprovalNotifier(private val context: Context) {
             val intent = Intent(context, ApprovalBroadcastReceiver::class.java).apply {
                 action = if (approved) ACTION_APPROVE else ACTION_DENY
                 putExtra(EXTRA_REQUEST_ID, requestId)
+                setPackage(context.packageName) // explicit package so the PendingIntent resolves reliably
             }
             val reqCode = if (approved) REQ_APPROVE else REQ_DENY
             return PendingIntent.getBroadcast(
@@ -95,17 +142,11 @@ class ApprovalNotifier(private val context: Context) {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         try {
-            nm.notify(NOTIF_ID, notification)
+            nm.notify(notificationId(requestId), notification)
             android.util.Log.d(TAG, "approval notified requestId=$requestId tool=$toolName")
         } catch (se: SecurityException) {
             android.util.Log.w(TAG, "approval notify denied: ${se.message}")
         }
-    }
-
-    fun cancelApproval() {
-        try {
-            NotificationManagerCompat.from(context).cancel(NOTIF_ID)
-        } catch (_: Exception) {}
     }
 
     private fun buildLaunchIntent(): PendingIntent {
@@ -117,11 +158,5 @@ class ApprovalNotifier(private val context: Context) {
             context, 0, launch,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-    }
-
-    companion object {
-        private const val ACTION_APPROVE = "com.openminis.app.APPROVE_TOOL"
-        private const val ACTION_DENY    = "com.openminis.app.DENY_TOOL"
-        private const val EXTRA_REQUEST_ID = "approval_request_id"
     }
 }

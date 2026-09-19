@@ -21,7 +21,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.data.model.ContextUsage
-import kotlin.math.min
+import com.openminis.app.ui.theme.ChatColors
 
 /**
  * Input-composer context-usage ring.

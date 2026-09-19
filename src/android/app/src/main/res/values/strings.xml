@@ -2105,4 +2105,6 @@
     <string name="a11y_record_stop">Stop</string>
     <string name="a11y_record_save">Save as skill</string>
     <string name="a11y_record_count">%1$d step(s)</string>
+    <string name="settings_kanban">Task Board</string>
+    <string name="settings_kanban_subtitle">Track tasks across todo, doing, and done</string>
 </resources>

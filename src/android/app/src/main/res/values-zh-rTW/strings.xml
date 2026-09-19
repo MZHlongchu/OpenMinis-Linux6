@@ -1799,4 +1799,6 @@
     <string name="settings_evolution_subtitle">從糾正中學習偏好（%1$s）</string>
     <string name="settings_evolution_state_on">目前開啟</string>
     <string name="settings_evolution_state_off">目前關閉</string>
+    <string name="settings_kanban">任務看板</string>
+    <string name="settings_kanban_subtitle">管理待辦、進行中和已完成任務</string>
 </resources>

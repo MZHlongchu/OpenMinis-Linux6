@@ -494,7 +494,7 @@
              the action strings are app-internal (not exported to other apps). -->
         <receiver
             android:name=".notification.ApprovalBroadcastReceiver"
-            android:exported="true">
+            android:exported="false">
             <intent-filter>
                 <action android:name="com.openminis.app.APPROVE_TOOL" />
                 <action android:name="com.openminis.app.DENY_TOOL" />

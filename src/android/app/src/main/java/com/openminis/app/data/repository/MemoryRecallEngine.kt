@@ -7,6 +7,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.log2
@@ -46,6 +47,7 @@ class MemoryRecallEngine(
 
     companion object {
         private const val TAG = "MemoryRecallEngine"
+        private const val GLOBAL_FILE = "GLOBAL.md"
         private const val RECALL_LIMIT = 4
         private const val CANDIDATE_LIMIT = 48
         private const val RECENCY_WINDOW_DAYS = 30L
@@ -59,15 +61,24 @@ class MemoryRecallEngine(
          * Returns null if the directory doesn't exist (memory feature disabled / not set up).
          */
         fun fromContext(context: Context): MemoryRecallEngine? {
-            val base = File(context.filesDir).parentFile?.parentFile?.let {
-                // /data/data/<pkg>/files → up 2 → /data/data/<pkg>
-                File(it, "files")
+            // Canonical host directory backing the sandbox's /var/minis/memory.
+            // MinisApp wires MemoryRepository(File(filesDir, "minis-global/memory")),
+            // so that — not <filesDir>/../memory — is where the memory tools
+            // actually write GLOBAL.md and the daily logs.
+            val candidates = buildList {
+                add(File(context.filesDir, "minis-global/memory"))
+                System.getProperty("minis.memory.dir")
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { add(File(it)) }
+                add(File("/var/minis/memory"))
             }
-            val memoryDir = File(base.parentFile, "memory").takeIf { it.isDirectory }
-                ?: File(System.getProperty("minis.memory.dir") ?: "", "").takeIf { it.isDirectory }
-                ?: File("/var/minis/memory").takeIf { it.isDirectory }
+            val memoryDir = candidates.firstOrNull { it.isDirectory }
             return if (memoryDir != null) MemoryRecallEngine { memoryDir } else null
         }
+
+        /** "GLOBAL.md" ⇒ "global", "2026-09-18.md" ⇒ "2026-09-18". */
+        private fun dayKeyOf(fileName: String): String =
+            if (fileName == GLOBAL_FILE) "global" else fileName.removeSuffix(".md")
     }
 
     /** recallCount — in-memory only, resets on process restart. */
@@ -110,9 +121,9 @@ class MemoryRecallEngine(
      * Run a targeted recall: search all memory files for [query] keywords,
      * score, and return the top [RECALL_LIMIT] hits.
      */
-    suspend fun recall(query: String): List<RecallHit> = withContext(Dispatchers.IO) {
+    fun recall(query: String): List<RecallHit> {
         val keywords = extractKeywords(query)
-        if (keywords.isEmpty()) return@withContext emptyList()
+        if (keywords.isEmpty()) return emptyList()
 
         val today = LocalDate.now()
         val files = scanMemoryFiles()
@@ -120,9 +131,9 @@ class MemoryRecallEngine(
 
         for (file in files) {
             val relName = file.name
-            val isGlobal = relName == "GLOBAL.md"
+            val isGlobal = relName == GLOBAL_FILE
             val lines = runCatching { file.readLines() }.getOrNull() ?: continue
-            val dayStr = if (isGlobal) "global" else relName.removeSuffix(".md")
+            val dayStr = dayKeyOf(relName)
 
             for (line in lines) {
                 val trimmed = line.trim()
@@ -140,14 +151,20 @@ class MemoryRecallEngine(
                 val recencyBoost = if (isGlobal) 0.5 // GLOBAL.md always mildly relevant
                 else {
                     val entryDay = runCatching {
-                        LocalDate.parse(dayStr, DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+                        LocalDate.parse(dayStr, DateTimeFormatter.ISO_LOCAL_DATE)
                     }.getOrNull() ?: continue
-                    val daysAgo = today.unaryMinus().until(entryDay).days.toLong().coerceAtLeast(0L)
+                    // ChronoUnit gives a signed difference: negative for future
+                    // dates, positive for the past. The old `today.unaryMinus()
+                    // .until(entryDay)` was inverted (and negative for every
+                    // real, i.e. past, entry) so recencyBoost always clamped to
+                    // 0.0 and recency scoring was effectively dead.
+                    val daysAgo = ChronoUnit.DAYS.between(entryDay, today).coerceAtLeast(0L)
                     if (daysAgo > RECENCY_WINDOW_DAYS) 0.0
                     else 1.0 - (daysAgo.toDouble() / RECENCY_WINDOW_DAYS)
                 }
 
-                // Recall-count boost (M3-1): log2 growth, capped.
+                // Recall-count boost (M3-1): log2 growth, capped. The key must
+                // match [acceptRecall] exactly or the boost never accumulates.
                 val rcKey = "$dayStr:$trimmed"
                 val rc = recallCounts.getOrPut(rcKey) { AtomicInteger(0) }
                 val recallBonus = (RECALL_BOOST_COEFF * log2(rc.get().toDouble() + 1.0))
@@ -161,28 +178,21 @@ class MemoryRecallEngine(
             }
         }
 
-        // Age check: flag entries older than ARCHIVE_AFTER_DAYS
+        // Aging (M3-1 后半): entries older than ARCHIVE_AFTER_DAYS are still
+        // returned by keyword match but flagged `archived=true` so the caller
+        // can fade / drop them. They must NOT be filtered out here — the old
+        // pipeline dropped them BEFORE the map() that set the flag, so
+        // `archived` was always false and old memories silently vanished.
         val cutoff = today.minusDays(ARCHIVE_AFTER_DAYS)
-        val now = LocalDate.now()
-        return@withContext candidates
-            .filter { hit ->
-                val entryDay = runCatching {
-                    LocalDate.parse(hit.day, DateTimeFormatter.ofPattern("yyyy-MM-dd"))
-                }.getOrNull() ?: return@filter true // "global" entries are never archived
-                entryDay.isAfter(cutoff) // keep recent + current; flag olders
-            }
-            .onEach { hit ->
-                // Re-evaluate archive flag
-            }
-            .sortedByDescending { it.score }
-            .take(minOf(CANDIDATE_LIMIT, candidates.size))
+        return candidates
             .map { hit ->
                 val entryDay = runCatching {
-                    LocalDate.parse(hit.day, DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+                    LocalDate.parse(hit.day, DateTimeFormatter.ISO_LOCAL_DATE)
                 }.getOrNull()
-                val isArchived = entryDay?.isBefore(cutoff) == true
-                hit.copy(archived = isArchived, recallCount = hit.recallCount + 1)
+                // "global" (unparseable) entries are never archived.
+                hit.copy(archived = entryDay?.isBefore(cutoff) == true)
             }
+            .sortedByDescending { it.score }
             .take(RECALL_LIMIT)
     }
 
@@ -192,7 +202,11 @@ class MemoryRecallEngine(
      * entry is actually injected into the prompt.
      */
     fun acceptRecall(source: String, line: String) {
-        val key = "$source:$line"
+        // Must key on the SAME day token [recall] reads (see rcKey there):
+        // source arrives as "2026-09-18.md" while recall reads day "2026-09-18",
+        // so keying on the raw source meant every boost landed on a key nobody
+        // ever looked up.
+        val key = "${dayKeyOf(source)}:${line.trim()}"
         val count = recallCounts.getOrPut(key) { AtomicInteger(0) }.incrementAndGet()
         Log.d(TAG, "accepted recall: $source line=${line.take(40)}… count=$count")
     }

@@ -75,6 +75,11 @@ class AgentForegroundService : Service() {
         // framework.jar (const-string "android.requestPromotedOngoing").
         private const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
         private const val ACTION_STOP = "com.openminis.app.STOP_AGENT_SERVICE"
+        // Reuse the shared constants from ApprovalNotifier instead of duplicating —
+        // keeps the approve/deny strings in sync without a circular dependency
+        // (this file cannot import ApprovalNotifier because that would create a
+        // cyclic compilation order against the receiver). These string values
+        // MUST match ApprovalNotifier.Companion's copies verbatim.
         private const val ACTION_APPROVE = "com.openminis.app.APPROVE_TOOL"
         private const val ACTION_DENY = "com.openminis.app.DENY_TOOL"
         private const val ACTION_INTERRUPT = "com.openminis.app.INTERRUPT_AGENT"
@@ -226,12 +231,18 @@ class AgentForegroundService : Service() {
             // [T-android-notif-approval] Approval notification action fallback.
             // PendingIntent targets ApprovalBroadcastReceiver (getBroadcast), which
             // calls ApprovalGate.approve/deny directly. This service handler catches
-            // intents routed to onStartCommand instead.
+            // intents routed to onStartCommand instead (e.g. when the system
+            // re-routes a stale broadcast to the foreground service).
             val id = intent.getStringExtra(EXTRA_APPROVAL_ID)
             if (id != null) {
                 if (intent.action == ACTION_APPROVE) ApprovalGate.approve(id)
                 else ApprovalGate.deny(id)
             }
+            // Clear the approval notification on every resolution path that
+            // lands here — the receiver owns its own tap path, but if the
+            // system delivers this intent to onStartCommand we still need
+            // the bar entry gone.
+            if (id != null) com.openminis.app.notification.ApprovalNotifier.cancelApproval(this, id)
             return START_NOT_STICKY
         }
         if (intent?.action == ACTION_STOP) {
@@ -247,8 +258,26 @@ class AgentForegroundService : Service() {
             return START_NOT_STICKY
         }
         if (intent?.action == ACTION_INTERRUPT) {
-            // [T-android-interrupt] Pause the running agent loop.
+            // [T-android-interrupt] Pause the running agent loop AND clear the
+            // notification — the user explicitly asked for a stop/pause, so the
+            // ongoing status row must go too. If any sessions remain (they
+            // were never cancelled) the service re-anchors itself below.
             SessionActivityTracker.cancelAllActiveStreams()
+            // [T-android-interrupt-clear] The ongoing notification is the
+            // visual representation of "agent is running". If we just stopped
+            // all active streams, keeping the notification lying would leave
+            // a stale "Minis is working…" pill with no way to dismiss it.
+            // The notification manager id is NOTIFICATION_ID.
+            try {
+                getSystemService(NotificationManager::class.java)
+                    ?.cancel(NOTIFICATION_ID)
+            } catch (_: Exception) {}
+            // Stop the service — it was started solely to run agents. If a
+            // new agent later registers with SessionActivityTracker, the
+            // service will be re-started via startService from the session
+            // activation path. Leaving it alive here is a dead service
+            // burning CPU / battery.
+            stopSelf()
             return START_NOT_STICKY
         }
 
@@ -874,7 +903,9 @@ class AgentForegroundService : Service() {
                 stopPendingIntent,
             )
             // Interrupt: pause the agent loop.
-            val interruptIntent = Intent(ACTION_INTERRUPT)
+            val interruptIntent = Intent(this, AgentForegroundService::class.java).apply {
+                action = ACTION_INTERRUPT
+            }
             val interruptPi = PendingIntent.getService(
                 this, 1, interruptIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,

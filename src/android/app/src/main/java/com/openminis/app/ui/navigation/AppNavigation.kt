@@ -165,6 +165,7 @@ object Routes {
     /** [T-soul-md] SOUL.md editor. */
     const val SOUL = "soul"
     const val EVOLUTION = "evolution"
+    const val KANBAN = "kanban"
     const val MEMORY_FILE_EDIT = "memory_file/{fileName}/{isGlobal}"
     const val PERMISSIONS = "permissions"
     /**
@@ -605,6 +606,7 @@ fun AppNavigation(
                 onMcpClick = { navController.safeNavigate(Routes.MCP) },
                 onSoulClick = { navController.safeNavigate(Routes.SOUL) },
                 onEvolutionClick = { navController.safeNavigate(Routes.EVOLUTION) },
+                onKanbanClick = { navController.safeNavigate(Routes.KANBAN) },
                 onPermissionsClick = { navController.safeNavigate(Routes.PERMISSIONS) },
                 onUsageClick = { navController.safeNavigate(Routes.USAGE_STATS) },
                 onAppearanceClick = { navController.safeNavigate(Routes.APPEARANCE) },
@@ -1313,6 +1315,10 @@ fun AppNavigation(
             com.openminis.app.ui.settings.SoulSettingsScreen(
                 onBack = { navController.safePopBackStack() },
             )
+        }
+
+        composable(Routes.KANBAN) {
+            com.openminis.app.ui.settings.KanbanScreen(onBack = { navController.safePopBackStack() })
         }
 
         composable(Routes.EVOLUTION) {

@@ -14,6 +14,7 @@ import com.openminis.app.agent.ToolLoopDetector
 import com.openminis.app.browser.BrowserActionInput
 import com.openminis.app.browser.BrowserTabPool
 import com.openminis.app.data.db.MessageEntity
+import com.openminis.app.data.db.AppDatabase
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.Delete
@@ -59,6 +60,7 @@ import com.openminis.app.sandbox.ExecutionCoordinator
 import com.openminis.app.terminal.MinisOpenUrlBroker
 import com.openminis.app.terminal.MinisUrlMarker
 import com.openminis.app.tools.AgentTools
+import com.openminis.app.tools.CodeGraphTool
 import com.openminis.app.tools.SubAgentKind
 import com.openminis.app.tools.SubAgentLane
 import com.openminis.app.tools.FileEditTool
@@ -9401,18 +9403,20 @@ class ChatViewModel(
                     id, "file_write", "agent writes to local filesystem"
                 )
                 val approved = ApprovalGate.waitFor(id)
-                if (!approved) return@runCatching ToolExecutionResult("User rejected file_write", false, "file_write")
+                ApprovalNotifier.cancelApproval(context, id)
+                if (!approved) return@runCatching ToolExecutionResult("User rejected or timed out file_write", false, toolTitle = "file_write")
                 FileWriteTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
-            }.getOrElse { ToolExecutionResult("Approval failed: " + it.message, false, name) }
+            }.getOrElse { ToolExecutionResult("Approval failed: " + it.message, false, toolTitle = name) }
             FileEditTool.NAME -> runCatching {
                 val id = ApprovalGate.requestApproval()
                 com.openminis.app.notification.ApprovalNotifier(context).notifyApproval(
                     id, "file_edit", "agent edits local filesystem"
                 )
                 val approved = ApprovalGate.waitFor(id)
-                if (!approved) return@runCatching ToolExecutionResult("User rejected file_edit", false, "file_edit")
+                ApprovalNotifier.cancelApproval(context, id)
+                if (!approved) return@runCatching ToolExecutionResult("User rejected or timed out file_edit", false, toolTitle = "file_edit")
                 FileEditTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
-            }.getOrElse { ToolExecutionResult("Approval failed: " + it.message, false, name) }
+            }.getOrElse { ToolExecutionResult("Approval failed: " + it.message, false, toolTitle = name) }
             // T178: pass sessionId + context so read_image routes through
             // resolveSessionHostPath like file_read/write/edit do — without
             // these, the tool consults the global last-writer-wins
@@ -9432,12 +9436,12 @@ class ChatViewModel(
             com.openminis.app.tools.SessionLookupTool.READ -> com.openminis.app.tools.SessionLookupTool.executeRead(argsJson, context)
             com.openminis.app.tools.AskUserQuestion.NAME, com.openminis.app.tools.AskUserQuestion.ALIAS -> executeAskUserQuestion(argsJson)
             CodeGraphTool.NAME -> {
-                val args = JSONObject(argsJson).let {
-                    mapOfNotNull(
-                        "action" to it.optString("action").takeIf { a -> a.isNotBlank() },
-                        "name" to it.optString("name").takeIf { a -> a.isNotBlank() },
-                        "path" to it.optString("path").takeIf { a -> a.isNotBlank() },
-                    )
+                val args = JSONObject(argsJson).let { json ->
+                    buildMap<String, String> {
+                        json.optString("action").takeIf { it.isNotBlank() }?.let { put("action", it) }
+                        json.optString("name").takeIf { it.isNotBlank() }?.let { put("name", it) }
+                        json.optString("path").takeIf { it.isNotBlank() }?.let { put("path", it) }
+                    }
                 }
                 ToolExecutionResult(
                     output = runCatching {

@@ -29,6 +29,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,6 +62,7 @@ fun KanbanScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val dao = remember(context) { AppDatabase.getInstance(context).kanbanTaskDao() }
     val tasks by dao.observeAll().collectAsState(initial = emptyList())
+    val scope = rememberCoroutineScope()
     var showAdd by remember { mutableStateOf(false) }
     var newTitle by remember { mutableStateOf("") }
 
@@ -98,8 +100,14 @@ fun KanbanScreen(onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
         ) {
-            items(tasks, key = { it.id }) { task ->
-                KanbanTaskCard(task = task, dao = dao)
+            items(tasks, key = { task -> task.id }) { task ->
+                KanbanTaskCard(task = task) { newStatus ->
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            dao.updateStatus(task.id, newStatus, System.currentTimeMillis())
+                        }
+                    }
+                }
             }
             item { Spacer(Modifier.height(48.dp)) }
         }
@@ -144,9 +152,7 @@ fun KanbanScreen(onBack: () -> Unit) {
 }
 
 @Composable
-private fun KanbanTaskCard(task: KanbanTaskEntity, dao: KanbanTaskDao) {
-    val scope = rememberCoroutineScope()
-
+private fun KanbanTaskCard(task: KanbanTaskEntity, onMove: (String) -> Unit) {
     val statusLabel = when (task.status) {
         STATUS_TODO -> LABEL_TODO
         STATUS_DOING -> LABEL_DOING
@@ -214,8 +220,7 @@ private fun KanbanTaskCard(task: KanbanTaskEntity, dao: KanbanTaskDao) {
                                 STATUS_DONE -> STATUS_DOING
                                 else -> STATUS_TODO
                             }
-                            val ts = System.currentTimeMillis()
-                            scope.launch { withContext(Dispatchers.IO) { dao.updateStatus(task.id, newStatus, ts) } }
+                            onMove(newStatus)
                         }
                     },
                     enabled = canGoLeft
@@ -235,8 +240,7 @@ private fun KanbanTaskCard(task: KanbanTaskEntity, dao: KanbanTaskDao) {
                                 STATUS_DOING -> STATUS_DONE
                                 else -> STATUS_DONE
                             }
-                            val ts = System.currentTimeMillis()
-                            scope.launch { withContext(Dispatchers.IO) { dao.updateStatus(task.id, newStatus, ts) } }
+                            onMove(newStatus)
                         }
                     },
                     enabled = canGoRight
