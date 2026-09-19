@@ -2,6 +2,7 @@ package com.openminis.app.ui.chat
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.NoteAdd
+import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Description
@@ -60,7 +61,8 @@ internal fun toolAccentColor(toolName: String): Color = when (toolName) {
     "web_search" -> Color(0xFF32ADE6)    // iOS: .cyan for search
     "search_sessions", "read_session" -> Color(0xFF64D2FF)
     "spawn_agent", "run_subagent" -> Color(0xFF5856D6)
-    else -> Color(0xFF8E8E93)
+    "cronjob" -> Color(0xFFFF9500)
+    else -> if (toolName.startsWith("online_")) Color(0xFF007AFF) else Color(0xFF8E8E93)
 }
 
 // Helper: tool icon (iOS: distinct SF Symbols per tool type)
@@ -75,7 +77,8 @@ internal fun toolIconFor(toolName: String) = when (toolName) {
     "web_search" -> Icons.Default.Search               // iOS: magnifyingglass
     "search_sessions", "read_session" -> Icons.Default.Search
     "spawn_agent", "run_subagent" -> Icons.Default.Groups
-    else -> Icons.Default.Build
+    "cronjob" -> Icons.Default.Alarm
+    else -> if (toolName.startsWith("online_")) Icons.Default.Language else Icons.Default.Build
 }
 
 // Helper: tool display name for "Minis is using X"
@@ -92,7 +95,8 @@ internal fun toolDisplayName(toolName: String): String = when (toolName) {
     "search_sessions" -> "session search"
     "read_session" -> "session reader"
     "spawn_agent", "run_subagent" -> "sub-agent"
-    else -> toolName
+    "cronjob" -> "cron"
+    else -> if (toolName.startsWith("online_")) "online plugin" else toolName
 }
 
 /**
@@ -111,6 +115,7 @@ internal fun toolTitleLabel(toolName: String): String = when (toolName) {
     "search_sessions" -> "Minis is searching Sessions"
     "read_session" -> "Minis is reading a Session"
     "spawn_agent", "run_subagent" -> "Minis is coordinating a sub-agent"
+    "cronjob" -> "Minis is scheduling a task"
     else -> "Minis is using ${toolDisplayName(toolName)}"
 }
 

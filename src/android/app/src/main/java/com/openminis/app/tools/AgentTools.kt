@@ -42,6 +42,7 @@ object AgentTools {
         add(SessionLookupTool.searchDefinition())
         add(SessionLookupTool.readDefinition())
         add(AskUserQuestion.definition())
+        add(CronJobTool.definition())
         if (memoryEnabled) {
             add(memoryWriteDefinition())
             add(memoryGetDefinition())
@@ -87,7 +88,7 @@ object AgentTools {
                     "integer",
                     "Omit to auto-size: simple ≈ 10, complex 40–60, clamped to Settings → Multi-agent.",
                 ),
-                "role" to AgentToolParam("string", "Member role, e.g. 'Android reviewer', 'docs writer'."),
+                "role" to AgentToolParam("string", "Catalog role (秘书助理, 产品经理, 架构师, 工程师, 前端设计师, 测试工程师, 侦察兵, 拆解工, 分析员) injects focus / do-not / when-silent / who-to-ask and a tool whitelist. Other strings are labels only."),
                 "skills" to AgentToolParam("string", "Comma-separated skill ids the worker should read first."),
                 "model" to AgentToolParam("string", "Optional model-entry id from the configured sub-agent pool. Omit to round-robin."),
                 "tool_title" to AgentToolParam("string", "Short live-status title, e.g. 'Review RootfsManager'."),
@@ -111,7 +112,7 @@ Each task prompt MUST be self-contained with ## Task / ## Expected result / ## C
                 ),
                 "tool_title" to AgentToolParam("string", "Short live-status title when not using tasks[]."),
                 "prompt" to AgentToolParam("string", "Legacy single-task brief. Ignored when tasks[] is non-empty."),
-                "role" to AgentToolParam("string", "Member role, e.g. 'Android reviewer', 'docs writer'."),
+                "role" to AgentToolParam("string", "Catalog role (秘书助理, 产品经理, 架构师, 工程师, 前端设计师, 测试工程师, 侦察兵, 拆解工, 分析员) injects focus / do-not / when-silent / who-to-ask and a tool whitelist. Other strings are labels only."),
                 "skills" to AgentToolParam("string", "Comma-separated skill ids the worker should read first."),
                 "model" to AgentToolParam("string", "Optional model-entry id from the configured sub-agent pool. Omit to round-robin."),
                 "kind" to AgentToolParam(

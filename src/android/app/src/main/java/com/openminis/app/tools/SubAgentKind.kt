@@ -45,6 +45,7 @@ object SubAgentKind {
         SPAWN_AGENT,
         "ask_user_question",
         "AskUserQuestion",
+        CronJobTool.NAME,
     )
 
     fun isSpawnTool(name: String): Boolean {
@@ -81,8 +82,14 @@ object SubAgentKind {
         return false
     }
 
-    fun filterTools(kind: String, tools: List<AgentToolDefinition>): List<AgentToolDefinition> {
-        return tools.filter { !blocks(kind, it.name) }
+    fun filterTools(
+        kind: String,
+        tools: List<AgentToolDefinition>,
+        role: String? = null,
+    ): List<AgentToolDefinition> {
+        val base = tools.filter { !blocks(kind, it.name) }
+        val allowed = CollabRoles.toolsFor(role) ?: return base
+        return base.filter { it.name in allowed }
     }
 
     /**

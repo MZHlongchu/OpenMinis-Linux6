@@ -285,6 +285,15 @@ internal fun formatScheduleSummary(task: ScheduledTask): String {
             val days = task.customDays.sorted().joinToString(",") { dowShort(it) }
             if (days.isBlank()) "Custom" else days
         }
+        ScheduledRepeatMode.INTERVAL -> {
+            val m = task.intervalMinutes
+            when {
+                m > 0 && m % 1440L == 0L -> "Every ${m / 1440L}d"
+                m > 0 && m % 60L == 0L -> "Every ${m / 60L}h"
+                m > 0 -> "Every ${m}m"
+                else -> "Interval"
+            }
+        }
     }
     val next = task.nextTriggerMs()?.let {
         " · next ${IsoTime.formatPattern(it, "MMM d HH:mm")}"

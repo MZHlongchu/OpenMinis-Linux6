@@ -1,3 +1,32 @@
+# OpenMinis-Linux 1.32-linux
+
+- versionCode **46**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a；有 `MINIS_UPLOAD_*` 则用上传证书，否则仍为 debug-signed）
+- 签名说明：[docs/SIGNING.md](SIGNING.md)
+
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本。
+
+## 本版
+
+对照 XINCODE 补上 1.31 仍缺的三块：定时任务、插件市场、协作角色。记忆召回、`grep_source`、写文件审批闸、代码图保持 1.31 实现。
+
+1. **cronjob**
+   Agent 工具 `cronjob`：create / list / remove。日程 `30m`/`2h`/`1d` 或 `every 30m`/`every 2h`/`every 1d`。底层 `ScheduledTask` + AlarmManager，新增 `INTERVAL`、`intervalMinutes`、`fireAtMs`。explore/plan/子代理禁用，避免嵌套调度。提示词要求优先 `cronjob` 而不是 crontab/at。
+
+2. **插件市场**
+   设置 → 插件市场（`minis://settings/plugins`）。MCP 预设（Microsoft Learn / Context7 / DeepWiki）一键写入 MCP 集成。远程 OpenAPI 目录安装后暴露 `online_<id>__<op>`。出站 SSRF 校验（`FetchUrlGuard`）；API Key 加密存储且不进模型上下文。不移植 GitHub Token 连接器。
+
+3. **协作角色**
+   `spawn_agent` 的 `role` 可填：秘书助理、产品经理、架构师、工程师、前端设计师、测试工程师、侦察兵、拆解工、分析员。注入「盯着 / 不管 / 闭嘴 / 该找谁」并按角色收工具（含 `grep_source`）。设置 → 多智能体列出角色卡片。非目录名仍只当标签。
+
+4. **边界**
+   不覆盖 `MemoryRecallEngine`；不把 `grep_source` 换成主会话 grep 工具；不改 SOUL.md/GLOBAL.md。改编来源 XINCODE-Public（GPL-3.0-or-later），见 `THIRD_PARTY_LICENSES.md`。
+
+---
+
 # OpenMinis-Linux 1.30.2-linux
 
 - versionCode **44**

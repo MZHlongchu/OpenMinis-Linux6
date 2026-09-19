@@ -231,7 +231,12 @@ object SubAgentRunner {
         writePaths: List<String>,
         turns: Int,
     ): String {
-        val roleLine = role?.trim()?.takeIf { it.isNotEmpty() }?.let { "Assigned role: $it.\n" } ?: ""
+        val catalog = CollabRoles.byName(role)
+        val roleLine = when {
+            catalog != null -> "Assigned role: ${catalog.name}.\n\n${catalog.prompt}\n\n"
+            !role.isNullOrBlank() -> "Assigned role: ${role.trim()}.\n"
+            else -> ""
+        }
         val skillsLine = skillsHint?.trim()?.takeIf { it.isNotEmpty() }?.let {
             "Read these skills first (file_read `/var/minis/skills/<id>/SKILL.md`): $it\n"
         } ?: ""

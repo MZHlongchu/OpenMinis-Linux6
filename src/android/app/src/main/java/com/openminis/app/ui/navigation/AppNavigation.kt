@@ -162,6 +162,7 @@ object Routes {
     const val MEMORY = "memory"
     /** [T-mcp-integration-android] MCP Integrations management screen. */
     const val MCP = "mcp"
+    const val PLUGIN_MARKET = "plugin_market"
     /** [T-soul-md] SOUL.md editor. */
     const val SOUL = "soul"
     const val EVOLUTION = "evolution"
@@ -604,6 +605,7 @@ fun AppNavigation(
                 onTerminalClick = { navController.safeNavigate(Routes.terminal()) },
                 onMemoryClick = { navController.safeNavigate(Routes.MEMORY) },
                 onMcpClick = { navController.safeNavigate(Routes.MCP) },
+                onPluginMarketClick = { navController.safeNavigate(Routes.PLUGIN_MARKET) },
                 onSoulClick = { navController.safeNavigate(Routes.SOUL) },
                 onEvolutionClick = { navController.safeNavigate(Routes.EVOLUTION) },
                 onKanbanClick = { navController.safeNavigate(Routes.KANBAN) },
@@ -1308,6 +1310,13 @@ fun AppNavigation(
                     envVarRepository = envVarRepository,
                 )
             }
+        }
+
+        composable(Routes.PLUGIN_MARKET) {
+            com.openminis.app.ui.settings.PluginMarketScreen(
+                mcpRepository = mcpRepository,
+                onBack = { navController.safePopBackStack() },
+            )
         }
 
         // [T-soul-md] SOUL.md editor.

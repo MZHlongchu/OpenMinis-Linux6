@@ -56,3 +56,9 @@ Test-only dependencies: JUnit 4.13.2 (**EPL-1.0**), MockWebServer 4.12.0 (**Apac
 ## Removed / historical
 
 - **swift-markdown-ui** (MIT) — formerly vendored under `deps/swift-markdown-ui`; no longer referenced by the Xcode project or imported by any source file, and is not part of the open-source tree.
+
+## Adapted Kotlin (not vendored as a module)
+
+| Component | License | Notes |
+|---|---|---|
+| [XINCODE-Public](https://github.com/kusesad-1122/XINCODE-Public) | **GPL-3.0-or-later** | Selected Android agent pieces adapted into OpenMinis: `cronjob`/`CronScheduler`, online OpenAPI plugin registry + `OnlineApiTool`, `CollabRoles` from PresetTeam. Memory ranking stays on OpenMinis `MemoryRecallEngine`. Not a wholesale copy of the XINCODE app. |

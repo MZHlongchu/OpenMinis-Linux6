@@ -91,6 +91,14 @@ class ScheduledTaskManager(private val context: Context) {
             store.upsert(t.copy(enabled = false))
             return
         }
+        if (t.repeatMode == ScheduledRepeatMode.INTERVAL) {
+            val intervalMs = t.intervalMinutes * 60_000L
+            if (intervalMs <= 0L) return
+            val updated = t.copy(fireAtMs = System.currentTimeMillis() + intervalMs)
+            store.upsert(updated)
+            registerAlarm(updated)
+            return
+        }
         registerAlarm(t)
     }
 

@@ -51,7 +51,7 @@ data class ScheduledRun(
  * [ScheduledTaskStore] (SharedPreferences). Schema lives here so the store
  * stays a thin layer over the JSON array.
  */
-enum class ScheduledRepeatMode { ONCE, DAILY, WEEKDAYS, CUSTOM }
+enum class ScheduledRepeatMode { ONCE, DAILY, WEEKDAYS, CUSTOM, INTERVAL }
 
 /**
  * What the task does when it fires. Mirrors the iOS App Intent set.
@@ -133,6 +133,8 @@ data class ScheduledTask(
     // "Run records" menu opens a screen backed by this. Capped at
     // MAX_RUN_HISTORY by the manager when appending.
     val runHistory: List<ScheduledRun> = emptyList(),
+    val intervalMinutes: Long = 0,
+    val fireAtMs: Long? = null,
 ) {
 
     /**
@@ -147,6 +149,18 @@ data class ScheduledTask(
      */
     fun nextTriggerMs(now: Long = System.currentTimeMillis()): Long? {
         if (!enabled) return null
+        if (repeatMode == ScheduledRepeatMode.INTERVAL) {
+            val intervalMs = intervalMinutes * 60_000L
+            if (intervalMs <= 0L) return null
+            val first = fireAtMs ?: (createdAt + intervalMs)
+            if (first > now) return first
+            val steps = (now - first) / intervalMs + 1
+            return first + steps * intervalMs
+        }
+        if (fireAtMs != null && repeatMode == ScheduledRepeatMode.ONCE) {
+            if (lastFiredAt != null) return null
+            return if (fireAtMs > now) fireAtMs else now
+        }
 
         // Earliest instant we may fire: max(now, start-of-startDate). This lets
         // a task created today with a future startDate wait until that day.
@@ -161,6 +175,7 @@ data class ScheduledTask(
         }
 
         val candidate: Long = when (repeatMode) {
+            ScheduledRepeatMode.INTERVAL -> return null
             ScheduledRepeatMode.ONCE, ScheduledRepeatMode.DAILY -> {
                 if (cal.timeInMillis < floor) cal.add(Calendar.DAY_OF_YEAR, 1)
                 cal.timeInMillis
@@ -224,6 +239,8 @@ data class ScheduledTask(
         if (runHistory.isNotEmpty()) {
             put("runHistory", JSONArray().apply { runHistory.forEach { put(it.toJson()) } })
         }
+        if (intervalMinutes > 0L) put("intervalMinutes", intervalMinutes)
+        if (fireAtMs != null) put("fireAtMs", fireAtMs)
     }
 
     companion object {
@@ -260,6 +277,8 @@ data class ScheduledTask(
                     }
                 }
             } ?: emptyList(),
+            intervalMinutes = o.optLong("intervalMinutes", 0L),
+            fireAtMs = if (o.has("fireAtMs")) o.optLong("fireAtMs") else null,
         )
     }
 }

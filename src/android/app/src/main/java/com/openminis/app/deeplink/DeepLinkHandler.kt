@@ -177,6 +177,8 @@ object DeepLinkHandler {
             "usage", "usage-stats", "usage_stats" ->
                 DeepLinkAction.OpenSettingsScreen(Routes.USAGE_STATS)
             "skills" -> DeepLinkAction.OpenSettingsScreen(Routes.SKILLS)
+            "plugins", "plugin-market", "plugin_market" -> DeepLinkAction.OpenSettingsScreen(Routes.PLUGIN_MARKET)
+            "mcp" -> DeepLinkAction.OpenSettingsScreen(Routes.MCP)
             "multi-agent", "multi_agent", "subagents" -> DeepLinkAction.OpenSettingsScreen(Routes.MULTI_AGENT)
             "memory" -> DeepLinkAction.OpenSettingsScreen(Routes.MEMORY)
             "evolution" -> DeepLinkAction.OpenSettingsScreen(Routes.EVOLUTION)

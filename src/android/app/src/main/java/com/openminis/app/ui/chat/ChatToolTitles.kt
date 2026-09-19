@@ -18,7 +18,8 @@ internal fun friendlyToolTitle(toolName: String): String = when (toolName) {
     "read_session" -> "Read Session"
     "spawn_agent", "run_subagent" -> "Sub-agent"
     "ask_user_question", "AskUserQuestion" -> "Ask User"
-    else -> toolName
+    "cronjob" -> "Cron Job"
+    else -> if (toolName.startsWith("online_")) "Online Plugin" else toolName
         .split('_')
         .filter { it.isNotEmpty() }
         .joinToString(" ") { it.replaceFirstChar { ch -> ch.uppercase() } }

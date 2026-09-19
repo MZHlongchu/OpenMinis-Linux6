@@ -154,7 +154,8 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
         "daily" -> ScheduledRepeatMode.DAILY
         "weekdays" -> ScheduledRepeatMode.WEEKDAYS
         "custom" -> ScheduledRepeatMode.CUSTOM
-        else -> throw IllegalArgumentException("--repeat must be once|daily|weekdays|custom")
+        "interval" -> ScheduledRepeatMode.INTERVAL
+        else -> throw IllegalArgumentException("--repeat must be once|daily|weekdays|custom|interval")
     }
 
     private fun parseDays(s: String): Set<Int> {

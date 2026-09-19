@@ -39,7 +39,7 @@ class SubAgentKindTest {
         assertEquals(10, SubAgentKind.inferTurns(SubAgentKind.EXPLORE, "look at Foo.kt"))
         assertEquals(40, SubAgentKind.inferTurns(SubAgentKind.WORKER, "implement the login flow"))
         assertEquals(10, SubAgentKind.clampTurns(SubAgentKind.EXPLORE, null, 60, "look at Foo.kt"))
-        assertEquals(60, SubAgentKind.clampTurns(SubAgentKind.EXPLORE, 99))
+        assertEquals(99, SubAgentKind.clampTurns(SubAgentKind.EXPLORE, 99))
         assertEquals(20, SubAgentKind.clampTurns(SubAgentKind.WORKER, null, 60, "do the slice"))
         assertEquals(30, SubAgentKind.clampTurns(SubAgentKind.WORKER, 99, 30))
         assertEquals(8, SubAgentKind.clampTurns(SubAgentKind.PLAN, 8, 30))
@@ -52,8 +52,12 @@ class SubAgentKindTest {
             AgentToolDefinition("spawn_agent", "d", mapOf("x" to AgentToolParam("string", "x")), listOf("x")),
             AgentToolDefinition("run_subagent", "d", mapOf("x" to AgentToolParam("string", "x")), listOf("x")),
             AgentToolDefinition("file_read", "r", mapOf("x" to AgentToolParam("string", "x")), listOf("x")),
+            AgentToolDefinition("cronjob", "c", mapOf("x" to AgentToolParam("string", "x")), listOf("x")),
         )
-        assertTrue(SubAgentKind.filterTools(SubAgentKind.WORKER, tools).none { SubAgentKind.isSpawnTool(it.name) })
+        val names = SubAgentKind.filterTools(SubAgentKind.WORKER, tools).map { it.name }
+        assertTrue(names.none { SubAgentKind.isSpawnTool(it) })
+        assertFalse(names.contains("cronjob"))
+        assertTrue(SubAgentKind.blocks(SubAgentKind.EXPLORE, CronJobTool.NAME))
         assertTrue(SubAgentKind.blocks(SubAgentKind.WORKER, "run_subagent"))
         assertTrue(SubAgentKind.blocks(SubAgentKind.PLAN, "spawn_agent"))
         assertTrue(SubAgentKind.blocks(SubAgentKind.GENERAL, "spawn_agent"))

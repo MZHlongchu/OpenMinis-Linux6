@@ -212,6 +212,20 @@
     <!-- [T-mcp-integration-android] MCP Integrations settings entry + management screen -->
     <string name="settings_mcp">MCP Integrations</string>
     <string name="settings_mcp_subtitle">Connect Model Context Protocol servers</string>
+    <string name="plugin_market_title">Plugin market</string>
+    <string name="plugin_market_subtitle">MCP presets and online OpenAPI tools</string>
+    <string name="plugin_market_section_mcp">MCP presets</string>
+    <string name="plugin_market_footer_mcp">One-tap add to MCP Integrations. Skills stay under Settings → Skills.</string>
+    <string name="plugin_market_section_online">Online APIs</string>
+    <string name="plugin_market_footer_online">Remote OpenAPI-lite tools. Requests are SSRF-checked; API keys never enter the model context.</string>
+    <string name="plugin_market_live">Live catalog · %1$d plugins</string>
+    <string name="plugin_market_cached">Offline cache · %1$d plugins</string>
+    <string name="plugin_market_loading">Loading catalog…</string>
+    <string name="plugin_market_empty">No remote plugins. Check network and retry.</string>
+    <string name="plugin_market_api_key">API key</string>
+    <string name="plugin_market_install">Install</string>
+    <string name="settings_collab_roles_section">Catalog roles</string>
+    <string name="settings_collab_roles_footer">Pass these names as spawn_agent role to inject focus, do-not, when-silent, and who-to-ask routing.</string>
     <string name="mcp_title">MCP Integrations</string>
     <string name="mcp_add">Add MCP Server</string>
     <string name="mcp_edit">Edit MCP Server</string>

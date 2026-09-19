@@ -67,6 +67,7 @@ import com.openminis.app.tools.FileEditTool
 import com.openminis.app.tools.FileReadTool
 import com.openminis.app.tools.FileWriteTool
 import com.openminis.app.tools.MemoryTools
+import com.openminis.app.tools.CronJobTool
 import com.openminis.app.tools.ReadImageTool
 import com.openminis.app.tools.ToolExecutionResult
 import com.openminis.app.tools.SubAgentRunner
@@ -1249,7 +1250,7 @@ class ChatViewModel(
             memoryEnabled = _memoryEnabled.value,
             subAgentEnabled = multiAgentSettings.enabled.value,
             codeGraphEnabled = true,
-        )
+        ) + com.openminis.app.plugins.OnlinePluginStore.toolDefinitions(context)
 
     /**
      * Per-session loop detector. Reset alongside [agentHistory] whenever the
@@ -9427,6 +9428,7 @@ class ChatViewModel(
             "browser_use" -> executeBrowserUseTool(argsJson)
             "memory_write" -> executeMemoryWriteTool(argsJson)
             "memory_get" -> executeMemoryGetTool(argsJson)
+            CronJobTool.NAME -> CronJobTool.execute(argsJson, context)
             SubAgentKind.SPAWN_AGENT, SubAgentKind.RUN_SUBAGENT ->
                 executeRunSubAgent(argsJson, toolId, toolBlocks, assistantId, currentText)
             com.openminis.app.tools.WebSearchTool.NAME -> com.openminis.app.tools.WebSearchTool.execute(argsJson, context)
@@ -9461,7 +9463,11 @@ class ChatViewModel(
                     toolTitle = "code_graph",
                 )
             }
-            else -> ToolExecutionResult("Unknown tool: $name", false)
+            else -> if (com.openminis.app.plugins.OnlineApiTool.isOnline(name)) {
+                com.openminis.app.plugins.OnlineApiTool.execute(name, argsJson, context)
+            } else {
+                ToolExecutionResult("Unknown tool: $name", false)
+            }
         }
         if (!result.success) {
             com.openminis.app.evolution.EvolutionHooks.onToolFailure(
@@ -10436,6 +10442,7 @@ Available tools:
 - search_sessions: Search other chats on this device by keyword (or list recent). Returns session_id; then use read_session. Does not include the current session unless include_current is true.
 - read_session: Load a past session transcript by session_id (paginated, 600 chars/message).
 - ask_user_question: Pose 1–4 structured multiple-choice questions when a choice is genuinely ambiguous. Do not use it to ask permission for routine tool calls.
+- cronjob: Create/list/remove AlarmManager tasks. Schedules: 30m, 2h, 1d, or every 30m / every 2h / every 1d. Prefer this over crontab/at.
 - browser_use: Web browsing (navigate, screenshot, click, type, get_text, scroll, scroll_and_collect, get_readable, get_backbone, fetch, etc.). Starts with a desktop Chrome user agent. Use screenshot to see the page.
   当 browser_use 触达 Google 登录 / OAuth 页（accounts.google.com、signin.google.com、myaccount.google.com、oauth2.googleapis.com 等）或网页返回 "disallowed_useragent" / 403 包含 "browser is not secure" 字样时，**不要重试或尝试登录** — Google 永久禁止 in-app WebView 完成登录，重试只会浪费 turn。改为告诉用户："此页面需要在系统 Chrome 完成登录" 并给出可点击的 Markdown link [在 Chrome 中打开](https://accounts.google.com/...)。点该 link 时 app 会跳出 Custom Tab；用户在 Chrome 完成操作后，请他**把所需结果（邮件正文 / 文档摘要 / 表格数据）粘贴回 chat**，你再继续帮他处理。这是 Android 平台限制，不是 bug。${toolListMemoryBullets}${toolListSubAgentBullet}
 
@@ -10517,10 +10524,10 @@ Interactive terminal: minis://open_terminal opens a terminal for tasks that requ
 Environment variables:
 - Shell environment variables may contain sensitive API keys, tokens, or passwords. NEVER echo, print, cat, or otherwise output their values to stdout/stderr. Always reference them by variable name (e.g. ${'$'}API_KEY) inside scripts or commands — never inline the literal value.
 - When a skill or task requires an environment variable that is not set, tell the user which variable is missing and provide a tappable deep link to create it: [Set ENV_NAME](minis://settings/environments?create_key=ENV_NAME&create_value=) — the user can tap it to open the Environment Variables page with the key pre-filled.
-- Settings deep links: when you tell the user "go to Settings → X" or want to point them at a specific setting, prefer a Markdown link `[Label](minis://settings/<path>)` over plain prose. Available paths: providers (list), providers/<instanceId> (one provider), model-groups (incl. Agent Loop), model-groups/<groupId>, usage (token usage), skills, memory, storage, shared-folders (Shared Folders: /var/minis/{shared,skills,memory}), mount-external (Mount External Folders), logs, appearance, background, about, permissions, environments[?create_key=K&create_value=V[&create_note=N]], rootfs (also reachable as mirrors). Unknown paths fall back to Settings home, but prefer the exact path so users land where they want. These settings/action links are app deep links — render them as Markdown links in chat (same action-vs-resource rule as the minis:// section above: only /var/minis resource URLs may go to browser_use).
+- Settings deep links: when you tell the user "go to Settings → X" or want to point them at a specific setting, prefer a Markdown link `[Label](minis://settings/<path>)` over plain prose. Available paths: providers (list), providers/<instanceId> (one provider), model-groups (incl. Agent Loop), model-groups/<groupId>, usage (token usage), skills, plugins, mcp, memory, storage, shared-folders (Shared Folders: /var/minis/{shared,skills,memory}), mount-external (Mount External Folders), logs, appearance, background, about, permissions, environments[?create_key=K&create_value=V[&create_note=N]], rootfs (also reachable as mirrors). Unknown paths fall back to Settings home, but prefer the exact path so users land where they want. These settings/action links are app deep links — render them as Markdown links in chat (same action-vs-resource rule as the minis:// section above: only /var/minis resource URLs may go to browser_use).
 - To check if a variable is set, use `[ -n "${'$'}VAR" ] && echo 'set' || echo 'not set'`. NEVER use echo ${'$'}VAR, printenv VAR, or any command that would output the actual value into the conversation context.${memorySystemSection}
 
-Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended, so in-app scheduled scripts may not run as expected. For recurring tasks that must fire while the app is backgrounded, use the native alarm tool (AlarmManager) or tell the user to set up a system-level schedule (Google Calendar event, Tasker automation, etc.). (Waiting or polling WITHIN the current turn is different — that is what shell_execute `delay` chains are for, per the shell_execute notes above.)"""
+Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended, so in-app scheduled scripts may not run as expected. For recurring tasks that must fire while the app is backgrounded, use the cronjob tool (AlarmManager) or minis-scheduled, or tell the user to set up a system-level schedule (Google Calendar event, Tasker automation, etc.). (Waiting or polling WITHIN the current turn is different — that is what shell_execute `delay` chains are for, per the shell_execute notes above.)"""
 
         // Match iOS order exactly: skills → global memory → recent daily memory.
         // See ios/Agent/Chat/AIChatViewModel.swift:4375-4387. Each fragment is

@@ -224,6 +224,21 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                 )
             }
         }
+
+        SettingsSection(
+            header = stringResource(R.string.settings_collab_roles_section),
+            footer = stringResource(R.string.settings_collab_roles_footer),
+        ) {
+            val roles = com.openminis.app.tools.CollabRoles.ALL
+            roles.forEachIndexed { index, role ->
+                SettingsRow(
+                    title = role.name,
+                    subtitle = role.description,
+                    showChevron = false,
+                    showDivider = index < roles.lastIndex,
+                )
+            }
+        }
     }
 }
 
