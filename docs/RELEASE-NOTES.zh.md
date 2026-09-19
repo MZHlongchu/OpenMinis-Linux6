@@ -1,3 +1,23 @@
+# OpenMinis-Linux 1.29-linux
+
+- versionCode **41**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a；有 `MINIS_UPLOAD_*` 则用上传证书，否则仍为 debug-signed）
+- 签名说明：[docs/SIGNING.md](SIGNING.md)
+
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本。
+
+## 本版
+
+修复 1.28 发现的一个真缺陷。
+
+1. **explore/plan 解锁 grep_source**
+   `grep_source`（1.27 新增的源码检索工具）正是为只读侦察类子代理设计，但 1.28 里它没进只读白名单 `READ_ONLY_ALLOW`，导致 explore/plan 被 `filterTools` 屏蔽、反而用不了。本版把 `GrepSourceTool.NAME` 加入白名单，只读子代理恢复可用。
+
+---
+
 # OpenMinis-Linux 1.28-linux
 
 - versionCode **40**
