@@ -1,3 +1,32 @@
+# OpenMinis-Linux 1.30.1-linux
+
+- versionCode **43**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a；有 `MINIS_UPLOAD_*` 则用上传证书，否则仍为 debug-signed）
+- 签名说明：[docs/SIGNING.md](SIGNING.md)
+
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本。
+
+## 本版
+
+检查更新下载图补强（小版本修复）。
+
+1. **镜像加速兑底**
+   点下载时并行探测 github.com 直连 + ghproxy.com + gh-proxy.com + mirror.ghproxy.com 四个节点的首字节延迟，选最快健康节点下载，中途某镜像挂了其他兑底。
+
+2. **提示文案**
+   下载前显示“正在检测下载节点，优选最快的…”，下载中显示当前节点；避免用户以为卡顿。
+
+3. **后台下载 + 断点续传**
+   下载在进程级作用域运行，退出页面/切后台不断；中断后 `.part` 文件留存，下次从断点续下（Range），并保留 sha256 验证 + pending 记录。
+
+4. **旧包清理**
+   每次进入检查更新页面自动删除私有目录中的旧版本/已安装的安装包（当前正在下载的保留）。
+
+---
+
 # OpenMinis-Linux 1.30-linux
 
 - versionCode **42**

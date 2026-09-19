@@ -51,6 +51,9 @@
     <string name="check_update_download_button">下載並安裝</string>
     <string name="check_update_downloading">下載中… %1$d%%</string>
     <string name="check_update_download_failed">下載失敗：%1$s</string>
+    <string name="check_update_download_complete_install_hint">安裝包已下載完成。授予安裝權限即可完成更新。</string>
+    <string name="check_update_probing">正在偵測下載節點，選最快的一個…</string>
+    <string name="check_update_active_node">正在透過 %1$s 下載</string>
     <string name="check_update_install_perm_required">請允許從本應用程式安裝，才能繼續。</string>
     <string name="check_update_install_launch_failed">無法啟動安裝程式。請檢查「安裝不明應用程式」權限，或手動開啟下載的 APK。</string>
     <string name="check_update_install_hint">提示：若安裝時沒有任何回應，可能是簽章不符——請先解除安裝舊版本，再重新下載。</string>

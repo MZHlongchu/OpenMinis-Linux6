@@ -55,6 +55,9 @@
     <string name="check_update_download_button">Download &amp; Install</string>
     <string name="check_update_downloading">Downloading… %1$d%%</string>
     <string name="check_update_download_failed">Download failed: %1$s</string>
+    <string name="check_update_download_complete_install_hint">The APK is downloaded. Grant install permission to finish the update.</string>
+    <string name="check_update_probing">Testing download mirrors… picking the fastest</string>
+    <string name="check_update_active_node">Downloading via %1$s</string>
     <string name="check_update_install_perm_required">Allow installs from this app to continue.</string>
     <string name="check_update_install_launch_failed">Failed to launch installer. Check \"install unknown apps\" permission or open the downloaded APK manually.</string>
     <string name="check_update_install_hint">Tip: If installation gives no feedback, the signature may not match — uninstall the previous version first, then download again.</string>

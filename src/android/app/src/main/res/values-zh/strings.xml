@@ -51,6 +51,9 @@
     <string name="check_update_download_button">下载并安装</string>
     <string name="check_update_downloading">下载中… %1$d%%</string>
     <string name="check_update_download_failed">下载失败：%1$s</string>
+    <string name="check_update_download_complete_install_hint">安装包已下载完成。授予安装权限即可完成更新。</string>
+    <string name="check_update_probing">正在检测下载节点，优选最快的…</string>
+    <string name="check_update_active_node">正在通过 %1$s 下载</string>
     <string name="check_update_install_perm_required">请允许此应用安装更新以继续。</string>
     <string name="check_update_install_launch_failed">启动安装程序失败。请检查\"安装未知应用\"权限或手动打开下载的 APK。</string>
     <string name="check_update_install_hint">提示：如果安装时无任何反馈，可能是签名不匹配，请先卸载旧版本再重新点击下载。</string>

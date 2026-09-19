@@ -24,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,6 +49,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.openminis.app.BuildConfig
 import com.openminis.app.R
 import com.openminis.app.data.UpdateChecker
+import com.openminis.app.data.UpdateDownloadManager
 import kotlinx.coroutines.launch
 import com.openminis.app.ui.components.MinisButton
 import com.openminis.app.ui.components.MinisTextButton
@@ -75,10 +77,39 @@ fun CheckUpdateSection() {
     // geo-block know what to do without hunting for the URL themselves.
     var showReleasesLink by remember { mutableStateOf(false) }
     var update by remember { mutableStateOf<UpdateChecker.CheckResult.UpdateAvailable?>(null) }
-    var downloadProgress by remember { mutableStateOf<Float?>(null) }
-    var downloadError by remember { mutableStateOf<String?>(null) }
+    // Download progress is mirrored from UpdateDownloadManager's process-wide
+    // StateFlow so the download survives leaving this screen (background
+    // tolerant). Re-entering simply re-collects the live state.
+    val dlState by UpdateDownloadManager.state.collectAsState()
+    val downloadProgress: Float? = if (dlState.running || dlState.doneFile != null) dlState.progress else null
+    val downloadError: String? = dlState.error
     var awaitingInstallPerm by remember { mutableStateOf(false) }
     var confirmSelfBuild by remember { mutableStateOf(false) }
+
+    // Housekeeping on every entry: drop stale/installed APKs from the private
+    // updates dir so old installers don't pile up.
+    LaunchedEffect(Unit) {
+        UpdateDownloadManager.pruneUpdateDir(context)
+    }
+
+    // When the background downloader finishes, fire the installer (or ask for
+    // install permission). Auto-triggers even if the user left this screen
+    // mid-download and came back after completion.
+    LaunchedEffect(dlState.doneFile) {
+        val file = dlState.doneFile ?: return@LaunchedEffect
+        if (dlState.installLaunched) return@LaunchedEffect
+        if (UpdateChecker.canInstall(context)) {
+            val ok = UpdateChecker.installApk(context, file)
+            if (ok) {
+                UpdateDownloadManager.markInstallLaunched()
+                update = null
+            } else {
+                downloadError = context.getString(R.string.check_update_install_launch_failed)
+            }
+        } else {
+            awaitingInstallPerm = true
+        }
+    }
 
     // Resume the install flow on every ON_RESUME. There are two cases:
     //
@@ -239,42 +270,45 @@ fun CheckUpdateSection() {
             downloadProgress = downloadProgress,
             downloadError = downloadError,
             needsInstallPerm = awaitingInstallPerm,
+            probing = dlState.probing,
+            activeNode = dlState.activeNode,
+            downloadActive = dlState.running,
             onDownload = {
-                downloadError = null
-                downloadProgress = 0f
-                scope.launch {
-                    val result = UpdateChecker.download(
-                        context = context,
-                        url = u.apkUrl,
-                        versionName = u.versionName,
-                    ) { p -> downloadProgress = p }
-                    when (result) {
-                        is UpdateChecker.DownloadResult.Success -> {
-                            downloadProgress = null
-                            if (UpdateChecker.canInstall(context)) {
-                                val ok = UpdateChecker.installApk(context, result.file)
-                                if (ok) {
-                                    update = null
-                                } else {
-                                    downloadError = context.getString(R.string.check_update_install_launch_failed)
-                                }
-                            } else {
-                                awaitingInstallPerm = true
-                            }
-                        }
-                        is UpdateChecker.DownloadResult.Error -> {
-                            downloadProgress = null
-                            downloadError = result.message
-                        }
-                    }
-                }
+                // Kick off the mirror-accelerated, resumable, background
+                // downloader. It owns a process-wide scope, so leaving the
+                // screen does not cancel it; re-entering re-collects state.
+                UpdateDownloadManager.start(context, u.apkUrl, u.versionName)
             },
             onOpenSettings = { UpdateChecker.openInstallPermissionSettings(context) },
             onDismiss = {
-                if (downloadProgress == null) {
+                // Allow closing once nothing is actively downloading (the
+                // manager keeps the completed file + pending record, so a
+                // re-visit can resume install).
+                if (!dlState.running) {
                     update = null
                     downloadError = null
                     awaitingInstallPerm = false
+                }
+            },
+        )
+    }
+
+    // Download finished but install permission was never granted (e.g. the
+    // dialog was dismissed; we may also have no `update` after recreation).
+    // Offer a dedicated prompt so the pending APK isn't silently stuck.
+    if (update == null && awaitingInstallPerm && dlState.doneFile != null) {
+        AlertDialog(
+            onDismissRequest = { awaitingInstallPerm = false },
+            title = { Text(stringResource(R.string.check_update_install_perm_required)) },
+            text = { Text(stringResource(R.string.check_update_download_complete_install_hint)) },
+            confirmButton = {
+                MinisButton(onClick = { UpdateChecker.openInstallPermissionSettings(context) }) {
+                    Text(stringResource(R.string.check_update_open_install_settings))
+                }
+            },
+            dismissButton = {
+                MinisTextButton(onClick = { awaitingInstallPerm = false }) {
+                    Text(stringResource(R.string.cancel))
                 }
             },
         )
@@ -287,6 +321,9 @@ private fun UpdateDialog(
     downloadProgress: Float?,
     downloadError: String?,
     needsInstallPerm: Boolean,
+    probing: Boolean,
+    activeNode: String?,
+    downloadActive: Boolean,
     onDownload: () -> Unit,
     onOpenSettings: () -> Unit,
     onDismiss: () -> Unit,
@@ -330,6 +367,20 @@ private fun UpdateDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (probing) {
+                    Text(
+                        stringResource(R.string.check_update_probing),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (activeNode != null && downloadActive) {
+                    Text(
+                        stringResource(R.string.check_update_active_node, activeNode),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
                 if (downloadProgress != null) {
                     LinearProgressIndicator(
                         progress = { downloadProgress.coerceIn(0f, 1f) },
@@ -364,9 +415,9 @@ private fun UpdateDialog(
             } else {
                 MinisButton(
                     onClick = onDownload,
-                    enabled = downloadProgress == null,
+                    enabled = downloadProgress == null && !downloadActive,
                 ) {
-                    if (downloadProgress != null && downloadProgress < 1f) {
+                    if (downloadActive || (downloadProgress != null && downloadProgress < 1f)) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -375,7 +426,7 @@ private fun UpdateDialog(
                                 modifier = Modifier.size(14.dp),
                                 strokeWidth = 1.5.dp,
                             )
-                            Text(stringResource(R.string.check_update_downloading, (downloadProgress * 100).toInt()))
+                            Text(stringResource(R.string.check_update_downloading, ((downloadProgress ?: 0f) * 100).toInt()))
                         }
                     } else {
                         Text(stringResource(R.string.check_update_download_button))
@@ -384,7 +435,7 @@ private fun UpdateDialog(
             }
         },
         dismissButton = {
-            MinisTextButton(onClick = onDismiss, enabled = downloadProgress == null) {
+            MinisTextButton(onClick = onDismiss, enabled = !downloadActive) {
                 Text(stringResource(R.string.cancel))
             }
         },
