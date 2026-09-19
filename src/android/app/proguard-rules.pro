@@ -30,3 +30,8 @@
 # gomobile rclone binding — JNI / generated Java must keep original names
 -keep class com.openminis.rclone.** { *; }
 -dontwarn com.openminis.rclone.**
+
+# Rhino (org.mozilla.javascript) references desktop java.beans / javax.lang.model.
+# Android R8 treats those as missing and fails minifyRelease (1.33 CI).
+-dontwarn java.beans.**
+-dontwarn javax.lang.model.**
