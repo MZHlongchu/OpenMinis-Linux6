@@ -1794,4 +1794,7 @@
     <string name="chat_input_placeholder_hint_5">Minis 可以把 ↩︎ 鍵設為傳送或換行</string>
     <string name="compact_progress">正在壓縮… 已進行 %1$d 秒</string>
     <string name="compact_progress_split">正在壓縮… %1$d 秒 · 分段摘要中（%2$d/%3$d）</string>
+    <string name="settings_evolution_subtitle">從糾正中學習偏好（%1$s）</string>
+    <string name="settings_evolution_state_on">目前開啟</string>
+    <string name="settings_evolution_state_off">目前關閉</string>
 </resources>

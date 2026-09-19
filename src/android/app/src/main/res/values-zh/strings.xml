@@ -274,7 +274,9 @@
     <string name="settings_soul">人格</string>
     <string name="settings_soul_subtitle">持久化人格与身份（SOUL.md）</string>
     <string name="settings_evolution">进化</string>
-    <string name="settings_evolution_subtitle">从纠正中学习偏好（默认关闭）</string>
+    <string name="settings_evolution_subtitle">从纠正中学习偏好（%1$s）</string>
+    <string name="settings_evolution_state_on">当前开启</string>
+    <string name="settings_evolution_state_off">当前关闭</string>
     <string name="evolution_title">进化</string>
     <string name="evolution_section_master">学习</string>
     <string name="evolution_enable_title">启用进化</string>

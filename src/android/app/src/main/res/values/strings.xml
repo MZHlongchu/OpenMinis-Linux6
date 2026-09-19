@@ -312,7 +312,9 @@
     <string name="settings_soul">Soul</string>
     <string name="settings_soul_subtitle">Persistent personality and identity (SOUL.md)</string>
     <string name="settings_evolution">Evolution</string>
-    <string name="settings_evolution_subtitle">Learn preferences from corrections (off by default)</string>
+    <string name="settings_evolution_subtitle">Learn preferences from corrections (%1$s)</string>
+    <string name="settings_evolution_state_on">currently on</string>
+    <string name="settings_evolution_state_off">currently off</string>
     <string name="evolution_title">Evolution</string>
     <string name="evolution_section_master">Learning</string>
     <string name="evolution_enable_title">Enable evolution</string>

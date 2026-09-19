@@ -71,6 +71,12 @@ import androidx.compose.ui.res.stringResource
 import com.openminis.app.ProjectRepo
 import com.openminis.app.BuildConfig
 import com.openminis.app.R
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import com.openminis.app.evolution.EvolutionPrefs
 import com.openminis.app.ui.components.openExternalUrl
 import com.openminis.app.i18n.uppercaseForDisplay
 
@@ -113,6 +119,17 @@ fun SettingsScreen(
     onAboutClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    var evolutionEnabled by remember { mutableStateOf(false) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                evolutionEnabled = EvolutionPrefs(context).isEnabled
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     var showFeedbackSheet by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
@@ -218,7 +235,10 @@ fun SettingsScreen(
                     icon = Icons.Outlined.Bolt,
                     iconColor = Color(0xFFAF52DE),
                     title = stringResource(R.string.settings_evolution),
-                    subtitle = stringResource(R.string.settings_evolution_subtitle),
+                    subtitle = stringResource(
+                        R.string.settings_evolution_subtitle,
+                        stringResource(if (evolutionEnabled) R.string.settings_evolution_state_on else R.string.settings_evolution_state_off),
+                    ),
                     onClick = onEvolutionClick,
                 )
                 // [T-mcp-integration-android] MCP Integrations — directly below Memory.

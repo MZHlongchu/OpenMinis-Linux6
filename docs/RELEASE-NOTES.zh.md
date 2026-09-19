@@ -1,3 +1,24 @@
+# OpenMinis-Linux 1.30.2-linux
+
+- versionCode **44**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a；有 `MINIS_UPLOAD_*` 则用上传证书，否则仍为 debug-signed）
+- 签名说明：[docs/SIGNING.md](SIGNING.md)
+
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本。
+
+## 本版
+
+1. **浏览器横条拖拽**
+   内嵌浏览器顶部横条支持跟手拖拽：上拖展开全屏；下拖松手位置不低于默认高度则弹回收起，拖过则按原判定下拉关闭。全程弹簧动画过渡，触控区加大。
+
+2. **进化开关状态可见**
+   设置页“进化”描述从“从纠正中学习偏好（默认关闭）”改为动态显示当前状态：“从纠正中学习偏好（当前开启/当前关闭）”。
+
+---
+
 # OpenMinis-Linux 1.30.1-linux
 
 - versionCode **43**

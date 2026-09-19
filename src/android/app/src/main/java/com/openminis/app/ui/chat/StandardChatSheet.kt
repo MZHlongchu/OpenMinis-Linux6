@@ -1,6 +1,10 @@
 package com.openminis.app.ui.chat
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,15 +26,23 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.R
 import com.openminis.app.ui.theme.ChatColors
+import kotlinx.coroutines.launch
 
 /**
  * Standardized half-screen modal sheet used by every popup launched from the
@@ -59,13 +71,50 @@ fun StandardChatSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val configuration = LocalConfiguration.current
-    val sheetHeight = (configuration.screenHeightDp * heightFraction.coerceIn(0.1f, 1f)).dp
+    val scope = rememberCoroutineScope()
+    val baseFraction = heightFraction.coerceIn(0.1f, 1f)
+    // Drag-to-resize state: fractionAnim is the live height (0.5..1) so the
+    // sheet follows the finger; on release we snap to an anchor with a spring.
+    val fractionAnim = remember { Animatable(baseFraction) }
+    var expanded by remember { mutableStateOf(false) }
+    val density = LocalDensity.current
+    val screenHeightPx = with(density) { configuration.screenHeightDp.dp.toPx() }
+    val sheetHeight = (configuration.screenHeightDp * fractionAnim.value).dp
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
         containerColor = ChatColors.background,
-        dragHandle = { CompactDragHandle() },
+        dragHandle = {
+            CompactDragHandle(
+                onVerticalDrag = { dy ->
+                    // Finger up (dy<0) grows the sheet; down shrinks it. Clamp so
+                    // it can't shrink below a usable sliver while deciding.
+                    val next = (fractionAnim.value - dy / screenHeightPx).coerceIn(0.5f, 1f)
+                    scope.launch { fractionAnim.snapTo(next) }
+                },
+                onDragEnd = {
+                    when {
+                        // Dragged (nearly) to the top -> expand fullscreen.
+                        fractionAnim.value >= 0.97f -> {
+                            expanded = true
+                            scope.launch { fractionAnim.animateTo(1f, spring(stiffness = Spring.StiffnessMedium)) }
+                        }
+                        // Released above the base detent -> collapse back to it.
+                        fractionAnim.value >= baseFraction -> {
+                            expanded = false
+                            scope.launch { fractionAnim.animateTo(baseFraction, spring(stiffness = Spring.StiffnessMedium)) }
+                        }
+                        // Dragged past the base detent -> original behaviour: dismiss.
+                        else -> {
+                            scope.launch { sheetState.hide() }.invokeOnCompletion {
+                                if (!sheetState.isVisible) onDismiss()
+                            }
+                        }
+                    }
+                },
+            )
+        },
     ) {
         Column(
             modifier = Modifier
@@ -87,15 +136,28 @@ fun StandardChatSheet(
 
 /**
  * Slim replacement for [androidx.compose.material3.BottomSheetDefaults.DragHandle].
- * Same 32×4 indicator pill, but with 6dp top + 4dp bottom padding so the title
- * sits closer to the indicator than the Material default (22dp / 22dp).
+ * Same 32×4 indicator pill, with a taller touch target (10dp top + 12dp bottom)
+ * so the vertical drag is easy to grab. Drag up to expand fullscreen; drag down
+ * past the base detent to dismiss (see [StandardChatSheet]).
  */
 @Composable
-private fun CompactDragHandle() {
+private fun CompactDragHandle(
+    onVerticalDrag: (Float) -> Unit,
+    onDragEnd: () -> Unit,
+) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 6.dp, bottom = 4.dp),
+            .pointerInput(Unit) {
+                detectVerticalDragGestures(
+                    onVerticalDrag = { change, dragAmount ->
+                        change.consume()
+                        onVerticalDrag(dragAmount)
+                    },
+                    onDragEnd = { onDragEnd() },
+                )
+            }
+            .padding(top = 10.dp, bottom = 12.dp),
         contentAlignment = Alignment.TopCenter,
     ) {
         Box(
