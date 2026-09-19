@@ -471,7 +471,31 @@ object SystemPromptBuilder {
      * if you ever need to tweak the runtime statement, because every
      * Android chat hits this line.
      */
-    private const val IDENTITY_TEMPLATE =
+    /**
+     * [T-default-assets] The identity-sentence template, loaded from
+     * `assets/default_identity.md` (single source of truth — edit that file
+     * to customize the shipped default). `{name}` is substituted from the
+     * SOUL metadata at build time. The asset content is injected into the
+     * system prompt VERBATIM, so the file must contain no comment lines or
+     * documentation — only the sentence itself. Trailing whitespace is
+     * normalized at load (editors strip it) to preserve the gluing contract
+     * documented on [identitySection]. [EMBEDDED_IDENTITY_TEMPLATE] is the
+     * fallback when the asset is missing.
+     */
+    private val IDENTITY_TEMPLATE: String
+        get() = assetsIdentity ?: EMBEDDED_IDENTITY_TEMPLATE
+
+    @Volatile private var assetsIdentity: String? = null
+
+    /** Read `assets/default_identity.md` into the IDENTITY_TEMPLATE getter. */
+    fun loadIdentityFromAssets(context: Context) {
+        runCatching {
+            context.assets.open("default_identity.md").bufferedReader()
+                .use { it.readText() }
+        }.getOrNull()?.trimEnd()?.let { assetsIdentity = "$it " }
+    }
+
+    private const val EMBEDDED_IDENTITY_TEMPLATE =
         "You are {name}, a capable AI assistant running on an Android device with a fully functional Linux sandbox (Ubuntu 24.04 arm64 via PRoot, glibc). "
 
     /**

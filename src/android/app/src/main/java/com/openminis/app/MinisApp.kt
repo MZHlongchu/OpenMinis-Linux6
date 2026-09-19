@@ -500,6 +500,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         // then seed GLOBAL.md starter template on first launch
         // (create-only; user edits are never overwritten).
         com.openminis.app.agent.SoulStore.loadDefaultFromAssets(this)
+        com.openminis.app.agent.SystemPromptBuilder.loadIdentityFromAssets(this)
         com.openminis.app.data.repository.MemoryRepository.loadGlobalDefaultFromAssets(this)
         com.openminis.app.data.repository.MemoryRepository.ensureGlobalExists(this)
 
