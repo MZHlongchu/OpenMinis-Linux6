@@ -494,20 +494,25 @@ class AgentForegroundService : Service() {
         // state.dynamicIslandEnabled comes through the combined flow and
         // capability is re-probed here, so toggling either the app switch or
         // the system Live-Updates grant hides/reveals the overlay live.
-        if (DynamicIslandSupport.isDynamicIslandActive(this, state.dynamicIslandEnabled)) {
+        val diActive = DynamicIslandSupport.isDynamicIslandActive(
+            this, state.dynamicIslandEnabled,
+        )
+        if (diActive) {
             if (controller.isShown) controller.hide()
             lingerJob?.cancel()
             lingerJob = null
             hasCompletionPending = false
             wasBusy = state.hasActiveStream || state.isRunning
-            // [T-android-dynamic-island] The overlay hid reactively above; make
-            // the notification switch to the promoted ProgressStyle promptly too
-            // (rather than waiting for the next tool/status tick that rebuilds
-            // it). Only when we're actually foregrounded as a service — a bare
-            // notify() here would post a non-FGS notification. Guard on active
-            // sessions since that's when the FG service is alive.
-            if (SessionActivityTracker.activeSessions.value.isNotEmpty()) {
-                refreshOngoingNotification()
+            // Rebuild the promoted notification only when Live Updates
+            // *becomes* the active surface. The overlay observer also
+            // ticks on lastReplyExcerpt / toolStatus — posting a new
+            // ProgressStyle on every token is a known SystemUI crash
+            // once the chip is actually materialized (app backgrounded).
+            if (lastDynamicIslandActive != true) {
+                lastDynamicIslandActive = true
+                if (SessionActivityTracker.activeSessions.value.isNotEmpty()) {
+                    refreshOngoingNotification()
+                }
             }
             Log.d(
                 TAG,
@@ -515,6 +520,12 @@ class AgentForegroundService : Service() {
                     "(dynamicIslandEnabled=${state.dynamicIslandEnabled})",
             )
             return
+        }
+        if (lastDynamicIslandActive == true) {
+            lastDynamicIslandActive = false
+            if (SessionActivityTracker.activeSessions.value.isNotEmpty()) {
+                refreshOngoingNotification()
+            }
         }
         // [T-android-overlay-show-if-busy] Overlay surfaces while the
         // agent is actively working — either an assistant streamJob is
@@ -645,8 +656,18 @@ class AgentForegroundService : Service() {
                 SessionActivityTracker.activeSessions.value.size,
                 SessionActivityTracker.currentToolStatus.value,
             )
-            getSystemService(NotificationManager::class.java)
-                ?.notify(NOTIFICATION_ID, notification)
+            // Keep the FGS contract: updating id 9001 via notify() can
+            // demote the service on Android 14+ OEMs. startForeground
+            // refreshes in place.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
         } catch (t: Throwable) {
             Log.w(TAG, "refreshOngoingNotification failed: ${t.message}")
         }
@@ -725,6 +746,9 @@ class AgentForegroundService : Service() {
      * remind them again.
      */
     private var overlayNudgePosted: Boolean = false
+
+    /** Last observed Live-Updates-active flag, for edge-triggered notify. */
+    private var lastDynamicIslandActive: Boolean? = null
 
     private fun maybePostOverlayPermissionNudge() {
         if (overlayNudgePosted) return
@@ -870,7 +894,7 @@ class AgentForegroundService : Service() {
             dynamicIslandUserEnabled,
         )
         if (dynamicIslandOn && Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
-            return buildPromotedNotification(
+            val promoted = buildPromotedNotification(
                 titleText = titleText,
                 collapsedText = collapsedText,
                 shortCritical = shortCritical,
@@ -879,6 +903,13 @@ class AgentForegroundService : Service() {
                 isCompleted = isCompleted,
                 contentIntent = pendingIntent,
                 stopIntent = stopPendingIntent,
+            )
+            if (promoted.hasPromotableCharacteristics()) {
+                return promoted
+            }
+            Log.w(
+                TAG,
+                "ProgressStyle not promotable — posting a plain FGS row instead",
             )
         }
 
@@ -956,23 +987,16 @@ class AgentForegroundService : Service() {
         // So the segment is NOT optional: it is what keeps the chip promoted,
         // and it is why this style survives even though we show no percentage.
         //
-        // [T-android-live-update-progressbar] An agent run has exactly two
-        // states the user cares about — running and done — and no meaningful
-        // fraction in between (tools are open-ended; there is no Nth-of-M to
-        // report). Rendered as a tracker, that produced a bar parked at 0 %
-        // with a paper-plane sitting on the left for the entire run: it looked
-        // like a stalled download rather than "working".
-        //
-        // setStyledByProgress(false) keeps the style (so promotion holds) but
-        // stops it drawing as a position tracker, and clearing the tracker icon
-        // removes the plane. The two states are carried by the title, the icon
-        // and the elapsed timer, which is where a user actually reads them.
+        // Keep ProgressStyle fully specified. Null tracker icons,
+        // styledByProgress(false), and indeterminate+zero-progress together
+        // have crashed OEM SystemUI the moment the Live Updates chip is
+        // actually promoted (which only happens when the app is no longer
+        // the visible activity).
         val progressStyle = Notification.ProgressStyle()
             .addProgressSegment(Notification.ProgressStyle.Segment(100))
-            .setStyledByProgress(false)
-            .setProgressTrackerIcon(null)
-            .setProgressIndeterminate(isToolRunning && !isCompleted)
-            .setProgress(if (isCompleted) 100 else 0)
+            .setProgressTrackerIcon(Icon.createWithResource(this, smallIcon))
+            .setProgressIndeterminate(false)
+            .setProgress(if (isCompleted) 100 else if (isToolRunning) 50 else 0)
 
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(smallIcon)

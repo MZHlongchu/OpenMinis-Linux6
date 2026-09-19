@@ -235,6 +235,8 @@ class ToolOverlayController(private val context: Context) {
             @Suppress("DEPRECATION")
             WindowManager.LayoutParams.TYPE_PHONE
         }
+        val width = fixedCapsuleWidthPx()
+        val height = dpToPx(CAPSULE_HEIGHT_DP)
         val params = WindowManager.LayoutParams(
             // [T-android-overlay-fixed-half-width] Pin width to half the
             // screen (floored on tiny screens) so the capsule no longer
@@ -242,38 +244,48 @@ class ToolOverlayController(private val context: Context) {
             // which let the box jitter as labels swapped between
             // states. Text rows inside ellipsize within this envelope —
             // see updateContent maxWidth assignment.
-            fixedCapsuleWidthPx(),
+            width,
             // [T-android-overlay-dimensions-stable] Fixed height so the
             // capsule doesn't jitter as content cycles through spinner /
             // completed / reply / error states.
-            dpToPx(CAPSULE_HEIGHT_DP),
+            height,
             type,
+            // Do NOT set FLAG_LAYOUT_NO_LIMITS. Combined with
+            // TYPE_APPLICATION_OVERLAY it lets the window sit off-screen
+            // and creates an unbounded SurfaceFlinger layer; on HyperOS /
+            // ColorOS / OriginOS that is a known SystemUI/system_server
+            // restart when the host app is backgrounded. WM clips us to
+            // the screen without the flag.
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
+            val metrics = context.resources.displayMetrics
+            val maxX = (metrics.widthPixels - width).coerceAtLeast(0)
+            val maxY = (metrics.heightPixels - height).coerceAtLeast(0)
             val savedX = backgroundRepo.getOverlayX()
             val savedY = backgroundRepo.getOverlayY()
             if (savedX >= 0 && savedY >= 0) {
-                x = savedX
-                y = savedY
+                x = savedX.coerceIn(0, maxX)
+                y = savedY.coerceIn(0, maxY)
             } else {
-                // [T-bg-overlay-polish] First-paint default: bottom-left,
-                // 10 dp from the left edge and 10 dp above the nav-bar
-                // region. We don't have an accurate nav-bar height before
-                // attach, so use displayMetrics.heightPixels and trust
-                // FLAG_LAYOUT_NO_LIMITS to keep us on-screen.
-                val metrics = context.resources.displayMetrics
+                // First-paint default: bottom-left, 10 dp from the left
+                // edge and 10 dp above an approximate nav-bar region.
                 val padding = dpToPx(EDGE_PADDING_DP)
-                val approxOverlayHeight = dpToPx(LOGO_SIZE_DP + 16)
                 val approxNavBar = dpToPx(48)
-                x = padding
-                y = metrics.heightPixels - approxOverlayHeight - approxNavBar - padding
+                x = padding.coerceIn(0, maxX)
+                y = (metrics.heightPixels - height - approxNavBar - padding)
+                    .coerceIn(0, maxY)
             }
         }
         layoutParams = params
+        // Software-compose the capsule. A hardware-accelerated overlay
+        // window with a 60fps rotation animator becomes its own
+        // SurfaceFlinger plane; several OEM compositors abort (and
+        // restart SystemUI) when that plane keeps dirty while the app
+        // process is not the visible activity.
+        container.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
         attachTouchListener(capsuleRow ?: container, params)
         windowManager.addView(container, params)
         view = container
@@ -299,7 +311,9 @@ class ToolOverlayController(private val context: Context) {
                 setColor(Color.argb(230, 28, 28, 30))
                 setStroke(dpToPx(1), Color.argb(40, 255, 255, 255))
             }
-            elevation = 8f * density
+            // No elevation: overlay windows with a shadow layer allocate an
+            // extra compositor surface. Zero keeps a single software layer.
+            elevation = 0f
             gravity = Gravity.CENTER_VERTICAL
             // [T-android-overlay-fixed-half-width] The capsule width is
             // now pinned at the WindowManager layer (see attach() →
@@ -721,10 +735,16 @@ class ToolOverlayController(private val context: Context) {
                     val dy = (ev.rawY - downY).toInt()
                     if (!dragging && (abs(dx) > slopPx || abs(dy) > slopPx)) dragging = true
                     if (dragging) {
-                        params.x = startParamX + dx
-                        params.y = startParamY + dy
+                        val windowView = view ?: return@setOnTouchListener true
+                        val dm = context.resources.displayMetrics
+                        val maxX = (dm.widthPixels - params.width).coerceAtLeast(0)
+                        val maxY = (dm.heightPixels - params.height.coerceAtLeast(1)).coerceAtLeast(0)
+                        params.x = (startParamX + dx).coerceIn(0, maxX)
+                        params.y = (startParamY + dy).coerceIn(0, maxY)
                         try {
-                            windowManager.updateViewLayout(target, params)
+                            // Must update the WindowManager root, not the
+                            // inner capsule row the touch listener is on.
+                            windowManager.updateViewLayout(windowView, params)
                         } catch (e: Throwable) {
                             Log.w(TAG, "updateViewLayout failed: ${e.message}")
                         }
