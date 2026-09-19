@@ -1,7 +1,6 @@
 package com.openminis.app.data
 
 import android.content.Context
-import com.openminis.app.agent.PromptSafetyFilter
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,7 +34,7 @@ object PromptTemplateStore {
 
     fun renderForSession(sessionId: String): String? {
         val tpl = templateForSession(sessionId) ?: return null
-        val body = PromptSafetyFilter.scrub(tpl.text)
+        val body = tpl.text.trim()
         if (body.isBlank()) return null
         return "Session prompt template (${tpl.name}):\n$body"
     }
@@ -50,7 +49,6 @@ object PromptTemplateStore {
         val trimmedText = text.trim()
         if (trimmedName.isBlank() || trimmedText.isBlank()) return SaveResult.Error("empty")
         if (trimmedText.length > PromptTemplateCodec.MAX_TEXT) return SaveResult.Error("too_long")
-        if (PromptSafetyFilter.containsUnsafe(trimmedText)) return SaveResult.Error("unsafe")
         cached = PromptTemplateCodec.upsert(cached, trimmedName, trimmedText, order, id)
         persist()
         val saved = cached.templates.lastOrNull { it.name == trimmedName && it.text == trimmedText }

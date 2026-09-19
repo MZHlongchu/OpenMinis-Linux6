@@ -125,9 +125,8 @@ fun WorkspaceRulesSettingsScreen(onBack: () -> Unit) {
 
 private fun toastError(context: android.content.Context, code: String) {
     val msg = when (code) {
-        "unsafe" -> context.getString(R.string.workspace_rules_rejected)
         "too_long" -> context.getString(R.string.prompt_templates_too_long, WorkspaceRulesStore.MAX_BODY)
-        else -> context.getString(R.string.workspace_rules_rejected)
+        else -> context.getString(R.string.workspace_rules_empty)
     }
     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
 }

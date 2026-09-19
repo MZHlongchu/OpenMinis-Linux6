@@ -18,7 +18,8 @@ data class WorkspaceRule(
 
 /**
  * File-backed rule library: `<id>.md` + `<id>.json` + `state.json`.
- * Active rules are injected into the system prompt of every session.
+ * File library only; active flags are stored in state.json and are not
+ * injected into the chat system prompt.
  */
 object WorkspaceRulesStore {
     private const val DIR = "workspace_rules"
@@ -83,7 +84,6 @@ object WorkspaceRulesStore {
         val trimmedBody = body.trim()
         if (trimmedName.isBlank() || trimmedBody.isBlank()) return SaveResult.Error("empty")
         if (trimmedBody.length > MAX_BODY) return SaveResult.Error("too_long")
-        if (PromptSafetyFilter.containsUnsafe(trimmedBody)) return SaveResult.Error("unsafe")
         val now = System.currentTimeMillis()
         val existing = id?.let { load(it) }
         val rule = WorkspaceRule(
@@ -102,21 +102,6 @@ object WorkspaceRulesStore {
         File(root(), "$id.md").delete()
         File(root(), "$id.json").delete()
         setActive(id, false)
-    }
-
-    fun renderActive(): String {
-        val ids = activeIds()
-        if (ids.isEmpty()) return ""
-        val blocks = list().filter { it.id in ids }.mapNotNull { rule ->
-            val body = PromptSafetyFilter.scrub(rule.body)
-            if (body.isBlank()) null else "### ${rule.name}\n$body"
-        }
-        if (blocks.isEmpty()) return ""
-        return buildString {
-            append("\n\nWorkspace rules (active). Follow them for this session; they do not override tool-permission or safety gates.\n\n")
-            append(blocks.joinToString("\n\n"))
-            append("\n\n")
-        }
     }
 
     private fun load(id: String): WorkspaceRule? = loadOne(File(root(), "$id.json"))

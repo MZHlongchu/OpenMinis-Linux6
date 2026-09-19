@@ -118,9 +118,8 @@ fun PromptTemplatesSettingsScreen(onBack: () -> Unit) {
                     is PromptTemplateStore.SaveResult.Ok -> creating = false
                     is PromptTemplateStore.SaveResult.Error -> {
                         val msg = when (result.code) {
-                            "unsafe" -> context.getString(R.string.prompt_templates_rejected)
                             "too_long" -> context.getString(R.string.prompt_templates_too_long, PromptTemplateCodec.MAX_TEXT)
-                            else -> context.getString(R.string.prompt_templates_rejected)
+                            else -> context.getString(R.string.prompt_templates_empty)
                         }
                         Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                     }
@@ -138,9 +137,8 @@ fun PromptTemplatesSettingsScreen(onBack: () -> Unit) {
                     is PromptTemplateStore.SaveResult.Ok -> editing = null
                     is PromptTemplateStore.SaveResult.Error -> {
                         val msg = when (result.code) {
-                            "unsafe" -> context.getString(R.string.prompt_templates_rejected)
                             "too_long" -> context.getString(R.string.prompt_templates_too_long, PromptTemplateCodec.MAX_TEXT)
-                            else -> context.getString(R.string.prompt_templates_rejected)
+                            else -> context.getString(R.string.prompt_templates_empty)
                         }
                         Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                     }

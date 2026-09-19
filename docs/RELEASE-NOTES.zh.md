@@ -1,3 +1,21 @@
+# OpenMinis-Linux 1.34.1-linux
+
+- versionCode **50**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.34-linux：
+
+- 提示词模板和工作区规则保存时**不再**过滤注入/越狱措辞；删除 `PromptSafetyFilter`。
+- 工作区规则**不再**写入任何会话的系统提示词（含「不能覆盖权限闸」那句）。规则仍作为设备上的 Markdown 文件库 + `state.json` 启用开关保存。
+- 会话模板、工具限额、SecurityGate 拦截/审批徽标仍在。不升 Room。
+
+---
+
 # OpenMinis-Linux 1.34-linux
 
 - versionCode **49**
