@@ -6,14 +6,18 @@
 
 **你的私人、端侧 AI Agent（本仓库是 OpenMinis 的 Linux 沙箱 Android 分支）。**
 
-> **Minis Ultra** — `applicationId` `com.openminis.linux`，当前 **1.32.1-linux** / versionCode 47，可与官方 OpenMinis 并排安装。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。主机 `su`、工具链（`minis-dev-setup`）、POSIX `/sdcard` 挂载、Ubuntu 24.04 PRoot 客户机见 [LINUX.md](LINUX.md)。多智能体调度见设置 → 多智能体（`minis://settings/multi-agent`）。签名与 libunwind 见 [docs/SIGNING.md](docs/SIGNING.md)。中国大陆编译 Android SDK / 切勿覆盖 aarch64 aapt2 见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。中文发行说明见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
+> **Minis Ultra** — `applicationId` `com.openminis.linux`，当前 **1.33-linux** / versionCode 48，可与官方 OpenMinis 并排安装。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。主机 `su`、工具链（`minis-dev-setup`）、POSIX `/sdcard` 挂载、Ubuntu 24.04 PRoot 客户机见 [LINUX.md](LINUX.md)。多智能体调度见设置 → 多智能体（`minis://settings/multi-agent`）。签名与 libunwind 见 [docs/SIGNING.md](docs/SIGNING.md)。中国大陆编译 Android SDK / 切勿覆盖 aarch64 aapt2 见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。中文发行说明见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ## 下载
 
-- **本版发行包（1.32.1-linux / versionCode 47）**：[Releases `1.32.1-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.32.1-linux) → `minis-ultra-com.openminis.linux.apk`
+- **本版发行包（1.33-linux / versionCode 48）**：[Releases `1.33-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.33-linux) → `minis-ultra-com.openminis.linux.apk`
 - **滚动构建**：[Releases `android-latest`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest)（main 每次成功构建都会覆盖）
 
 侧载前允许「安装未知应用」。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本，见 [docs/SIGNING.md](docs/SIGNING.md)。
+
+### 1.33 要点
+
+SecurityGate（ASK 默认；argv 风险；sha256 审计链；allow/deny；权威围栏）；工具面补齐 list_dir/glob/grep/web_fetch/multi_edit、shell_exec/env_exec/su_exec、dispatch_agents（探索者/审查员/编码员/研究员独立白名单）、wolfpack_run、agent_plan、execute_code（Rhino 1.7.14）、invoke_skill/skill_manage、ask_reasoning；describe_image 走 read_image。不换 ChatViewModel，子代理仍是独立循环。完整说明：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ### 1.32.1 要点
 
@@ -73,7 +77,7 @@ Official website: **[openminis.app](https://openminis.app)**
   <img alt="Download on the App Store" height="48" src="assets/badge-appstore.svg" />
 </a>
 &nbsp;
-<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.32.1-linux">
+<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.33-linux">
   <img alt="Get the APK on GitHub" height="48" src="assets/badge-android.svg" />
 </a>
 

@@ -23,11 +23,12 @@ object CollabRoles {
     )
 
     private val T_READONLY = setOf(
-        "file_read", "grep_source", "web_search", "memory_get",
+        "file_read", "grep_source", "grep", "glob", "list_dir",
+        "web_search", "web_fetch", "memory_get",
         "search_sessions", "read_session", "browser_use", "code_graph",
     )
-    private val T_WRITER = T_READONLY + setOf("file_write", "file_edit", "memory_write")
-    private val T_BUILDER = T_WRITER + setOf("shell_execute")
+    private val T_WRITER = T_READONLY + setOf("file_write", "file_edit", "multi_edit", "memory_write")
+    private val T_BUILDER = T_WRITER + setOf("shell_execute", "shell_exec", "env_exec")
 
     val PRODUCT: List<Role> = listOf(
         Role(

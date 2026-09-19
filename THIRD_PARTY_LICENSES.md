@@ -43,6 +43,7 @@ Transitive packages (pinned in `Package.resolved`), all **Apache-2.0**, maintain
 | Reorderable (sh.calvin.reorderable) | 2.4.0 | **Apache-2.0** |
 | ACRA (acra-core) | 5.12.0 | **Apache-2.0** |
 | Shizuku API + provider (dev.rikka.shizuku) | 13.1.5 | **MIT** |
+| Mozilla Rhino (`org.mozilla:rhino`) | 1.7.14 | **MPL-2.0** |
 
 Test-only dependencies: JUnit 4.13.2 (**EPL-1.0**), MockWebServer 4.12.0 (**Apache-2.0**), kotlinx-coroutines-test 1.9.0 (**Apache-2.0**), org.json 20231013 (**Public Domain / JSON License**).
 
@@ -61,4 +62,4 @@ Test-only dependencies: JUnit 4.13.2 (**EPL-1.0**), MockWebServer 4.12.0 (**Apac
 
 | Component | License | Notes |
 |---|---|---|
-| [XINCODE-Public](https://github.com/kusesad-1122/XINCODE-Public) | **GPL-3.0-or-later** | Selected Android agent pieces adapted into OpenMinis: `cronjob`/`CronScheduler`, online OpenAPI plugin registry + `OnlineApiTool`, `CollabRoles` from PresetTeam. Memory ranking stays on OpenMinis `MemoryRecallEngine`. Not a wholesale copy of the XINCODE app. |
+| [XINCODE-Public](https://github.com/kusesad-1122/XINCODE-Public) | **GPL-3.0-or-later** | Selected Android agent pieces adapted into OpenMinis: `cronjob`/`CronScheduler`, online OpenAPI plugin registry + `OnlineApiTool`, `CollabRoles` from PresetTeam, `SecurityGate`/`PermissionIntersection`/`ShellArgv`, `dispatch_agents`/`wolfpack_run`/`agent_plan`/`execute_code` (Rhino)/`invoke_skill`/`skill_manage`/`ask_reasoning`, `list_dir`/`glob`/`grep`/`web_fetch`/`multi_edit`, SubAgentTypeStore. Memory ranking stays on OpenMinis `MemoryRecallEngine`. Not a wholesale copy of the XINCODE app. |

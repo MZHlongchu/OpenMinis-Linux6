@@ -63,6 +63,9 @@ class SubAgentKindTest {
         assertTrue(SubAgentKind.blocks(SubAgentKind.GENERAL, "spawn_agent"))
         assertTrue(SubAgentKind.isSpawnTool("spawn_agent"))
         assertTrue(SubAgentKind.isSpawnTool("run_subagent"))
+        assertTrue(SubAgentKind.isSpawnTool("dispatch_agents"))
+        assertTrue(SubAgentKind.isSpawnTool("wolfpack_run"))
+        assertTrue(SubAgentKind.blocks(SubAgentKind.WORKER, "dispatch_agents"))
     }
 
     @Test

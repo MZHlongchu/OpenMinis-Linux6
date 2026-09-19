@@ -1,3 +1,21 @@
+# OpenMinis-Linux 1.33-linux
+
+- versionCode **48**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+对照 XINCODE/OSS 把 Agent 工具面和权限闸补齐，**不**用 AgentCore 替换 ChatViewModel，子代理仍走独立 `SubAgentRunner`。
+
+- **SecurityGate**：默认 ASK；只读自动放行；写/高风险命令确认；`rm -rf /` 等 FATAL 直接拒绝；allow/deny 规则（deny 优先）；权威围栏（文件前缀 + 网络）；审计 sha256 链式哈希。设置 → 多智能体可改权限模式。
+- **工具**：`list_dir` / `glob` / `grep` / `web_fetch` / `multi_edit`；`shell_exec` / `env_exec` 等同 `shell_execute`；`su_exec` 走客户机 `android-su`；`dispatch_agents`（内置探索者/审查员/编码员/研究员，独立工具/技能白名单，SharedPreferences 不升 Room）；`wolfpack_run`；`agent_plan`；`execute_code`（Rhino 1.7.14，仅只读工具）；`invoke_skill` / `skill_manage`；`ask_reasoning`；`describe_image` 等同 `read_image`。`generate_image` / `transcribe_audio` 在未配置时如实失败。
+- 路径仍走 PRootKernel，不直接碰主机 File。记忆仍用 MemoryRecallEngine。
+
+---
+
 # OpenMinis-Linux 1.32.1-linux
 
 - versionCode **47**

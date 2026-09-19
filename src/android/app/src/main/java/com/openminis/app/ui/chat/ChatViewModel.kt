@@ -1507,30 +1507,6 @@ class ChatViewModel(
         _pendingUserQuestions.asStateFlow()
     @Volatile private var askUserDeferred: kotlinx.coroutines.CompletableDeferred<String>? = null
 
-    /**
-     * [T-android-foreground-approval] Live mirror of [ApprovalGate.pendingApprovals]
-     * so ChatScreen can render an in-app approval card while the user is already
-     * in the chat (the notification-bar entry stays as the fallback when the
-     * app is backgrounded).
-     */
-    val pendingApprovals: StateFlow<Map<String, ApprovalGate.ApprovalRequest>> =
-        ApprovalGate.pendingApprovals
-
-    /**
-     * Resolve a foreground approval-card tap. ApprovalGate is process-local and
-     * cannot reach the notification manager, so the matching bar entry is
-     * cancelled here (see ApprovalNotifier's clearing contract).
-     */
-    fun approvePendingTool(id: String) {
-        ApprovalGate.approve(id)
-        ApprovalNotifier.cancelApproval(context, id)
-    }
-
-    fun denyPendingTool(id: String) {
-        ApprovalGate.deny(id)
-        ApprovalNotifier.cancelApproval(context, id)
-    }
-
     private fun activeOverrides(): com.openminis.app.data.model.ModelOverrides? {
         val id = _activeEntryId.value ?: return null
         return providerRepository.config.value.modelEntries.find { it.id == id }?.overrides
@@ -9404,9 +9380,12 @@ class ChatViewModel(
         // dead since these tools have no native ChatViewModel executor
         // — they always fall through to shell_execute or the offload
         // bridge, which is now where checkPermission runs.
-        val toolTitle = try { JSONObject(argsJson).optString("tool_title", name) } catch (_: Exception) { name }
+        val canonical = com.openminis.app.security.ToolAliases.canonical(name)
+        val gated = com.openminis.app.security.SecurityGateHolder.intercept(context, canonical, argsJson)
+        if (gated != null) return gated
+        val toolTitle = try { JSONObject(argsJson).optString("tool_title", canonical) } catch (_: Exception) { canonical }
 
-        val result = when (name) {
+        val result = when (canonical) {
             FileReadTool.NAME -> {
                 val result = FileReadTool.execute(argsJson, activeSessionId, context)
                 // Record skill usage when SKILL.md under /var/minis/skills/<id>/ is read.
@@ -9422,42 +9401,71 @@ class ChatViewModel(
                 }
                 result
             }
-            FileWriteTool.NAME -> runCatching {
-                // [T-android-foreground-approval] Include the target path in the
-                // preview so the in-app card / notification says WHAT is being written.
-                val writePreview = runCatching { JSONObject(argsJson).optString("path", "") }
-                    .getOrNull().orEmpty().ifBlank { "agent writes to local filesystem" }
-                val id = ApprovalGate.requestApproval("file_write", writePreview)
-                com.openminis.app.notification.ApprovalNotifier(context).notifyApproval(
-                    id, "file_write", writePreview
-                )
-                val approved = ApprovalGate.waitFor(id)
-                ApprovalNotifier.cancelApproval(context, id)
-                if (!approved) return@runCatching ToolExecutionResult("User rejected or timed out file_write", false, toolTitle = "file_write")
-                FileWriteTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
-            }.getOrElse { ToolExecutionResult("Approval failed: " + it.message, false, toolTitle = name) }
-            FileEditTool.NAME -> runCatching {
-                val editPreview = runCatching { JSONObject(argsJson).optString("path", "") }
-                    .getOrNull().orEmpty().ifBlank { "agent edits local filesystem" }
-                val id = ApprovalGate.requestApproval("file_edit", editPreview)
-                com.openminis.app.notification.ApprovalNotifier(context).notifyApproval(
-                    id, "file_edit", editPreview
-                )
-                val approved = ApprovalGate.waitFor(id)
-                ApprovalNotifier.cancelApproval(context, id)
-                if (!approved) return@runCatching ToolExecutionResult("User rejected or timed out file_edit", false, toolTitle = "file_edit")
-                FileEditTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
-            }.getOrElse { ToolExecutionResult("Approval failed: " + it.message, false, toolTitle = name) }
+            FileWriteTool.NAME -> FileWriteTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
+            FileEditTool.NAME -> FileEditTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
+            com.openminis.app.tools.MultiEditTool.NAME -> com.openminis.app.tools.MultiEditTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
+            com.openminis.app.tools.ListDirTool.NAME -> com.openminis.app.tools.ListDirTool.execute(argsJson, activeSessionId, context)
+            com.openminis.app.tools.GrepTool.NAME, com.openminis.app.tools.GrepSourceTool.NAME ->
+                com.openminis.app.tools.GrepTool.execute(argsJson, activeSessionId, context)
+            com.openminis.app.tools.GlobTool.NAME -> com.openminis.app.tools.GlobTool.execute(argsJson, activeSessionId, context)
+            com.openminis.app.tools.WebFetchTool.NAME -> com.openminis.app.tools.WebFetchTool.execute(argsJson)
             // T178: pass sessionId + context so read_image routes through
             // resolveSessionHostPath like file_read/write/edit do — without
             // these, the tool consults the global last-writer-wins
             // bindMounts map and would surface another session's
             // /var/minis/{workspace,attachments,offloads,browser} files.
             ReadImageTool.NAME -> executeReadImageTool(argsJson)
-            "shell_execute" -> executeShellCommand(argsJson, toolId, toolBlocks, assistantId, currentText)
+            "shell_execute", "shell_exec", "env_exec" -> executeShellCommand(argsJson, toolId, toolBlocks, assistantId, currentText)
+            "su_exec" -> {
+                val o = JSONObject(argsJson)
+                val cmd = o.optString("command")
+                val quoted = "'" + cmd.replace("'", "'\\''") + "'"
+                o.put("command", "android-su -c " + quoted)
+                executeShellCommand(o.toString(), toolId, toolBlocks, assistantId, currentText)
+            }
             "browser_use" -> executeBrowserUseTool(argsJson)
-            "memory_write" -> executeMemoryWriteTool(argsJson)
-            "memory_get" -> executeMemoryGetTool(argsJson)
+            "memory_write", "save_memory" -> executeMemoryWriteTool(argsJson)
+            "memory_get", "recall_memory" -> executeMemoryGetTool(argsJson)
+            com.openminis.app.tools.DispatchAgentsTool.NAME -> executeRunSubAgent(
+                com.openminis.app.tools.DispatchAgentsTool.toSpawnArgs(argsJson, context),
+                toolId, toolBlocks, assistantId, currentText,
+            )
+            com.openminis.app.tools.WolfpackTool.NAME -> executeRunSubAgent(
+                com.openminis.app.tools.WolfpackTool.toSpawnArgs(argsJson),
+                toolId, toolBlocks, assistantId, currentText,
+            )
+            com.openminis.app.tools.AgentPlanTool.NAME -> com.openminis.app.tools.AgentPlanTool.execute(argsJson)
+            com.openminis.app.tools.InvokeSkillTool.NAME ->
+                com.openminis.app.tools.InvokeSkillTool.execute(argsJson, skillRepository, activeSessionId)
+            com.openminis.app.tools.SkillManageTool.NAME ->
+                com.openminis.app.tools.SkillManageTool.execute(argsJson, skillRepository)
+            com.openminis.app.tools.AskReasoningTool.NAME ->
+                com.openminis.app.tools.AskReasoningTool.execute(argsJson) { sys, user -> oneShotAsk(sys, user) }
+            com.openminis.app.tools.ExecuteCodeTool.NAME ->
+                com.openminis.app.tools.ExecuteCodeTool.execute(argsJson) { n, a ->
+                    executeTool(n, a, toolId, toolBlocks, assistantId, currentText)
+                }
+            com.openminis.app.tools.ProductMediaTools.DESCRIBE_IMAGE -> executeReadImageTool(argsJson)
+            com.openminis.app.tools.ProductMediaTools.GENERATE_IMAGE ->
+                com.openminis.app.tools.ProductMediaTools.notConfigured(
+                    com.openminis.app.tools.ProductMediaTools.GENERATE_IMAGE,
+                    "Use an image-capable model in chat, or configure image generation in provider settings.",
+                )
+            com.openminis.app.tools.ProductMediaTools.TRANSCRIBE_AUDIO ->
+                com.openminis.app.tools.ProductMediaTools.notConfigured(
+                    com.openminis.app.tools.ProductMediaTools.TRANSCRIBE_AUDIO,
+                    "Attach audio in chat or configure a speech model.",
+                )
+            com.openminis.app.tools.ProductMediaTools.TRANSLATE_TEXT -> {
+                val o = JSONObject(argsJson)
+                val text = o.optString("text")
+                val lang = o.optString("target_lang")
+                val out = oneShotAsk(
+                    "You are a translator. Return only the translation into $lang, no preface.",
+                    text,
+                )
+                ToolExecutionResult(out, true, toolTitle = "translate_text")
+            }
             CronJobTool.NAME -> CronJobTool.execute(argsJson, context)
             SubAgentKind.SPAWN_AGENT, SubAgentKind.RUN_SUBAGENT ->
                 executeRunSubAgent(argsJson, toolId, toolBlocks, assistantId, currentText)
@@ -9501,10 +9509,25 @@ class ChatViewModel(
         }
         if (!result.success) {
             com.openminis.app.evolution.EvolutionHooks.onToolFailure(
-                activeSessionId, name, argsJson, result.output,
+                activeSessionId, canonical, argsJson, result.output,
             )
         }
         return result
+    }
+
+    private suspend fun oneShotAsk(system: String, user: String): String {
+        val provider = currentProvider ?: throw IllegalStateException("no provider")
+        val buf = StringBuilder()
+        provider.streamMessage(
+            messages = listOf(LLMMessage(LLMMessage.Role.USER, user)),
+            systemPrompt = system,
+            maxTokens = 2048,
+            tools = emptyList(),
+            thinkingLevel = ThinkingLevel.OFF,
+        ).collect { chunk ->
+            if (chunk is LLMStreamChunk.Text) buf.append(chunk.text)
+        }
+        return buf.toString().ifBlank { "(empty reasoning response)" }
     }
 
     /**

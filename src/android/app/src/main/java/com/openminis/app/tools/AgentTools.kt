@@ -34,11 +34,30 @@ object AgentTools {
         add(FileReadTool.definition())
         add(FileWriteTool.definition())
         add(FileEditTool.definition())
+        add(MultiEditTool.definition())
+        add(ListDirTool.definition())
+        add(GrepTool.definition())
+        add(GlobTool.definition())
         if (supportsImageInput || visionGroupConfigured) {
             add(ReadImageTool.definition())
         }
         add(browserUseDefinition())
         add(WebSearchTool.definition())
+        add(WebFetchTool.definition())
+        add(shellExecAliasDefinition())
+        add(suExecDefinition())
+        add(envExecDefinition())
+        add(DispatchAgentsTool.definition())
+        add(WolfpackTool.definition())
+        add(AgentPlanTool.definition())
+        add(ExecuteCodeTool.definition())
+        add(InvokeSkillTool.definition())
+        add(SkillManageTool.definition())
+        add(AskReasoningTool.definition())
+        add(ProductMediaTools.generateImageDefinition())
+        add(ProductMediaTools.describeImageDefinition())
+        add(ProductMediaTools.transcribeAudioDefinition())
+        add(ProductMediaTools.translateTextDefinition())
         add(SessionLookupTool.searchDefinition())
         add(SessionLookupTool.readDefinition())
         add(AskUserQuestion.definition())
@@ -63,7 +82,12 @@ object AgentTools {
      */
     fun makeSubAgentExtraTools(): List<AgentToolDefinition> = buildList {
         add(GrepSourceTool.definition())
+        add(GrepTool.definition())
+        add(GlobTool.definition())
+        add(ListDirTool.definition())
+        add(WebFetchTool.definition())
         add(CodeGraphTool.definition())
+        add(ExecuteCodeTool.definition())
     }
 
     private fun runSubAgentDefinition(): AgentToolDefinition {
@@ -223,5 +247,29 @@ Each task prompt MUST be self-contained with ## Task / ## Expected result / ## C
         ),
         required = listOf("tool_title"),
         propertyOrdering = listOf("tool_title", "scope", "keywords"),
+    )
+
+    private fun shellExecAliasDefinition(): AgentToolDefinition =
+        shellExecuteDefinition().copy(
+            name = "shell_exec",
+            description = "Alias of shell_execute. Isolated Ubuntu 24.04 PRoot. Prefer this name if you come from XINCODE.",
+        )
+
+    private fun envExecDefinition(): AgentToolDefinition =
+        shellExecuteDefinition().copy(
+            name = "env_exec",
+            description = "Run a command in the Ubuntu guest (same as shell_execute). The guest already is the Linux environment.",
+        )
+
+    private fun suExecDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "su_exec",
+        description = "Privileged host command via android-su / Magisk KernelSU. Equivalent to android-su -c <command>. Not PRoot fake-root.",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "A concise 5-10 word summary shown to the user."),
+            "command" to AgentToolParam("string", "Host command to run as root."),
+            "timeout" to AgentToolParam("integer", "Timeout in seconds (default 120)."),
+        ),
+        required = listOf("tool_title", "command"),
+        propertyOrdering = listOf("tool_title", "command", "timeout"),
     )
 }

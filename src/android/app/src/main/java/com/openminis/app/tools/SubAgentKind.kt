@@ -38,6 +38,11 @@ object SubAgentKind {
         // for, so it must be allowed here or those kinds lose their best lookup.
         GrepSourceTool.NAME,
         CodeGraphTool.NAME,
+        GrepTool.NAME,
+        GlobTool.NAME,
+        ListDirTool.NAME,
+        WebFetchTool.NAME,
+        ExecuteCodeTool.NAME,
     )
 
     private val ALWAYS_DENY = setOf(
@@ -46,12 +51,16 @@ object SubAgentKind {
         "ask_user_question",
         "AskUserQuestion",
         CronJobTool.NAME,
+        DispatchAgentsTool.NAME,
+        WolfpackTool.NAME,
     )
 
     fun isSpawnTool(name: String): Boolean {
         val n = name.trim()
         return n.equals(SPAWN_AGENT, ignoreCase = true) ||
-            n.equals(RUN_SUBAGENT, ignoreCase = true)
+            n.equals(RUN_SUBAGENT, ignoreCase = true) ||
+            n.equals(DispatchAgentsTool.NAME, ignoreCase = true) ||
+            n.equals(WolfpackTool.NAME, ignoreCase = true)
     }
 
     fun normalize(raw: String?): String = when (raw?.trim()?.lowercase()) {

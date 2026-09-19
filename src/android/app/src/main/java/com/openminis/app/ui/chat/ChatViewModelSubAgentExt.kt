@@ -369,17 +369,20 @@ private suspend fun ChatViewModel.runOneSubAgent(
                     userPrompt = prompt,
                     role = role,
                     skillsHint = skills,
-                    tools = SubAgentKind.filterTools(
-                        kind,
-                        AgentTools.makeAgentTools(
-                            supportsImageInput = entry.model.hasImageInput,
-                            visionGroupConfigured = com.openminis.app.tools.VisionGroupResolver.isConfigured(
-                                providerRepository, context,
-                            ),
-                            memoryEnabled = false,
-                            subAgentEnabled = false,
-                        ) + AgentTools.makeSubAgentExtraTools(),
-                        role,
+                    tools = com.openminis.app.tools.DispatchAgentsTool.filterToolsForType(
+                        com.openminis.app.tools.SubAgentTypeStore.find(context, role.orEmpty()),
+                        SubAgentKind.filterTools(
+                            kind,
+                            AgentTools.makeAgentTools(
+                                supportsImageInput = entry.model.hasImageInput,
+                                visionGroupConfigured = com.openminis.app.tools.VisionGroupResolver.isConfigured(
+                                    providerRepository, context,
+                                ),
+                                memoryEnabled = false,
+                                subAgentEnabled = false,
+                            ) + AgentTools.makeSubAgentExtraTools(),
+                            role,
+                        ),
                     ),
                     maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 8192),
                     executeTool = { name, json ->
@@ -387,6 +390,11 @@ private suspend fun ChatViewModel.runOneSubAgent(
                             ToolExecutionResult("Error: $kind sub-agent cannot use $name.", false)
                         } else if (com.openminis.app.tools.CollabRoles.toolsFor(role)?.let { name !in it } == true) {
                             ToolExecutionResult("Error: role $role cannot use $name.", false)
+                        } else if (run {
+                            val type = com.openminis.app.tools.SubAgentTypeStore.find(context, role.orEmpty())
+                            type != null && type.toolNames.isNotEmpty() && name !in type.toolNames
+                        }) {
+                            ToolExecutionResult("Error: type $role cannot use $name.", false)
                         } else if (name == com.openminis.app.tools.GrepSourceTool.NAME) {
                             com.openminis.app.tools.GrepSourceTool.execute(json, sessionId, context)
                         } else {

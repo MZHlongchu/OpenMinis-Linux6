@@ -239,6 +239,41 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                 )
             }
         }
+
+        val gate = com.openminis.app.security.SecurityGateHolder.gate
+        var permMode by remember { mutableStateOf(gate.getPermissionMode()) }
+        SettingsSection(
+            header = "权限模式",
+            footer = "ASK 默认询问写操作与高风险命令；ALLOW_ALL 自动放行；READ_ONLY / PLAN 只读；DENY_ALL 全拒。",
+        ) {
+            val modes = com.openminis.app.security.PermissionMode.entries
+            modes.forEachIndexed { index, mode ->
+                SettingsChoiceRow(
+                    title = mode.name,
+                    selected = permMode == mode,
+                    onSelect = {
+                        permMode = mode
+                        com.openminis.app.security.SecurityGateHolder.setMode(context, mode)
+                    },
+                    showDivider = index < modes.lastIndex,
+                )
+            }
+        }
+
+        SettingsSection(
+            header = "子代理类型",
+            footer = "dispatch_agents 按类型名派发。内置探索者 / 审查员 / 编码员 / 研究员，各自有独立工具白名单。",
+        ) {
+            val types = com.openminis.app.tools.SubAgentTypeStore.load(context)
+            types.forEachIndexed { index, type ->
+                SettingsRow(
+                    title = type.name,
+                    subtitle = type.description.take(80) + " · " + type.toolNames.take(6).joinToString(),
+                    showChevron = false,
+                    showDivider = index < types.lastIndex,
+                )
+            }
+        }
     }
 }
 

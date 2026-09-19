@@ -41,7 +41,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 48
-        versionName = "1.32.2-linux"
+        versionName = "1.33-linux"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -307,6 +307,7 @@ dependencies {
     }
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.mozilla:rhino:1.7.14")
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
 
     // Kotlinx Serialization

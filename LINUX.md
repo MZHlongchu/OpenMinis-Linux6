@@ -2,11 +2,11 @@
 
 本分支保留 OpenMinis 的 Agent + PRoot 沙箱，并加上偏 Linux 的工具链、主机 `su` 直通、POSIX 共享存储挂载，以及独立的 Android 包名，因此可以和官方 OpenMinis **并排安装**。
 
-启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。当前版本 **1.32.1-linux**（versionCode 47）。
+启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。当前版本 **1.33-linux**（versionCode 48）。
 
 滚动 APK：GitHub Releases 标签 `android-latest`，文件名 `minis-ultra-com.openminis.linux.apk`。关于页 / 检查更新走 fork `tall-1997/OpenMinis-Linux`；滚动包用 release body 里的 `versionCode` / `versionName`（以及 APK `updated_at`）判断是否比本机新。
 
-正式发行包：[Releases `1.32.1-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.32.1-linux)。1.32.1：修好「数据来自更新的版本 / 数据格式 12」误拦（守卫与 Room 14 对齐）。1.32：cronjob 定时任务、插件市场（MCP 预设 + 在线 OpenAPI）、spawn_agent 协作角色。1.31：代码图、审批闸、看板、上下文洞察。1.26：拾忆风格 spawn_agent。详见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
+正式发行包：[Releases `1.33-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.33-linux)。1.33：SecurityGate 权限闸 + 完整 Agent 工具面 + 可配置子代理类型。1.32.1：修好「数据来自更新的版本 / 数据格式 12」误拦。1.31：代码图、审批闸、看板、上下文洞察。1.26：拾忆风格 spawn_agent。详见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ## 沙箱当服务器
 
