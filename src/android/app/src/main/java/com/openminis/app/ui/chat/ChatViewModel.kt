@@ -1507,6 +1507,19 @@ class ChatViewModel(
         _pendingUserQuestions.asStateFlow()
     @Volatile private var askUserDeferred: kotlinx.coroutines.CompletableDeferred<String>? = null
 
+    val pendingApprovals: StateFlow<Map<String, ApprovalGate.ApprovalRequest>> =
+        ApprovalGate.pendingApprovals
+
+    fun approvePendingTool(id: String) {
+        ApprovalGate.approve(id)
+        ApprovalNotifier.cancelApproval(context, id)
+    }
+
+    fun denyPendingTool(id: String) {
+        ApprovalGate.deny(id)
+        ApprovalNotifier.cancelApproval(context, id)
+    }
+
     private fun activeOverrides(): com.openminis.app.data.model.ModelOverrides? {
         val id = _activeEntryId.value ?: return null
         return providerRepository.config.value.modelEntries.find { it.id == id }?.overrides

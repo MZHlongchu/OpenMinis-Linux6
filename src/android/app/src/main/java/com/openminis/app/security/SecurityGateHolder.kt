@@ -82,11 +82,12 @@ object SecurityGateHolder {
                 toolTitle = canonical,
             )
             is Decision.NeedConfirm -> {
-                val id = ApprovalGate.requestApproval()
+                val preview = decision.preview.take(240).ifBlank { decision.reason }
+                val id = ApprovalGate.requestApproval(canonical, preview)
                 ApprovalNotifier(context).notifyApproval(
                     id,
                     canonical,
-                    decision.preview.take(240).ifBlank { decision.reason },
+                    preview,
                 )
                 val approved = ApprovalGate.waitFor(id)
                 ApprovalNotifier.cancelApproval(context, id)
