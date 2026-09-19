@@ -2,33 +2,36 @@
 
 `UpdateChecker` (1.17+) installs by replacing the existing package. Android
 refuses that when the incoming APK is signed with a different certificate.
-Debug-signed `assembleRelease` builds therefore **cannot** overlay a Play or
-CI-signed install — uninstall first, or sign with the same upload keystore.
 
-## Local / one-click aarch64
+Release builds (`assembleRelease`, GitHub Actions `android-apk.yml`) use a
+**committed upload keystore** so every cloud and local release APK shares one
+identity:
+
+- keystore: `src/android/release.keystore` (PKCS12)
+- config: `src/android/signing.properties`
+- alias: `openminis-release`
+- cert SHA-1: `B4:74:34:85:37:94:EE:01:3D:20:D0:E9:5C:73:81:DB:DC:92:39:19`
+- cert SHA-256: `DE:46:32:52:F7:E1:26:7F:7B:8C:1C:E2:00:74:3B:46:7C:41:CC:5A:FA:92:17:B8:BE:BB:51:65:27:23:E3:04`
+
+If those files are missing, Gradle still signs release with the debug
+keystore (same as 1.18). Sideload is fine; in-app update against a
+differently signed build is not.
+
+## Override (optional)
+
+Environment variables win over `signing.properties`:
 
 ```
-export MINIS_UPLOAD_STORE_FILE=/path/to/upload.jks
+export MINIS_UPLOAD_STORE_FILE=/path/to/other.jks
 export MINIS_UPLOAD_STORE_PASSWORD=...
 export MINIS_UPLOAD_KEY_ALIAS=...
 export MINIS_UPLOAD_KEY_PASSWORD=...
 bash scripts/build_apk_aarch64.sh
 ```
 
-If those env vars are unset, Gradle still signs release with the debug
-keystore (same as 1.18). Sideload is fine; in-app update against a
-differently signed build is not.
-
-## GitHub Actions
-
-Optional repository secrets:
-
-- `MINIS_UPLOAD_KEYSTORE_BASE64` — base64 of the `.jks` / `.keystore`
-- `MINIS_UPLOAD_STORE_PASSWORD`
-- `MINIS_UPLOAD_KEY_ALIAS`
-- `MINIS_UPLOAD_KEY_PASSWORD`
-
-Without them, rolling `android-latest` stays debug-signed.
+GitHub Actions secrets `MINIS_UPLOAD_KEYSTORE_BASE64` /
+`MINIS_UPLOAD_STORE_PASSWORD` / `MINIS_UPLOAD_KEY_ALIAS` /
+`MINIS_UPLOAD_KEY_PASSWORD` also override the committed key, if set.
 
 ## libunwind
 

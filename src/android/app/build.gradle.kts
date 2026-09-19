@@ -72,15 +72,41 @@ android {
         }
     }
 
-    val uploadStorePath = System.getenv("MINIS_UPLOAD_STORE_FILE")
-    val hasUploadKeystore = !uploadStorePath.isNullOrBlank() && file(uploadStorePath).isFile
+    fun envOrBlank(key: String): String =
+        System.getenv(key)?.takeIf { it.isNotBlank() } ?: ""
+
+    val signingProps = Properties().apply {
+        val f = rootProject.file("signing.properties")
+        if (f.isFile) f.inputStream().use { load(it) }
+    }
+
+    fun resolveSigningStoreFile(): java.io.File? {
+        val fromEnv = envOrBlank("MINIS_UPLOAD_STORE_FILE")
+        if (fromEnv.isNotEmpty()) {
+            val f = file(fromEnv)
+            if (f.isFile) return f
+        }
+        val fromProps = signingProps.getProperty("signing.storeFile")?.trim().orEmpty()
+        if (fromProps.isNotEmpty()) {
+            listOf(rootProject.file(fromProps), file(fromProps))
+                .firstOrNull { it.isFile }
+                ?.let { return it }
+        }
+        return rootProject.file("release.keystore").takeIf { it.isFile }
+    }
+
+    val uploadStoreFile = resolveSigningStoreFile()
+    val hasUploadKeystore = uploadStoreFile != null
     signingConfigs {
         if (hasUploadKeystore) {
             create("releaseUpload") {
-                storeFile = file(uploadStorePath!!)
-                storePassword = System.getenv("MINIS_UPLOAD_STORE_PASSWORD") ?: ""
-                keyAlias = System.getenv("MINIS_UPLOAD_KEY_ALIAS") ?: ""
-                keyPassword = System.getenv("MINIS_UPLOAD_KEY_PASSWORD") ?: ""
+                storeFile = uploadStoreFile!!
+                storePassword = envOrBlank("MINIS_UPLOAD_STORE_PASSWORD")
+                    .ifEmpty { signingProps.getProperty("signing.storePassword") ?: "" }
+                keyAlias = envOrBlank("MINIS_UPLOAD_KEY_ALIAS")
+                    .ifEmpty { signingProps.getProperty("signing.keyAlias") ?: "" }
+                keyPassword = envOrBlank("MINIS_UPLOAD_KEY_PASSWORD")
+                    .ifEmpty { signingProps.getProperty("signing.keyPassword") ?: "" }
             }
         }
     }
@@ -92,8 +118,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Debug-signed APKs cannot replace a differently signed install
-            // (UpdateChecker 1.17). Use MINIS_UPLOAD_* env when a real keystore exists.
+            // Prefer the committed upload keystore (src/android/release.keystore)
+            // so CI and local assembleRelease share one cert. MINIS_UPLOAD_* env
+            // overrides. Debug keystore is last-resort only.
             signingConfig = if (hasUploadKeystore) {
                 signingConfigs.getByName("releaseUpload")
             } else {

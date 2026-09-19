@@ -103,7 +103,7 @@ jobs:
             || cp src/android/app/provider-customization.properties.example \
                   src/android/app/provider-customization.properties
 
-      - name: Optional upload keystore
+      - name: Upload keystore
         env:
           B64: ${{ secrets.MINIS_UPLOAD_KEYSTORE_BASE64 }}
         run: |
@@ -113,9 +113,11 @@ jobs:
             echo "MINIS_UPLOAD_STORE_PASSWORD=${{ secrets.MINIS_UPLOAD_STORE_PASSWORD }}" >> "$GITHUB_ENV"
             echo "MINIS_UPLOAD_KEY_ALIAS=${{ secrets.MINIS_UPLOAD_KEY_ALIAS }}" >> "$GITHUB_ENV"
             echo "MINIS_UPLOAD_KEY_PASSWORD=${{ secrets.MINIS_UPLOAD_KEY_PASSWORD }}" >> "$GITHUB_ENV"
-            echo "signed with repository upload keystore"
+            echo "signed with GitHub Actions secret keystore"
+          elif [ -f src/android/release.keystore ] && [ -f src/android/signing.properties ]; then
+            echo "signed with committed src/android/release.keystore"
           else
-            echo "No MINIS_UPLOAD_KEYSTORE_BASE64 — APK will be debug-signed (cannot replace a differently signed install)"
+            echo "No upload keystore — APK will be debug-signed (cannot replace a differently signed install)"
           fi
 
       - name: Cross-compile libunwind.a for aarch64
@@ -193,7 +195,7 @@ jobs:
 
             - applicationId: `com.openminis.linux`
             - launcher name: **Minis Ultra**
-            - arm64-v8a (debug-signed unless MINIS_UPLOAD_KEYSTORE_BASE64 is set)
+            - arm64-v8a (release-signed with src/android/release.keystore unless overridden)
             - versionName: `${{ steps.appver.outputs.name }}`
             - versionCode: ${{ steps.appver.outputs.code }}
             - signing: see docs/SIGNING.md

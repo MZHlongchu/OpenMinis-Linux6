@@ -238,8 +238,10 @@ cd src/android
 ./gradlew :app:installDebug           # install onto a connected device
 ```
 
-Release builds are configured with the debug signing config, so no keystore is
-required to produce one locally.
+Release builds (`:app:assembleRelease`) sign with `src/android/release.keystore`
+when `src/android/signing.properties` is present (the default in this tree).
+See [docs/SIGNING.md](docs/SIGNING.md). Debug builds still use the debug
+keystore.
 
 ### Tests
 

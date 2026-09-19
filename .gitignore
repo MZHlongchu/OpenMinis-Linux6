@@ -26,6 +26,9 @@ render.experimental.xml
 # Keystore files
 *.jks
 *.keystore
+# Default Minis Ultra upload key — tracked so CI and local release APKs
+# share one certificate (UpdateChecker). Override with MINIS_UPLOAD_*.
+!src/android/release.keystore
 
 # Google Services (e.g. APIs or Firebase)
 google-services.json

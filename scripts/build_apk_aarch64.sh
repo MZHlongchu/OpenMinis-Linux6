@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # One-click aarch64 APK: PRoot + libunwind.a + Gradle assembleRelease.
-# Signing: if MINIS_UPLOAD_STORE_FILE is set, Gradle uses that keystore;
-# otherwise the debug keystore is used (UpdateChecker cannot replace a
-# differently-signed install).
+# Signing: Gradle uses src/android/release.keystore via signing.properties
+# by default. MINIS_UPLOAD_* env overrides. Debug keystore is last-resort
+# (UpdateChecker cannot replace a differently-signed install).
 set -euo pipefail
 [ -d "${TMPDIR:-}" ] || export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
