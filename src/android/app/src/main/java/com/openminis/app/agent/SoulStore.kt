@@ -317,7 +317,28 @@ object SoulStore {
      * user's display language; users extend from there. Mirrors iOS
      * `SoulStore.defaultContent` byte-for-byte (74c0daf).
      */
-    val DEFAULT_CONTENT: String = """---
+    /**
+     * [T-default-assets] The default SOUL.md content, loaded from
+     * `assets/default_soul.md` when available (single source of truth for
+     * editing the shipped default — edit that file, not this one), with
+     * [EMBEDDED_DEFAULT] as the fallback if the asset is missing or
+     * unreadable. Populated by [loadDefaultFromAssets] at app start; the
+     * getter keeps every existing call site (seeding, Settings restore,
+     * minis-config) working unchanged.
+     */
+    val DEFAULT_CONTENT: String
+        get() = assetsDefault ?: EMBEDDED_DEFAULT
+
+    @Volatile private var assetsDefault: String? = null
+
+    /** Read `assets/default_soul.md` into the DEFAULT_CONTENT getter. */
+    fun loadDefaultFromAssets(context: Context) {
+        runCatching {
+            context.assets.open("default_soul.md").bufferedReader().use { it.readText() }
+        }.getOrNull()?.let { assetsDefault = it }
+    }
+
+    private val EMBEDDED_DEFAULT: String = """---
 name: "Minis"
 style: ""
 lang: "auto"

@@ -24,6 +24,59 @@ class MemoryRepository(private val memoryDir: File) {
     companion object {
         private const val TAG = "MemoryRepository"
         private const val GLOBAL_FILE = "GLOBAL.md"
+
+        /**
+         * [T-global-md-seed] Default GLOBAL.md content for first-run seeding.
+         *
+         * GLOBAL.md is the user-maintained standing-rules file the agent
+         * treats as read-only background context (see
+         * [loadGlobalMemoryFragment]). Unlike SOUL.md it had no default —
+         * fresh installs simply got no global rules until the user wrote
+         * the file by hand. This constant seeds a starter template on
+         * first launch; edit ONLY the raw-string body below to customize
+         * the shipped default. Seeding mirrors SoulStore.ensureExists:
+         * create-only, never overwrites an existing file.
+         */
+        /**
+         * [T-default-assets] The default GLOBAL.md seed content, loaded
+         * from `assets/default_global.md` (single source of truth — edit
+         * that file to customize the shipped default), with the embedded
+         * skeleton below as fallback. See [ensureGlobalExists].
+         */
+        val DEFAULT_GLOBAL_CONTENT: String
+            get() = assetsGlobalDefault ?: EMBEDDED_GLOBAL_DEFAULT
+
+        @Volatile private var assetsGlobalDefault: String? = null
+
+        /** Read `assets/default_global.md` into DEFAULT_GLOBAL_CONTENT. */
+        fun loadGlobalDefaultFromAssets(context: android.content.Context) {
+            runCatching {
+                context.assets.open("default_global.md").bufferedReader().use { it.readText() }
+            }.getOrNull()?.let { assetsGlobalDefault = it }
+        }
+
+        private val EMBEDDED_GLOBAL_DEFAULT: String = """
+# 全局规则
+
+（默认占位：assets/default_global.md 缺失时的兜底。）
+"""
+
+        /**
+         * Create GLOBAL.md with [DEFAULT_GLOBAL_CONTENT] iff it does not
+         * exist yet. Mirrors SoulStore.ensureExists: safe on every launch,
+         * never overwrites user edits.
+         */
+        fun ensureGlobalExists(context: android.content.Context) {
+            val file = File(context.filesDir, "minis-global/memory/$GLOBAL_FILE")
+            if (file.exists()) return
+            try {
+                file.parentFile?.mkdirs()
+                file.writeText(DEFAULT_GLOBAL_CONTENT)
+                com.openminis.app.logging.AppLogger.info(TAG, "seeded GLOBAL.md at ${file.absolutePath}")
+            } catch (t: Throwable) {
+                com.openminis.app.logging.AppLogger.warning(TAG, "ensureGlobalExists failed: ${t.message}")
+            }
+        }
         private const val MAX_INJECT_LINES = 200
         // memory_get full-dump (no keywords): cap at 500 lines — matches iOS
         // `maxTotalLines = 500` in AIChatViewModel+MemoryTools.swift.

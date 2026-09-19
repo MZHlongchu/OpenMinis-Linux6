@@ -495,6 +495,14 @@ class MinisApp : Application(), ImageLoaderFactory {
         com.openminis.app.agent.SoulStore.ensureExists(this)
         com.openminis.app.agent.SoulStore.refreshCache(this)
 
+        // [T-global-md-seed + T-default-assets] Load default copy from
+        // assets/ (edit those .md files to customize the shipped defaults),
+        // then seed GLOBAL.md starter template on first launch
+        // (create-only; user edits are never overwritten).
+        com.openminis.app.agent.SoulStore.loadDefaultFromAssets(this)
+        com.openminis.app.data.repository.MemoryRepository.loadGlobalDefaultFromAssets(this)
+        com.openminis.app.data.repository.MemoryRepository.ensureGlobalExists(this)
+
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             kotlinx.coroutines.delay(5_000)
             runCatching {
