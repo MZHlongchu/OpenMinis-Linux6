@@ -21,7 +21,7 @@ import com.openminis.app.data.db.CodeEdgeEntity
         CodeEdgeEntity::class,
         KanbanTaskEntity::class,
     ],
-    version = 14,
+    version = 14, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
     // [T-android-downgrade-compat] Kept ON so MigrationTestHelper and CI can
     // validate every migration (and its downgrade counterpart) against the
     // committed schema json. Without it the upgrade/downgrade chain has no

@@ -58,6 +58,22 @@ class DatabaseVersionGuardTest {
         )
     }
 
+    @Test
+    fun `guard constant matches AppDatabase annotation`() {
+        val src = File("src/main/java/com/openminis/app/data/db/AppDatabase.kt")
+        require(src.isFile) { "missing ${src.absolutePath}" }
+        val text = src.readText()
+        val match = Regex(
+            """@Database\s*\([^)]*version\s*=\s*(\d+)""",
+            setOf(RegexOption.DOT_MATCHES_ALL),
+        ).find(text) ?: error("could not parse @Database version in ${src.absolutePath}")
+        assertEquals(
+            "DatabaseVersionGuard.CODE_DB_VERSION must equal @Database(version=...)",
+            match.groupValues[1].toInt(),
+            DatabaseVersionGuard.CODE_DB_VERSION,
+        )
+    }
+
     /** The exported schema must actually contain the four attribution columns. */
     @Test
     fun `exported schema has the attribution columns`() {

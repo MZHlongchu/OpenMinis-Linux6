@@ -46,11 +46,16 @@ object DatabaseVersionGuard {
      * [AppDatabase]'s `@Database` annotation.
      *
      * Kept as a separate constant because the annotation value is not readable
-     * at runtime without reflection. [AppDatabaseVersionTest] asserts the two
+     * at runtime without reflection. [DatabaseVersionGuardTest] asserts the two
      * agree, so they cannot drift apart silently — a stale copy here would
      * either disable the guard or trip it on every launch.
+     *
+     * 1.31 bumped [AppDatabase] 12 → 14 (code graph + kanban) but left this at
+     * 12. After Room migrated on-disk `user_version` to 14, the next launch
+     * treated the user's own database as "from a newer build" and blocked
+     * opening. Keep this equal to `@Database(version=...)`.
      */
-    const val CODE_DB_VERSION = 12
+    const val CODE_DB_VERSION = 14
 
     /** Filename must match the one passed to `Room.databaseBuilder`. */
     private const val DB_NAME = "minis.db"

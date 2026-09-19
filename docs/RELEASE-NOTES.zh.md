@@ -1,3 +1,21 @@
+# OpenMinis-Linux 1.32.1-linux
+
+- versionCode **47**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+热修 1.31/1.32 二次启动被「数据来自更新的版本」拦住的问题。
+
+1.31 把 `AppDatabase` 升到 **14**（`code_symbols`/`code_edges`、`kanban_tasks`），启动前的 `DatabaseVersionGuard.CODE_DB_VERSION` 仍写 12。第一次打开 Room 把 `user_version` 写成 14，第二次守卫认为磁盘比本机构建新，拒绝打开。数据没有删，只是打不开。
+
+1.32.1 把守卫改成 14，并加测试锁 `@Database(version)` 与守卫常量一致。装上即可继续用原来的会话。
+
+---
+
 # OpenMinis-Linux 1.32-linux
 
 - versionCode **46**
