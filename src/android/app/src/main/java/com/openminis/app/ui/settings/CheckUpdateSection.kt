@@ -81,8 +81,13 @@ fun CheckUpdateSection() {
     // StateFlow so the download survives leaving this screen (background
     // tolerant). Re-entering simply re-collects the live state.
     val dlState by UpdateDownloadManager.state.collectAsState()
+    // Progress/error that originate from the background downloader are read
+    // straight off the StateFlow. Local UI errors (install-launch failure) live
+    // in their own mutable slot so they can be assigned/cleared.
     val downloadProgress: Float? = if (dlState.running || dlState.doneFile != null) dlState.progress else null
-    val downloadError: String? = dlState.error
+    val dlError: String? = dlState.error
+    var uiError by remember { mutableStateOf<String?>(null) }
+    val downloadError: String? = uiError ?: dlError
     var awaitingInstallPerm by remember { mutableStateOf(false) }
     var confirmSelfBuild by remember { mutableStateOf(false) }
 
@@ -104,7 +109,7 @@ fun CheckUpdateSection() {
                 UpdateDownloadManager.markInstallLaunched()
                 update = null
             } else {
-                downloadError = context.getString(R.string.check_update_install_launch_failed)
+                uiError = context.getString(R.string.check_update_install_launch_failed)
             }
         } else {
             awaitingInstallPerm = true
@@ -137,10 +142,10 @@ fun CheckUpdateSection() {
             val launched = UpdateChecker.installApk(context, pendingFile)
             if (launched) {
                 // Dismiss any leftover dialog state; the system installer is
-                // now in charge.
+                // now in charge. downloadProgress is derived from the
+                // downloader's StateFlow, so nothing to clear there.
                 update = null
-                downloadProgress = null
-                downloadError = null
+                uiError = null
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -286,7 +291,7 @@ fun CheckUpdateSection() {
                 // re-visit can resume install).
                 if (!dlState.running) {
                     update = null
-                    downloadError = null
+                    uiError = null
                     awaitingInstallPerm = false
                 }
             },
