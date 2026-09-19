@@ -167,7 +167,7 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
         if (subAgentDepth.get() > 0) {
             return ToolExecutionResult("Error: sub-agents cannot spawn further sub-agents.", false)
         }
-        val spawns = parseSubAgentBatch(argsJson, multiAgentSettings.subagentMaxTurns.value)
+        val spawns = parseSubAgentBatch(argsJson, SubAgentRunner.ABSOLUTE_MAX_TURNS)
         if (spawns.isEmpty()) {
             return ToolExecutionResult(
                 if (argsJson.isBlank() || !argsJson.trim().startsWith("{"))
@@ -334,12 +334,14 @@ private suspend fun ChatViewModel.runOneSubAgent(
                             ),
                             memoryEnabled = false,
                             subAgentEnabled = false,
-                        ),
+                        ) + AgentTools.makeSubAgentExtraTools(),
                     ),
                     maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 8192),
                     executeTool = { name, json ->
                         if (SubAgentKind.blocks(kind, name)) {
                             ToolExecutionResult("Error: $kind sub-agent cannot use $name.", false)
+                        } else if (name == com.openminis.app.tools.GrepSourceTool.NAME) {
+                            com.openminis.app.tools.GrepSourceTool.execute(json, sessionId, context)
                         } else {
                             executeTool(name, json, "", mutableListOf(), "", "")
                         }

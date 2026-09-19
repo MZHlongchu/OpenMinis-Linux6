@@ -50,6 +50,16 @@ object AgentTools {
         }
     }
 
+    /**
+     * Extra tools exposed ONLY to sub-agents (see ChatViewModelSubAgentExt).
+     * The main session already has shell_execute for grep; sub-agents get a
+     * dedicated grep_source so a source lookup is one turn instead of a
+     * file_read paging loop (see SubAgentRunner history-budget pressure).
+     */
+    fun makeSubAgentExtraTools(): List<AgentToolDefinition> = buildList {
+        add(GrepSourceTool.definition())
+    }
+
     private fun runSubAgentDefinition(): AgentToolDefinition {
         val taskItem = AgentToolParam(
             type = "object",

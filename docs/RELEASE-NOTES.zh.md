@@ -1,3 +1,32 @@
+# OpenMinis-Linux 1.27-linux
+
+- versionCode **39**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`（arm64-v8a；有 `MINIS_UPLOAD_*` 则用上传证书，否则仍为 debug-signed）
+- 签名说明：[docs/SIGNING.md](SIGNING.md)
+
+安装：允许「安装未知应用」后打开 APK。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本。
+
+## 本版
+
+子代理轮次预算与工具优化。
+
+1. **轮次解钳**
+   设置页的「最大轮数」不再硬钳到 60，改为由协调者按任务复杂度分配；`SubAgentRunner` 保留 200 轮绝对上限作为失控保险丝。协调者分配的 `max_turns` 直接生效。
+
+2. **预算预警 + 迫使交稿**
+   子代理跑到预算 80% 时注入 `<budget_warning>`；95% 时注入 `force=true` 强令立即交付已有结果。循环结束返回累积的部分报告，不再只留一句「撞上限」。
+
+3. **历史滑窗压缩**
+   新增 `SubAgentHistoryCompactor`：发送前对超 120k 预算的对话做滑动窗口压缩，除最新 4 条外，超 12k 的 ToolResult 截为头 1500 + 尾 500，避免长任务把上下文撑爆。
+
+4. **子代理专属 grep_source 工具**
+   新增 `GrepSourceTool`（仅子代理可见，explore/plan 只读 kind 也可用）：匹配行±上下文 / 单文件 / 目录递归 / 正则，一次调用替代多轮 file_read 翻页。
+
+---
+
 # OpenMinis-Linux 1.26-linux
 
 - versionCode **38**

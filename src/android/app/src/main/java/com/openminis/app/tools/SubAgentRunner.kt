@@ -15,8 +15,14 @@ import org.json.JSONObject
  */
 object SubAgentRunner {
 
-    const val MAX_TURNS = 60
-    private const val MAX_REPORT_CHARS = 24_000
+    /** Absolute safety ceiling so a runaway loop cannot burn tokens forever. */
+    const val ABSOLUTE_MAX_TURNS = 200
+
+    /** Fraction of budget consumed at which a <budget_warning> is injected. */
+    private const val WARN_FRACTION = 0.80
+
+    /** Fraction at which the agent is ordered to stop calling tools and write up. */
+    private const val FORCE_FRACTION = 0.95
 
     suspend fun run(
         provider: LLMProvider,
@@ -30,27 +36,33 @@ object SubAgentRunner {
         onStep: suspend (turn: Int, toolName: String) -> Unit = { _, _ -> },
         kind: String = SubAgentKind.WORKER,
         writePaths: List<String> = emptyList(),
-        maxTurns: Int = MAX_TURNS,
+        maxTurns: Int = ABSOLUTE_MAX_TURNS,
     ): ToolExecutionResult {
         val briefed = SubAgentBrief.wrap(userPrompt, kind = kind, role = role, writePaths = writePaths)
         val history = mutableListOf(
             LLMMessage(role = LLMMessage.Role.USER, content = briefed),
         )
-        val turns = maxTurns.coerceIn(
-            com.openminis.app.data.repository.MultiAgentSettings.MIN_SUBAGENT_TURNS,
-            com.openminis.app.data.repository.MultiAgentSettings.MAX_SUBAGENT_TURNS,
-        )
-        val system = workerSystemPrompt(modelDisplayName, role, skillsHint, kind, writePaths)
+        // Turn budget is whatever the coordinator assigned (auto-sized or
+        // explicit), bounded only by ABSOLUTE_MAX_TURNS as a runaway guard —
+        // there is no longer a low global settings clamp here.
+        val turns = maxTurns.coerceIn(1, ABSOLUTE_MAX_TURNS)
+        val system = workerSystemPrompt(modelDisplayName, role, skillsHint, kind, writePaths, turns)
         val report = StringBuilder()
+        var warned = false
+        var forced = false
 
         try {
-            repeat(turns) { turnIdx ->
-                val turn = turnIdx + 1
+            var turn = 0
+            while (turn < turns) {
+                turn++
                 runCatching { onStep(turn, "") }
+                // Compact accumulated history before it can blow the context
+                // window; the freshest tool results stay verbatim.
+                val sendHistory = SubAgentHistoryCompactor.compact(history)
                 val textSb = StringBuilder()
                 val toolCalls = mutableListOf<Triple<String, String, JSONObject>>()
                 provider.streamMessage(
-                    messages = history,
+                    messages = sendHistory,
                     systemPrompt = system,
                     maxTokens = maxTokens.coerceIn(256, 8192),
                     tools = tools,
@@ -68,10 +80,6 @@ object SubAgentRunner {
                 if (text.isNotEmpty()) {
                     if (report.isNotEmpty()) report.append("\n\n")
                     report.append(text)
-                    val snippet = text.replace('\n', ' ').trim().take(160)
-                    if (snippet.isNotEmpty()) {
-                        runCatching { onStep(turn, "") }
-                    }
                 }
 
                 if (toolCalls.isEmpty()) {
@@ -135,8 +143,45 @@ object SubAgentRunner {
                         contentParts = resultParts,
                     ),
                 )
+
+                // Turn-budget advisory so the agent wraps up instead of silently
+                // hitting the cap. 80%: warning; 95%: order to stop tool calls
+                // and hand in the partial result.
+                val frac = turn.toDouble() / turns
+                when {
+                    frac >= FORCE_FRACTION && !forced -> {
+                        forced = true
+                        history.add(
+                            LLMMessage(
+                                role = LLMMessage.Role.USER,
+                                content = "<budget_warning used=\"$turn/$turns\" force=\"true\">\n" +
+                                    "You are at the final stretch of your turn budget. STOP calling tools NOW and return your findings so far as your final report in THIS turn — partial results are far more valuable than a perfect result you never submit. Lead with what you already confirmed, then list what is still unverified.\n" +
+                                    "</budget_warning>",
+                            ),
+                        )
+                    }
+                    frac >= WARN_FRACTION && !warned -> {
+                        warned = true
+                        history.add(
+                            LLMMessage(
+                                role = LLMMessage.Role.USER,
+                                content = "<budget_warning used=\"$turn/$turns\">\n" +
+                                    "You have used $turn of your $turns turns (~${(frac * 100).toInt()}%). Prioritize finishing: avoid further broad searches, consolidate what you have, and prepare to submit your report.\n" +
+                                    "</budget_warning>",
+                            ),
+                        )
+                    }
+                }
             }
-            val out = report.toString().ifBlank { "(sub-agent hit the $turns-turn cap without a final answer)" }
+            // Loop ended at the budget (95% force message, or a stubborn agent
+            // kept calling tools to the last turn). Hand back the accumulated
+            // partial report instead of a bare "hit the cap" string.
+            val partial = report.toString().trim()
+            val out = if (partial.isNotEmpty()) {
+                "$partial\n\n---\n(reached the $turns-turn budget — partial report above)"
+            } else {
+                "(sub-agent reached the $turns-turn budget with no findings to report)"
+            }
             return ToolExecutionResult(truncate(out), true)
         } catch (e: CancellationException) {
             throw e
@@ -181,6 +226,7 @@ object SubAgentRunner {
         skillsHint: String?,
         kind: String,
         writePaths: List<String>,
+        turns: Int,
     ): String {
         val roleLine = role?.trim()?.takeIf { it.isNotEmpty() }?.let { "Assigned role: $it.\n" } ?: ""
         val skillsLine = skillsHint?.trim()?.takeIf { it.isNotEmpty() }?.let {
@@ -194,16 +240,19 @@ object SubAgentRunner {
             ""
         }
         val toolLine = if (SubAgentKind.isReadOnly(kind)) {
-            "- Read-only: do not modify files or run shell_execute. Use file_read, search_sessions, read_session, web_search, browser_use."
+            "- Read-only: do not modify files or run shell_execute. Use file_read, grep_source, search_sessions, read_session, web_search, browser_use."
         } else {
-            "- Use tools immediately. Prefer file_read / file_edit / file_write / shell_execute."
+            "- Use tools immediately. Prefer file_read / grep_source / file_edit / file_write / shell_execute."
         }
         return """You are a sub-agent ($kind), not the session coordinator. Model: $modelDisplayName.
 ${roleLine}${skillsLine}${kindLine}${writeLine}You cannot see the parent conversation. The user prompt is a self-contained brief with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration.
 
+Turn budget: you have $turns turns. A <budget_warning> will be injected as you approach the limit — treat it as a hard signal to wrap up. Handing in a partial report is far better than running dry mid-task; if forced to stop, lead with confirmed findings, then list unverified leftovers.
+
 Rules:
 - Complete ONLY the assigned slice. Do not rewrite unrelated files.
 - Do not spawn further sub-agents. spawn_agent / run_subagent are not available and will error if you try.
+- Searching/reading source: prefer grep_source (one call = matching lines ± context) over paging file_read through a big file. Old tool outputs are auto-trimmed from your context, so re-read a file if you need it back.
 $toolLine
 - Follow the brief's Workflow, then return a concise report: what changed, files touched, leftover risks, and whether Expected result passed.
 - If you cannot meet the acceptance criteria, say so explicitly and list what failed.

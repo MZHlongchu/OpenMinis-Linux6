@@ -9017,7 +9017,7 @@ class ChatViewModel(
                     val sem = Semaphore(cap)
                     val peers = toolCalls.filter { SubAgentKind.isSpawnTool(it.second) }
                     val writerCount = peers.sumOf { (_, _, peerArgs) ->
-                        parseSubAgentBatch(peerArgs.toString(), multiAgentSettings.subagentMaxTurns.value)
+                        parseSubAgentBatch(peerArgs.toString(), SubAgentRunner.ABSOLUTE_MAX_TURNS)
                             .count { spawn -> SubAgentKind.canWrite(spawn.kind) }
                     }
                     coroutineScope {
@@ -10330,8 +10330,7 @@ class ChatViewModel(
                 providerRepository.config.value.modelEntries.associate { it.id to it.model.displayName },
             )
             val cap = multiAgentSettings.maxConcurrent.value
-            val turns = multiAgentSettings.subagentMaxTurns.value
-            "\n- spawn_agent: You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Prefer ONE spawn_agent call with a tasks[] array (you choose N from complexity; they run concurrently, isolated failures, cap=" + cap + "). Each task prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration because sub-agents cannot see this conversation and cannot call spawn_agent. kind=explore (read-only recon)|plan (read-only design)|worker (writes; parallel workers MUST set non-overlapping write_paths)|general-purpose (fallback). Omit max_turns to auto-size (simple≈10, complex 40–60, hard cap=" + turns + "). Dependent phases: accept before the next wave. After a teammate returns, verify Expected result; on failure, name the gap and re-dispatch. Team models: " + names + ". Settings: minis://settings/multi-agent"
+            "\n- spawn_agent: You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Prefer ONE spawn_agent call with a tasks[] array (you choose N from complexity; they run concurrently, isolated failures, cap=" + cap + "). Each task prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration because sub-agents cannot see this conversation and cannot call spawn_agent. kind=explore (read-only recon)|plan (read-only design)|worker (writes; parallel workers MUST set non-overlapping write_paths)|general-purpose (fallback). Omit max_turns to auto-size (simple≈10, complex 40–60; no low global cap, only a 200-turn runaway guard). A <budget_warning> is injected as a teammate nears its budget so it hands in partial findings instead of silently running dry. Dependent phases: accept before the next wave. After a teammate returns, verify Expected result; on failure, name the gap and re-dispatch. Team models: " + names + ". Settings: minis://settings/multi-agent"
         } else {
             ""
         }

@@ -44,7 +44,6 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
 
     val enabled by repo.enabled.collectAsState()
     val maxConcurrent by repo.maxConcurrent.collectAsState()
-    val subagentMaxTurns by repo.subagentMaxTurns.collectAsState()
     val selectedIds by repo.selectedModelEntryIds.collectAsState()
     val config by providerRepo.config.collectAsState()
     val configLoaded by providerRepo.configLoaded.collectAsState()
@@ -118,12 +117,14 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                 }
             }
 
+            // Sub-agent turn budget is now assigned by the coordinator (spawn_agent
+            // max_turns / auto-size), not capped here — see SubAgentKind.clampTurns.
+            // This row only documents the fixed runaway guard.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                     Text(
@@ -131,29 +132,10 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                         style = MaterialTheme.typography.bodyLarge,
                     )
                     Text(
-                        stringResource(R.string.settings_multi_agent_turns_subtitle, subagentMaxTurns),
+                        stringResource(R.string.settings_multi_agent_turns_subtitle_v2),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = { repo.setSubagentMaxTurns(subagentMaxTurns - 1) },
-                        enabled = enabled && subagentMaxTurns > MultiAgentSettings.MIN_SUBAGENT_TURNS,
-                    ) {
-                        Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.settings_multi_agent_decrease))
-                    }
-                    Text(
-                        subagentMaxTurns.toString(),
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.padding(horizontal = 4.dp),
-                    )
-                    IconButton(
-                        onClick = { repo.setSubagentMaxTurns(subagentMaxTurns + 1) },
-                        enabled = enabled && subagentMaxTurns < MultiAgentSettings.MAX_SUBAGENT_TURNS,
-                    ) {
-                        Icon(Icons.Outlined.Add, contentDescription = stringResource(R.string.settings_multi_agent_increase))
-                    }
                 }
             }
         }
