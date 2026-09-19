@@ -4,7 +4,7 @@ package com.openminis.app.data.model
  * Aggregated token accounting for the current session.
  *
  * Mirrors XINCODE `TokenStats.kt` — used to drive the context-usage ring
- * beside the input composer and the optional token-stats card.
+ * on the session-menu Token Usage item and the token-stats sheet.
  */
 data class TokenStats(
     val prompt: Long = 0L,
@@ -29,7 +29,7 @@ data class TokenStats(
 }
 
 /**
- * Current context-window usage, for the input-composer ring.
+ * Current context-window usage, for the session-menu ring.
  *
  * @param usedTokens  tokens occupied by the current conversation (persisted
  *                    usage sum + live estimate for the in-flight request).

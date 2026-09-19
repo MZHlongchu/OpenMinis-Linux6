@@ -1787,7 +1787,7 @@ class ChatViewModel(
     val currentModelMaxOutputTokens: Int?
         get() = currentModel?.maxOutputTokens
 
-    // [T-context-ring] Live context token counter for the input-composer ring.
+    // [T-context-ring] Live context token counter for the session-menu ring.
     val contextUsage = MutableStateFlow(com.openminis.app.data.model.ContextUsage(0L, 0L))
 
     /** Recompute contextUsage from the latest agent history. Called after appending messages. */

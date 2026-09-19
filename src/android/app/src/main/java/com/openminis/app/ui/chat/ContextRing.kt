@@ -24,21 +24,20 @@ import com.openminis.app.data.model.ContextUsage
 import com.openminis.app.ui.theme.ChatColors
 
 /**
- * Input-composer context-usage ring.
+ * Context-usage ring — a 24 × 24 Canvas track + arc (`usage.ratio * 360`).
+ * Colour goes green→blue→yellow→red as the window fills (see [ringColor]).
  *
- * A 24 × 24 ring drawn with Canvas: a track + an arc whose sweep is
- * `usage.ratio * 360`. Colour goes green→blue→yellow→red as the context
- * window fills (see [ringColor]). Tap to expand a stats card
- * (handled by the caller via [onClick]).
+ * Used as the session-menu "Token Usage" leading icon so the glyph itself
+ * is the live fill, not a second copy next to the composer.
  *
- * Mirrors XINCODE `ChatScreen.kt:ContextRing` but is a standalone
- * composable so it can be dropped into any composer layout.
+ * [onClick] is optional: inside a [androidx.compose.material3.DropdownMenuItem]
+ * the parent row already handles taps.
  */
 @Composable
 fun ContextRing(
     usage: ContextUsage,
     modifier: Modifier = Modifier,
-    onClick: () -> Unit,
+    onClick: (() -> Unit)? = null,
 ) {
     val ratio = usage.ratio
     // Smooth animation to the target ratio — avoids the "jank flash" when
@@ -51,17 +50,22 @@ fun ContextRing(
     val fg = ringColor(if (usage.known) ratio else 0f)
     val trackColor = ChatColors.toolBorder
 
+    val clickMod = if (onClick != null) {
+        Modifier.clickable(
+            indication = null,
+            interactionSource = remember { MutableInteractionSource() },
+        ) { onClick() }
+    } else {
+        Modifier
+    }
     Box(
         modifier = modifier
-            .size(28.dp)
-            .clickable(
-                indication = null,
-                interactionSource = remember { MutableInteractionSource() },
-            ) { onClick() }
+            .size(24.dp)
+            .then(clickMod)
             .background(Color.Transparent, CircleShape),
         contentAlignment = Alignment.Center,
     ) {
-        Canvas(Modifier.size(24.dp)) {
+        Canvas(Modifier.size(22.dp)) {
             val stroke = 3.dp.toPx()
             // Track (full circle, dimmed).
             drawArc(

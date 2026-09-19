@@ -117,7 +117,6 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Image
@@ -2994,7 +2993,8 @@ fun ChatScreen(
                                     showTokenUsageSheet = true
                                 },
                                 leadingIcon = {
-                                    Icon(Icons.Default.DataUsage, contentDescription = null)
+                                    val contextUsage by viewModel.contextUsage.collectAsState()
+                                    ContextRing(usage = contextUsage)
                                 },
                             )
                             // Enhanced Cache (iOS parity, commit 57aaf122):
@@ -6606,14 +6606,6 @@ fun ChatScreen(
                         }
 
                         Spacer(modifier = Modifier.width(8.dp))
-
-                        // [T-context-ring] Token consumption ring beside the composer.
-                        val contextUsage by viewModel.contextUsage.collectAsState()
-                        ContextRing(
-                            usage = contextUsage,
-                            modifier = Modifier.padding(end = 4.dp),
-                            onClick = { showTokenUsageSheet = true },
-                        )
 
                         // Right: 3-state Send / Enqueue / Stop button (mirrors iOS sendButton).
                         //   • streaming + hasText  → SEND (routes through viewModel.sendMessage,
