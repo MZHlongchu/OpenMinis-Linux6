@@ -102,7 +102,6 @@ fun SettingsScreen(
     // the route yet.
     onSoulClick: () -> Unit = {},
     onEvolutionClick: () -> Unit = {},
-    onKanbanClick: () -> Unit = {},
     onPermissionsClick: () -> Unit = {},
     onUsageClick: () -> Unit = {},
     onAppearanceClick: () -> Unit = {},
@@ -232,13 +231,6 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_memory),
                     subtitle = stringResource(R.string.settings_memory_subtitle),
                     onClick = onMemoryClick,
-                )
-                SettingsItem(
-                    icon = Icons.Outlined.Dashboard,
-                    iconColor = Color(0xFF34C759),
-                    title = stringResource(R.string.settings_kanban),
-                    subtitle = stringResource(R.string.settings_kanban_subtitle),
-                    onClick = onKanbanClick,
                 )
                 SettingsItem(
                     icon = Icons.Outlined.Bolt,

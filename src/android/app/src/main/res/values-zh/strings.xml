@@ -1946,6 +1946,4 @@
     <string name="a11y_record_stop">停止</string>
     <string name="a11y_record_save">保存为技能</string>
     <string name="a11y_record_count">%1$d 步</string>
-    <string name="settings_kanban">任务看板</string>
-    <string name="settings_kanban_subtitle">管理待办、进行中和已完成任务</string>
 </resources>

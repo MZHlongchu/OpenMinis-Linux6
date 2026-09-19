@@ -19,9 +19,8 @@ import com.openminis.app.data.db.CodeEdgeEntity
         FolderEntity::class,
         CodeSymbolEntity::class,
         CodeEdgeEntity::class,
-        KanbanTaskEntity::class,
     ],
-    version = 14, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
+    version = 15, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
     // [T-android-downgrade-compat] Kept ON so MigrationTestHelper and CI can
     // validate every migration (and its downgrade counterpart) against the
     // committed schema json. Without it the upgrade/downgrade chain has no
@@ -32,7 +31,6 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
     abstract fun webAppShortcutDao(): WebAppShortcutDao
     abstract fun codeIndexDao(): CodeIndexDao
-    abstract fun kanbanTaskDao(): KanbanTaskDao
 
     companion object {
         @Volatile
@@ -397,6 +395,27 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * [T-kanban-removal] Drops the kanban_tasks table (feature removed:
+         * no entry point, no readers). Pure destructive on a table nothing
+         * references anymore; chat/code-index data is untouched.
+         */
+        val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS kanban_tasks")
+            }
+        }
+
+        /**
+         * Downgrade 15 -> 14. No-op: the table is already gone and the older
+         * build only touched it from the removed Kanban screen.
+         */
+        val MIGRATION_15_14 = object : Migration(15, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // No-op.
+            }
+        }
+
         val MIGRATION_12_11 = object : Migration(12, 11) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // Intentionally empty. See the doc comment above — the four
@@ -418,7 +437,7 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
                         MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
                         MIGRATION_11_12, MIGRATION_12_11, MIGRATION_12_13, MIGRATION_13_12,
-                        MIGRATION_13_14, MIGRATION_14_13,
+                        MIGRATION_13_14, MIGRATION_14_13, MIGRATION_14_15, MIGRATION_15_14,
                     )
                     .build()
                     .also { INSTANCE = it }

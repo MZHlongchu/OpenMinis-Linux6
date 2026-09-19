@@ -1507,6 +1507,30 @@ class ChatViewModel(
         _pendingUserQuestions.asStateFlow()
     @Volatile private var askUserDeferred: kotlinx.coroutines.CompletableDeferred<String>? = null
 
+    /**
+     * [T-android-foreground-approval] Live mirror of [ApprovalGate.pendingApprovals]
+     * so ChatScreen can render an in-app approval card while the user is
+     * already in the chat (the notification-bar entry stays as the fallback
+     * when the app is backgrounded).
+     */
+    val pendingApprovals: StateFlow<Map<String, ApprovalGate.ApprovalRequest>> =
+        ApprovalGate.pendingApprovals
+
+    /**
+     * Resolve a foreground approval-card tap. ApprovalGate is process-local
+     * and cannot reach the notification manager, so the matching bar entry is
+     * cancelled here (see ApprovalNotifier's clearing contract).
+     */
+    fun approvePendingTool(id: String) {
+        ApprovalGate.approve(id)
+        ApprovalNotifier.cancelApproval(context, id)
+    }
+
+    fun denyPendingTool(id: String) {
+        ApprovalGate.deny(id)
+        ApprovalNotifier.cancelApproval(context, id)
+    }
+
     private fun activeOverrides(): com.openminis.app.data.model.ModelOverrides? {
         val id = _activeEntryId.value ?: return null
         return providerRepository.config.value.modelEntries.find { it.id == id }?.overrides
