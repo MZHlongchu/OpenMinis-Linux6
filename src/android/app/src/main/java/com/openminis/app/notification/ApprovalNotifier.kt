@@ -101,6 +101,25 @@ class ApprovalNotifier(private val context: Context) {
                 NotificationManagerCompat.from(ctx).cancel(notificationId(requestId))
             } catch (_: Exception) { /* nothing to cancel */ }
         }
+
+        /**
+         * Cancels every approval notification whose id is in [requestIds].
+         *
+         * Used on the service teardown paths (ACTION_STOP / ACTION_INTERRUPT):
+         * [ApprovalGate.cleanupAll] denies the waiting flows but cannot reach
+         * the notification manager, so the caller snapshots
+         * `ApprovalGate.pendingIds()` first, cleans up, then clears the bar
+         * entries here. An empty/missing collection is a no-op.
+         */
+        fun cancelAll(ctx: Context, requestIds: Collection<String>) {
+            if (requestIds.isEmpty()) return
+            val nm = NotificationManagerCompat.from(ctx)
+            requestIds.forEach { id ->
+                try {
+                    nm.cancel(notificationId(id))
+                } catch (_: Exception) { /* nothing to cancel */ }
+            }
+        }
     }
 
     /**

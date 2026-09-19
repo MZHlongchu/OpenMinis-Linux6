@@ -253,6 +253,15 @@ class AgentForegroundService : Service() {
             // keep firing in the background. SessionActivityTracker holds
             // the per-session cancel callbacks registered by each VM at
             // streamJob start.
+            //
+            // [T-android-approval-teardown] Also resolve every pending
+            // ApprovalGate request and clear its notification: stopping the
+            // agent must not leave an orphaned "needs approval" bar entry
+            // whose buttons wake nothing. Snapshot the ids first —
+            // cleanupAll empties the queue — then cancel those notifications.
+            val stopPendingIds = ApprovalGate.pendingIds()
+            ApprovalGate.cleanupAll()
+            com.openminis.app.notification.ApprovalNotifier.cancelAll(this, stopPendingIds)
             SessionActivityTracker.cancelAllActiveStreams()
             stopSelf()
             return START_NOT_STICKY
@@ -262,6 +271,12 @@ class AgentForegroundService : Service() {
             // notification — the user explicitly asked for a stop/pause, so the
             // ongoing status row must go too. If any sessions remain (they
             // were never cancelled) the service re-anchors itself below.
+            // [T-android-approval-teardown] Same contract as ACTION_STOP:
+            // an interrupt resolves every pending approval and clears its
+            // notification before the service tears down.
+            val interruptPendingIds = ApprovalGate.pendingIds()
+            ApprovalGate.cleanupAll()
+            com.openminis.app.notification.ApprovalNotifier.cancelAll(this, interruptPendingIds)
             SessionActivityTracker.cancelAllActiveStreams()
             // [T-android-interrupt-clear] The ongoing notification is the
             // visual representation of "agent is running". If we just stopped

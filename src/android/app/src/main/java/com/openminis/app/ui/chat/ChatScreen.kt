@@ -6749,6 +6749,29 @@ fun ChatScreen(
                 )
             }
 
+            // [T-android-foreground-approval] In-app approval gate for sensitive
+            // tools (file_write / file_edit). ApprovalGate.requestApproval blocks
+            // the tool coroutine in waitFor(id); while the user is IN the chat we
+            // surface the request here instead of relying on the notification-bar
+            // action (which remains the background fallback). Resolving from here
+            // wakes the waiter and cancels the matching notification via the
+            // ViewModel helpers. When several are queued the oldest is shown first;
+            // the next appears as soon as this one resolves.
+            val pendingApprovals by viewModel.pendingApprovals.collectAsState()
+            pendingApprovals.values.firstOrNull()?.let { approval ->
+                MinisAlertDialog(
+                    // Back-gesture / scrim dismissal is treated as a deny — the
+                    // safe default, and it still wakes the blocked coroutine.
+                    onDismissRequest = { viewModel.denyPendingTool(approval.id) },
+                    title = "需要审批: ${approval.toolName}",
+                    text = approval.preview.ifBlank { "Agent 请求执行敏感操作" },
+                    confirmText = "同意",
+                    onConfirm = { viewModel.approvePendingTool(approval.id) },
+                    dismissText = "拒绝",
+                    onDismiss = { viewModel.denyPendingTool(approval.id) },
+                )
+            }
+
             // T137: Clear Chat confirmation. Wipes messages + agent history +
             // compact markers; the session row, workspace files, attachments,
             // and offload payloads are intentionally preserved (iOS parity).

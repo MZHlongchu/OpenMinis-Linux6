@@ -1507,6 +1507,30 @@ class ChatViewModel(
         _pendingUserQuestions.asStateFlow()
     @Volatile private var askUserDeferred: kotlinx.coroutines.CompletableDeferred<String>? = null
 
+    /**
+     * [T-android-foreground-approval] Live mirror of [ApprovalGate.pendingApprovals]
+     * so ChatScreen can render an in-app approval card while the user is already
+     * in the chat (the notification-bar entry stays as the fallback when the
+     * app is backgrounded).
+     */
+    val pendingApprovals: StateFlow<Map<String, ApprovalGate.ApprovalRequest>> =
+        ApprovalGate.pendingApprovals
+
+    /**
+     * Resolve a foreground approval-card tap. ApprovalGate is process-local and
+     * cannot reach the notification manager, so the matching bar entry is
+     * cancelled here (see ApprovalNotifier's clearing contract).
+     */
+    fun approvePendingTool(id: String) {
+        ApprovalGate.approve(id)
+        ApprovalNotifier.cancelApproval(context, id)
+    }
+
+    fun denyPendingTool(id: String) {
+        ApprovalGate.deny(id)
+        ApprovalNotifier.cancelApproval(context, id)
+    }
+
     private fun activeOverrides(): com.openminis.app.data.model.ModelOverrides? {
         val id = _activeEntryId.value ?: return null
         return providerRepository.config.value.modelEntries.find { it.id == id }?.overrides
@@ -9399,9 +9423,13 @@ class ChatViewModel(
                 result
             }
             FileWriteTool.NAME -> runCatching {
-                val id = ApprovalGate.requestApproval()
+                // [T-android-foreground-approval] Include the target path in the
+                // preview so the in-app card / notification says WHAT is being written.
+                val writePreview = runCatching { JSONObject(argsJson).optString("path", "") }
+                    .getOrNull().orEmpty().ifBlank { "agent writes to local filesystem" }
+                val id = ApprovalGate.requestApproval("file_write", writePreview)
                 com.openminis.app.notification.ApprovalNotifier(context).notifyApproval(
-                    id, "file_write", "agent writes to local filesystem"
+                    id, "file_write", writePreview
                 )
                 val approved = ApprovalGate.waitFor(id)
                 ApprovalNotifier.cancelApproval(context, id)
@@ -9409,9 +9437,11 @@ class ChatViewModel(
                 FileWriteTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
             }.getOrElse { ToolExecutionResult("Approval failed: " + it.message, false, toolTitle = name) }
             FileEditTool.NAME -> runCatching {
-                val id = ApprovalGate.requestApproval()
+                val editPreview = runCatching { JSONObject(argsJson).optString("path", "") }
+                    .getOrNull().orEmpty().ifBlank { "agent edits local filesystem" }
+                val id = ApprovalGate.requestApproval("file_edit", editPreview)
                 com.openminis.app.notification.ApprovalNotifier(context).notifyApproval(
-                    id, "file_edit", "agent edits local filesystem"
+                    id, "file_edit", editPreview
                 )
                 val approved = ApprovalGate.waitFor(id)
                 ApprovalNotifier.cancelApproval(context, id)

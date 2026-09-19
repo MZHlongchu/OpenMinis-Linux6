@@ -1,54 +1,35 @@
 package com.openminis.app.service
 
-import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-/**
- * ApprovalGate: tracks pending tool-call approvals across process boundaries.
- *
- * ## Contract
- *
- * 1. Call `requestApproval` to reserve a slot and get an id.
- * 2. Call `approve(id, approved)` or `deny(id)` when the user taps the
- *    notification button — this resolves the slot and wakes the waiting
- *    coroutine (or discards it if already expired).
- * 3. Any pending call that outlives [TIMEOUT_MS] auto-deny's on next poll.
- *
- * ## Thread safety
- *
- * All public methods are safe to call from the FGS main thread (notification
- * callbacks) and IO threads (tool dispatch). Uses a ConcurrentHashMap and
- * a mutex-free design: the wait uses `withTimeout` + cancellation instead
- * of a blocking lock.
- *
- * ## Lifecycle
- *
- * Entries are auto-removed after resolution or timeout, so this object
- * can live on the process for its entire lifetime without memory leak.
- */
 object ApprovalGate {
 
     private const val TAG = "ApprovalGate"
-
-    /** Timeout per approval request in milliseconds. Users are slow but 90s is generous. */
     private const val TIMEOUT_MS = 90_000L
 
-    /** Pending approvals keyed by id. Values are MutableStateFlow<Boolean?> — null means unresolved. */
     private val pending = ConcurrentHashMap<String, MutableStateFlow<Boolean?>>()
+    private val approvalDetails = ConcurrentHashMap<String, ApprovalRequest>()
 
-    fun isConfigured(): Boolean = true // gate always available; callers decide whether to use it
+    private val _pendingApprovals = MutableStateFlow<Map<String, ApprovalRequest>>(emptyMap())
+    val pendingApprovals: StateFlow<Map<String, ApprovalRequest>> = _pendingApprovals.asStateFlow()
 
-    /**
-     * Register a pending approval request. Returns an opaque id to pass to
-     * [approve] / [deny]. Call this from the tool-dispatch thread BEFORE
-     * posting the notification so the user can respond in parallel.
-     */
+    data class ApprovalRequest(
+        val id: String,
+        val toolName: String,
+        val preview: String,
+        val timestamp: Long = System.currentTimeMillis()
+    )
+
+    fun isConfigured(): Boolean = true
+
     fun requestApproval(): String {
         val id = UUID.randomUUID().toString()
         pending[id] = MutableStateFlow(null as Boolean?)
@@ -56,10 +37,15 @@ object ApprovalGate {
         return id
     }
 
-    /**
-     * Wait for a decision on [id] with [TIMEOUT_MS] deadline.
-     * @return true if approved, false if denied/expired.
-     */
+    fun requestApproval(toolName: String, preview: String): String {
+        val id = UUID.randomUUID().toString()
+        pending[id] = MutableStateFlow(null as Boolean?)
+        approvalDetails[id] = ApprovalRequest(id, toolName, preview)
+        refreshPendingBroadcast()
+        Log.d(TAG, "approval requested id=$id tool=$toolName")
+        return id
+    }
+
     suspend fun waitFor(id: String): Boolean {
         val flow = pending[id] ?: return false
         return try {
@@ -67,7 +53,7 @@ object ApprovalGate {
                 flow.first { it != null } == true
             }
         } catch (e: TimeoutCancellationException) {
-            Log.i(TAG, "approval ${id.take(8)}... timed out → denied")
+            Log.i(TAG, "approval timed out -> denied")
             deny(id)
             false
         } catch (e: Exception) {
@@ -77,25 +63,63 @@ object ApprovalGate {
         }
     }
 
-    /** Called when the user taps "Approve" on the notification. */
     fun approve(id: String) {
         resolve(id, true)
         Log.d(TAG, "approved id=$id")
     }
 
-    /** Called when the user taps "Deny" on the notification. */
     fun deny(id: String) {
         resolve(id, false)
         Log.d(TAG, "denied id=$id")
     }
 
+    /**
+     * Resolves [id] exactly once and drops both its flow and its detail entry.
+     *
+     * Both maps are cleared regardless of whether the flow was still pending:
+     * a caller (or [cleanupAll]) may resolve an id whose flow was already
+     * removed, and leaving the [ApprovalRequest] behind would keep it visible
+     * in [pendingApprovals] forever. The flow is removed from [pending] first
+     * but its terminal value is still delivered — [waitFor] captured the flow
+     * reference, so the waiter wakes regardless of the map removal.
+     */
     private fun resolve(id: String, value: Boolean) {
-        val flow = pending[id] ?: return
-        if (flow.value != null) return // already resolved — ignore duplicate tap
-        flow.value = value
-        pending.remove(id)
+        val flow = pending.remove(id)
+        approvalDetails.remove(id)
+        flow?.value = value
+        refreshPendingBroadcast()
     }
 
-    /** Returns the number of currently pending approvals (for diagnostics). */
+    private fun refreshPendingBroadcast() {
+        _pendingApprovals.value = pending.keys
+            .mapNotNull { id ->
+                approvalDetails[id]?.let { request -> id to request }
+            }
+            .toMap()
+    }
+
+    /**
+     * Snapshot of the ids that still have a live approval flow. Used by
+     * AgentForegroundService to clear the matching notification-bar entries
+     * before [cleanupAll] empties the queue (ApprovalGate cannot reach the
+     * notification manager itself).
+     */
+    fun pendingIds(): List<String> = pending.keys.toList()
+
+    /**
+     * Denies every pending request so any coroutine blocked in [waitFor] wakes
+     * up immediately instead of waiting out its 90 s timeout, then drops any
+     * orphaned detail entries and republishes [pendingApprovals].
+     */
+    fun cleanupAll() {
+        val ids = pending.keys.toList()
+        Log.d(TAG, "cleanupAll: resolving ${ids.size} pending approvals")
+        ids.forEach { id -> resolve(id, false) }
+        // Defensive sweep: a detail whose flow already resolved but whose
+        // broadcast map was not refreshed would otherwise stay visible.
+        approvalDetails.keys.toList().forEach { approvalDetails.remove(it) }
+        refreshPendingBroadcast()
+    }
+
     fun pendingCount(): Int = pending.size
 }
