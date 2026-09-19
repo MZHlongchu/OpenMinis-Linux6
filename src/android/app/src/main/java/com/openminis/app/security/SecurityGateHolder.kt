@@ -76,11 +76,14 @@ object SecurityGateHolder {
         gate.audit(cmd, decision, null)
         return when (decision) {
             is Decision.Allow -> null
-            is Decision.Denied -> ToolExecutionResult(
-                "SecurityGate denied: ${decision.reason}",
-                false,
-                toolTitle = canonical,
-            )
+            is Decision.Denied -> {
+                InterceptFeedback.publishDenied(canonical, decision.reason)
+                ToolExecutionResult(
+                    "SecurityGate denied: ${decision.reason}",
+                    false,
+                    toolTitle = canonical,
+                )
+            }
             is Decision.NeedConfirm -> {
                 val preview = decision.preview.take(240).ifBlank { decision.reason }
                 val id = ApprovalGate.requestApproval(canonical, preview)
@@ -92,6 +95,7 @@ object SecurityGateHolder {
                 val approved = ApprovalGate.waitFor(id)
                 ApprovalNotifier.cancelApproval(context, id)
                 if (!approved) {
+                    InterceptFeedback.publishRejected(canonical, "User rejected or timed out")
                     ToolExecutionResult(
                         "User rejected or timed out $canonical",
                         false,

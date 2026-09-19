@@ -9061,7 +9061,7 @@ class ChatViewModel(
                     val sem = Semaphore(cap)
                     val peers = toolCalls.filter { SubAgentKind.isSpawnTool(it.second) }
                     val writerCount = peers.sumOf { (_, _, peerArgs) ->
-                        parseSubAgentBatch(peerArgs.toString(), SubAgentRunner.ABSOLUTE_MAX_TURNS)
+                        parseSubAgentBatch(peerArgs.toString(), com.openminis.app.data.ToolLimitPrefs.subagentMaxTurns())
                             .count { spawn -> SubAgentKind.canWrite(spawn.kind) }
                     }
                     coroutineScope {
@@ -9688,7 +9688,9 @@ class ChatViewModel(
         return try {
             val args = JSONObject(argsJson)
             var command = args.optString("command", "")
-            val timeoutSec = args.optInt("timeout", 900).coerceIn(1, 900)
+            val timeoutSec = com.openminis.app.data.ToolLimitPrefs.resolveShellTimeoutSec(
+                if (args.has("timeout")) args.optInt("timeout") else null,
+            )
             val delaySec = args.optInt("delay", 0).coerceAtLeast(0)
             val toolTitle = args.optString("tool_title", "shell_execute")
 
@@ -10447,6 +10449,7 @@ class ChatViewModel(
         // sentence with its original single trailing space — the full
         // assembled prompt then matches the pre-SOUL prompt byte-for-byte.
         val identitySection = com.openminis.app.agent.SystemPromptBuilder.identitySection(context)
+        val rulesSection = com.openminis.app.agent.WorkspaceRulesStore.renderActive()
         // [T-memory-toggle-gates-injection-and-tools-android] Mirror the iOS
         // gate: when memory is disabled for this session, replace the
         // "memory_write / memory_get" tool bullets and the "Memory system:"
@@ -10474,7 +10477,7 @@ class ChatViewModel(
                 providerRepository.config.value.modelEntries.associate { it.id to it.model.displayName },
             )
             val cap = multiAgentSettings.maxConcurrent.value
-            "\n- spawn_agent: You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Prefer ONE spawn_agent call with a tasks[] array (you choose N from complexity; they run concurrently, isolated failures, cap=" + cap + "). Each task prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration because sub-agents cannot see this conversation and cannot call spawn_agent. kind=explore (read-only recon)|plan (read-only design)|worker (writes; parallel workers MUST set non-overlapping write_paths)|general-purpose (fallback). Omit max_turns to auto-size (simple≈10, complex 40–60; no low global cap, only a 200-turn runaway guard). A <budget_warning> is injected as a teammate nears its budget so it hands in partial findings instead of silently running dry. Dependent phases: accept before the next wave. After a teammate returns, verify Expected result; on failure, name the gap and re-dispatch. Team models: " + names + ". Settings: minis://settings/multi-agent"
+            "\n- spawn_agent: You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Prefer ONE spawn_agent call with a tasks[] array (you choose N from complexity; they run concurrently, isolated failures, cap=" + cap + "). Each task prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration because sub-agents cannot see this conversation and cannot call spawn_agent. kind=explore (read-only recon)|plan (read-only design)|worker (writes; parallel workers MUST set non-overlapping write_paths)|general-purpose (fallback). Omit max_turns to auto-size (simple≈10, complex 40–60; user cap in Settings → Tool limits, runaway 200). Settings: minis://settings/tool-limits A <budget_warning> is injected as a teammate nears its budget so it hands in partial findings instead of silently running dry. Dependent phases: accept before the next wave. After a teammate returns, verify Expected result; on failure, name the gap and re-dispatch. Team models: " + names + ". Settings: minis://settings/multi-agent"
         } else {
             ""
         }
@@ -10498,7 +10501,7 @@ Memory system (currently DISABLED):
 - If the user asks why earlier memories aren't visible, or asks you to save something, tell them memory is currently disabled and point them at the /memory slash command or [Settings → Memory](minis://settings/memory) to re-enable it.
 - SOUL.md (personality / identity) is unaffected by this toggle; the persona section above still applies."""
         }
-        val base = identitySection + """You should proactively use shell commands to accomplish the user's tasks — installing packages (`apt-get install -y` or the `yum`/`dnf` apt shims), writing and running scripts, compiling with gcc, and any other operations a Linux terminal can perform. Guest is Ubuntu 24.04 arm64 (glibc) under PRoot with bash. For gcc/python3/git/ffmpeg/jdk/gradle run `minis-dev-setup` once. For Android SDK run `minis-android-sdk-setup` (aarch64 aapt2 and Java sdkmanager are bundled; sdkmanager fetches android-35/36 android.jar; CMake 3.22.1 and NDK r28+ must be aarch64 — never Google linux x86_64 packages). If apt/dpkg fails creating temp files, TMPDIR must be /tmp not the Android cache dir; run `minis-dev-setup` to install ca-certificates and repair broken deps. Privileged host commands: prefer `su -c` / `android-su` (Magisk/KernelSU); if host su is missing or denied, the same command falls back to Shizuku automatically. Keep using `android-shizuku-cli` for Shizuku-only Android APIs. Host extras (no LSPosed): `minis-firewall status|set allow|wifi-only|deny` (optional `--strict` binds the process to Wi-Fi; uid DROP is not auto-applied because it would kill the LLM), `minis-doze status|request`, `minis-ps`; `cat /run/minis-host-status.json` and `/run/minis-proc.json`. Guest `/proc` is Android hidepid — other UIDs are invisible.
+        val base = identitySection + rulesSection + """You should proactively use shell commands to accomplish the user's tasks — installing packages (`apt-get install -y` or the `yum`/`dnf` apt shims), writing and running scripts, compiling with gcc, and any other operations a Linux terminal can perform. Guest is Ubuntu 24.04 arm64 (glibc) under PRoot with bash. For gcc/python3/git/ffmpeg/jdk/gradle run `minis-dev-setup` once. For Android SDK run `minis-android-sdk-setup` (aarch64 aapt2 and Java sdkmanager are bundled; sdkmanager fetches android-35/36 android.jar; CMake 3.22.1 and NDK r28+ must be aarch64 — never Google linux x86_64 packages). If apt/dpkg fails creating temp files, TMPDIR must be /tmp not the Android cache dir; run `minis-dev-setup` to install ca-certificates and repair broken deps. Privileged host commands: prefer `su -c` / `android-su` (Magisk/KernelSU); if host su is missing or denied, the same command falls back to Shizuku automatically. Keep using `android-shizuku-cli` for Shizuku-only Android APIs. Host extras (no LSPosed): `minis-firewall status|set allow|wifi-only|deny` (optional `--strict` binds the process to Wi-Fi; uid DROP is not auto-applied because it would kill the LLM), `minis-doze status|request`, `minis-ps`; `cat /run/minis-host-status.json` and `/run/minis-proc.json`. Guest `/proc` is Android hidepid — other UIDs are invisible.
 
 Available tools:
 - shell_execute: Run any shell command. Each invocation is an isolated process with stdout/stderr captured. Prefer this for most tasks — it is a real Linux environment with persistent filesystem. Common tools (python3, pip, curl, wget, git, ssh, etc.) can be installed via `apt-get install -y`; Python packages via pip install. Use `which <cmd>` to check if a tool is already installed before running apt-get — many packages persist across sessions. When you need to wait before checking results (e.g. polling, waiting for a process), use the `delay` parameter instead of `sleep` in the command — delay blocks the agent flow without occupying the shell, so other concurrent tasks can use it during the wait. This avoids resource contention. Execution discipline for long-running or dispatched work: make tool calls immediately instead of describing intentions, and keep working until the task is complete. Without a scheduler or timed-callback tool, `delay` is your ONLY wait mechanism within a turn — to follow up on something still running, chain delay-then-check calls at a task-appropriate interval until you have the result or hit a sensible retry cap. NEVER end a turn with a promise of future action: 'I'll keep monitoring', 'will sync the result later', and ending right after a single still-running status check with 'let's keep waiting' are all the same violation — once your turn ends, NOTHING runs until the user's next message. If polling to completion is genuinely not worth blocking the turn, close honestly instead: state that the task keeps running in the background, that you will only learn its outcome when the user next messages (or they ask you to check), and — if something must fire on a schedule beyond this conversation — point them to the options under 'Scheduled tasks' later in this prompt (native alarm reminder or a system-level schedule; those notify the USER, they do not wake you).
@@ -10590,7 +10593,7 @@ Interactive terminal: minis://open_terminal opens a terminal for tasks that requ
 Environment variables:
 - Shell environment variables may contain sensitive API keys, tokens, or passwords. NEVER echo, print, cat, or otherwise output their values to stdout/stderr. Always reference them by variable name (e.g. ${'$'}API_KEY) inside scripts or commands — never inline the literal value.
 - When a skill or task requires an environment variable that is not set, tell the user which variable is missing and provide a tappable deep link to create it: [Set ENV_NAME](minis://settings/environments?create_key=ENV_NAME&create_value=) — the user can tap it to open the Environment Variables page with the key pre-filled.
-- Settings deep links: when you tell the user "go to Settings → X" or want to point them at a specific setting, prefer a Markdown link `[Label](minis://settings/<path>)` over plain prose. Available paths: providers (list), providers/<instanceId> (one provider), model-groups (incl. Agent Loop), model-groups/<groupId>, usage (token usage), skills, plugins, mcp, memory, storage, shared-folders (Shared Folders: /var/minis/{shared,skills,memory}), mount-external (Mount External Folders), logs, appearance, background, about, permissions, environments[?create_key=K&create_value=V[&create_note=N]], rootfs (also reachable as mirrors). Unknown paths fall back to Settings home, but prefer the exact path so users land where they want. These settings/action links are app deep links — render them as Markdown links in chat (same action-vs-resource rule as the minis:// section above: only /var/minis resource URLs may go to browser_use).
+- Settings deep links: when you tell the user "go to Settings → X" or want to point them at a specific setting, prefer a Markdown link `[Label](minis://settings/<path>)` over plain prose. Available paths: providers (list), providers/<instanceId> (one provider), model-groups (incl. Agent Loop), model-groups/<groupId>, usage (token usage), skills, plugins, mcp, memory, storage, shared-folders (Shared Folders: /var/minis/{shared,skills,memory}), mount-external (Mount External Folders), logs, appearance, background, about, permissions, environments[?create_key=K&create_value=V[&create_note=N]], rootfs (also reachable as mirrors), prompt-templates, workspace-rules, tool-limits. Unknown paths fall back to Settings home, but prefer the exact path so users land where they want. These settings/action links are app deep links — render them as Markdown links in chat (same action-vs-resource rule as the minis:// section above: only /var/minis resource URLs may go to browser_use).
 - To check if a variable is set, use `[ -n "${'$'}VAR" ] && echo 'set' || echo 'not set'`. NEVER use echo ${'$'}VAR, printenv VAR, or any command that would output the actual value into the conversation context.${memorySystemSection}
 
 Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended, so in-app scheduled scripts may not run as expected. For recurring tasks that must fire while the app is backgrounded, use the cronjob tool (AlarmManager) or minis-scheduled, or tell the user to set up a system-level schedule (Google Calendar event, Tasker automation, etc.). (Waiting or polling WITHIN the current turn is different — that is what shell_execute `delay` chains are for, per the shell_execute notes above.)"""
@@ -10679,6 +10682,13 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             // Runtime context goes last so the prefix above stays byte-stable
             // across requests within the same day. Keep ordering deterministic
             // (date → tz → lang → model count) — any reorder defeats the cache.
+            val sessionPrompt = com.openminis.app.data.PromptTemplateStore.renderForSession(
+                realSessionId.ifEmpty { sessionId },
+            )
+            if (!sessionPrompt.isNullOrBlank()) {
+                append("\n\n")
+                append(sessionPrompt)
+            }
             append("\n\nRuntime context:\n")
             append("- Current date: ").append(dateStr).append(" (").append(tzId).append(")\n")
             append("- Device language: ").append(lang).append("\n")

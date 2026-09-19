@@ -144,6 +144,8 @@ import androidx.compose.material3.Switch
 import com.openminis.app.ui.settings.SettingsSwitch
 import com.openminis.app.BuildConfig
 import com.openminis.app.R
+import com.openminis.app.security.InterceptFeedback
+import com.openminis.app.ui.settings.PromptTemplatePickerSheet
 import com.openminis.app.data.FileMentionIndex
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.text.BoundedText
@@ -566,6 +568,8 @@ fun ChatScreen(
     val canResume by viewModel.canResume.collectAsState()
     // [T-android-compact-progress] null when no compaction is running.
     val compactProgress by viewModel.compactProgress.collectAsState()
+    val pendingApprovals by viewModel.pendingApprovals.collectAsState()
+    val interceptEvents by InterceptFeedback.events.collectAsState()
     val error by viewModel.error.collectAsState()
     val modelName by viewModel.modelName.collectAsState()
     val sessionTitle by viewModel.sessionTitle.collectAsState()
@@ -876,6 +880,7 @@ fun ChatScreen(
     var showAttachMenu by remember { mutableStateOf(false) }
     var showChatMenu by remember { mutableStateOf(false) }
     var showSkillsSheet by remember { mutableStateOf(false) }
+    var showPromptTemplateSheet by remember { mutableStateOf(false) }
     // [T-mcp-integration-android] MCPs-in-Session sheet visibility.
     var showMcpsSheet by remember { mutableStateOf(false) }
     var showTokenUsageSheet by remember { mutableStateOf(false) }
@@ -2944,6 +2949,16 @@ fun ChatScreen(
                                     Icon(Icons.Default.Share, contentDescription = null)
                                 },
                             )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.chat_menu_prompt_template)) },
+                                onClick = {
+                                    showChatMenu = false
+                                    showPromptTemplateSheet = true
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Description, contentDescription = null)
+                                },
+                            )
                             MinisMenuDivider()
                             // Session Skills (iOS parity)
                             if (skillRepository != null) {
@@ -3156,6 +3171,13 @@ fun ChatScreen(
             if (showSubAgentBar) {
                 SubAgentLiveBar(sessionId = sessionId)
             }
+            ChatGateBanners(
+                approvals = pendingApprovals,
+                intercepts = interceptEvents,
+                onApprove = { viewModel.approvePendingTool(it) },
+                onDeny = { viewModel.denyPendingTool(it) },
+                onDismissIntercept = { InterceptFeedback.dismiss(it) },
+            )
             val planDiscussionBannerOn = showPlanBanner && com.openminis.app.data.PlanDiscussionPrefs.isEnabled()
             if (planDiscussionBannerOn) {
                 Surface(
@@ -6909,6 +6931,13 @@ fun ChatScreen(
             skillRepository = skillRepository,
             sessionId = sessionId,
             onDismiss = { showSkillsSheet = false },
+        )
+    }
+
+    if (showPromptTemplateSheet) {
+        PromptTemplatePickerSheet(
+            sessionId = viewModel.realSessionId.ifEmpty { sessionId },
+            onDismiss = { showPromptTemplateSheet = false },
         )
     }
 

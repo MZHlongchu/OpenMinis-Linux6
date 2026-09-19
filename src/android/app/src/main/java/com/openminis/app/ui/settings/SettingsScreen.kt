@@ -46,6 +46,9 @@ import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Timer
+import androidx.compose.material.icons.automirrored.outlined.Article
+import androidx.compose.material.icons.automirrored.outlined.Assignment
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -119,6 +122,9 @@ fun SettingsScreen(
     onBackgroundClick: () -> Unit = {},
     onWebSearchClick: () -> Unit = {},
     onAboutClick: () -> Unit = {},
+    onPromptTemplatesClick: () -> Unit = {},
+    onWorkspaceRulesClick: () -> Unit = {},
+    onToolLimitsClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var evolutionEnabled by remember { mutableStateOf(false) }
@@ -205,6 +211,13 @@ fun SettingsScreen(
                     onClick = onMultiAgentClick,
                 )
                 SettingsItem(
+                    icon = Icons.Outlined.Timer,
+                    iconColor = Color(0xFFAF52DE),
+                    title = stringResource(R.string.settings_tool_limits),
+                    subtitle = stringResource(R.string.settings_tool_limits_subtitle),
+                    onClick = onToolLimitsClick,
+                )
+                SettingsItem(
                     icon = Icons.Outlined.Extension,
                     iconColor = Color(0xFF007AFF),
                     title = stringResource(R.string.settings_skills),
@@ -225,6 +238,20 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_soul),
                     subtitle = stringResource(R.string.settings_soul_subtitle),
                     onClick = onSoulClick,
+                )
+                SettingsItem(
+                    icon = Icons.AutoMirrored.Outlined.Article,
+                    iconColor = Color(0xFF007AFF),
+                    title = stringResource(R.string.settings_prompt_templates),
+                    subtitle = stringResource(R.string.settings_prompt_templates_subtitle),
+                    onClick = onPromptTemplatesClick,
+                )
+                SettingsItem(
+                    icon = Icons.AutoMirrored.Outlined.Assignment,
+                    iconColor = Color(0xFF8E8E93),
+                    title = stringResource(R.string.settings_workspace_rules),
+                    subtitle = stringResource(R.string.settings_workspace_rules_subtitle),
+                    onClick = onWorkspaceRulesClick,
                 )
                 SettingsItem(
                     icon = Icons.Outlined.Psychology,

@@ -1,3 +1,44 @@
+# OpenMinis-Linux 1.34-linux
+
+- versionCode **49**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+四项中性运行时能力（不升 Room、不替换 ChatViewModel / SubAgentRunner、不拆 SecurityGate）。提示词模板和工作区规则在保存时过滤注入类措辞。
+
+### 会话提示词模板
+
+- 设置 → 提示词模板：模板库 + 新会话默认。
+- 对话 ⋮ → 提示词模板：只改当前会话，下一轮模型请求热切换。
+- 每会话可独立选模板 / 「无」/ 跟随默认；「无」不被默认覆盖。
+- SharedPreferences JSON。深链 `minis://settings/prompt-templates`。
+
+### 工具限额
+
+设置 → 工具限额（`minis://settings/tool-limits`）：
+
+- Shell 超时默认 600s，范围 30–1800s（默认值即代理可请求的上限）。
+- `file_read` 字符默认 80000，硬顶仍是 80KB。
+- `file_read` 行数默认 0（不限制），或 100–20000。
+- 子代理 maxTurns 默认 200，范围 10–200。
+
+### 工作区规则
+
+- 设置 → 工作区规则（`minis://settings/workspace-rules`）。
+- `filesDir/workspace_rules/<id>.md` + `<id>.json` + `state.json`。
+- 打开的规则插入所有会话系统提示词（身份段之后），并写明不能覆盖权限闸。
+
+### 拦截 / 审批徽标
+
+- SecurityGate 拒绝或用户否决：聊天顶部红条显示工具名和原因。
+- ASK 待批：对话内允许/拒绝卡（1.33 闸规则不变）。
+
+---
+
 # OpenMinis-Linux 1.33-linux
 
 - versionCode **48**
