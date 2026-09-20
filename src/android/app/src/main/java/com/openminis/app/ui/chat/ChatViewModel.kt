@@ -1507,20 +1507,9 @@ class ChatViewModel(
         _pendingUserQuestions.asStateFlow()
     @Volatile private var askUserDeferred: kotlinx.coroutines.CompletableDeferred<String>? = null
 
-    /**
-     * [T-android-foreground-approval] Live mirror of [ApprovalGate.pendingApprovals]
-     * so ChatScreen can render an in-app approval card while the user is
-     * already in the chat (the notification-bar entry stays as the fallback
-     * when the app is backgrounded).
-     */
     val pendingApprovals: StateFlow<Map<String, ApprovalGate.ApprovalRequest>> =
         ApprovalGate.pendingApprovals
 
-    /**
-     * Resolve a foreground approval-card tap. ApprovalGate is process-local
-     * and cannot reach the notification manager, so the matching bar entry is
-     * cancelled here (see ApprovalNotifier's clearing contract).
-     */
     fun approvePendingTool(id: String) {
         ApprovalGate.approve(id)
         ApprovalNotifier.cancelApproval(context, id)
@@ -9072,7 +9061,7 @@ class ChatViewModel(
                     val sem = Semaphore(cap)
                     val peers = toolCalls.filter { SubAgentKind.isSpawnTool(it.second) }
                     val writerCount = peers.sumOf { (_, _, peerArgs) ->
-                        parseSubAgentBatch(peerArgs.toString(), SubAgentRunner.ABSOLUTE_MAX_TURNS)
+                        parseSubAgentBatch(peerArgs.toString(), com.openminis.app.data.ToolLimitPrefs.subagentMaxTurns())
                             .count { spawn -> SubAgentKind.canWrite(spawn.kind) }
                     }
                     coroutineScope {
@@ -9699,7 +9688,9 @@ class ChatViewModel(
         return try {
             val args = JSONObject(argsJson)
             var command = args.optString("command", "")
-            val timeoutSec = args.optInt("timeout", 900).coerceIn(1, 900)
+            val timeoutSec = com.openminis.app.data.ToolLimitPrefs.resolveShellTimeoutSec(
+                if (args.has("timeout")) args.optInt("timeout") else null,
+            )
             val delaySec = args.optInt("delay", 0).coerceAtLeast(0)
             val toolTitle = args.optString("tool_title", "shell_execute")
 
@@ -10485,7 +10476,7 @@ class ChatViewModel(
                 providerRepository.config.value.modelEntries.associate { it.id to it.model.displayName },
             )
             val cap = multiAgentSettings.maxConcurrent.value
-            "\n- spawn_agent: You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Prefer ONE spawn_agent call with a tasks[] array (you choose N from complexity; they run concurrently, isolated failures, cap=" + cap + "). Each task prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration because sub-agents cannot see this conversation and cannot call spawn_agent. kind=explore (read-only recon)|plan (read-only design)|worker (writes; parallel workers MUST set non-overlapping write_paths)|general-purpose (fallback). Omit max_turns to auto-size (simple≈10, complex 40–60; no low global cap, only a 200-turn runaway guard). A <budget_warning> is injected as a teammate nears its budget so it hands in partial findings instead of silently running dry. Dependent phases: accept before the next wave. After a teammate returns, verify Expected result; on failure, name the gap and re-dispatch. Team models: " + names + ". Settings: minis://settings/multi-agent"
+            "\n- spawn_agent: You are this session's coordinator — decompose, dispatch, accept, summarize; do not complete all work yourself. Prefer ONE spawn_agent call with a tasks[] array (you choose N from complexity; they run concurrently, isolated failures, cap=" + cap + "). Each task prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration because sub-agents cannot see this conversation and cannot call spawn_agent. kind=explore (read-only recon)|plan (read-only design)|worker (writes; parallel workers MUST set non-overlapping write_paths)|general-purpose (fallback). Omit max_turns to auto-size (simple≈10, complex 40–60; user cap in Settings → Tool limits, runaway 200). Settings: minis://settings/tool-limits A <budget_warning> is injected as a teammate nears its budget so it hands in partial findings instead of silently running dry. Dependent phases: accept before the next wave. After a teammate returns, verify Expected result; on failure, name the gap and re-dispatch. Team models: " + names + ". Settings: minis://settings/multi-agent"
         } else {
             ""
         }
@@ -10601,7 +10592,7 @@ Interactive terminal: minis://open_terminal opens a terminal for tasks that requ
 Environment variables:
 - Shell environment variables may contain sensitive API keys, tokens, or passwords. NEVER echo, print, cat, or otherwise output their values to stdout/stderr. Always reference them by variable name (e.g. ${'$'}API_KEY) inside scripts or commands — never inline the literal value.
 - When a skill or task requires an environment variable that is not set, tell the user which variable is missing and provide a tappable deep link to create it: [Set ENV_NAME](minis://settings/environments?create_key=ENV_NAME&create_value=) — the user can tap it to open the Environment Variables page with the key pre-filled.
-- Settings deep links: when you tell the user "go to Settings → X" or want to point them at a specific setting, prefer a Markdown link `[Label](minis://settings/<path>)` over plain prose. Available paths: providers (list), providers/<instanceId> (one provider), model-groups (incl. Agent Loop), model-groups/<groupId>, usage (token usage), skills, plugins, mcp, memory, storage, shared-folders (Shared Folders: /var/minis/{shared,skills,memory}), mount-external (Mount External Folders), logs, appearance, background, about, permissions, environments[?create_key=K&create_value=V[&create_note=N]], rootfs (also reachable as mirrors). Unknown paths fall back to Settings home, but prefer the exact path so users land where they want. These settings/action links are app deep links — render them as Markdown links in chat (same action-vs-resource rule as the minis:// section above: only /var/minis resource URLs may go to browser_use).
+- Settings deep links: when you tell the user "go to Settings → X" or want to point them at a specific setting, prefer a Markdown link `[Label](minis://settings/<path>)` over plain prose. Available paths: providers (list), providers/<instanceId> (one provider), model-groups (incl. Agent Loop), model-groups/<groupId>, usage (token usage), skills, plugins, mcp, memory, storage, shared-folders (Shared Folders: /var/minis/{shared,skills,memory}), mount-external (Mount External Folders), logs, appearance, background, about, permissions, environments[?create_key=K&create_value=V[&create_note=N]], rootfs (also reachable as mirrors), prompt-templates, workspace-rules, tool-limits. Unknown paths fall back to Settings home, but prefer the exact path so users land where they want. These settings/action links are app deep links — render them as Markdown links in chat (same action-vs-resource rule as the minis:// section above: only /var/minis resource URLs may go to browser_use).
 - To check if a variable is set, use `[ -n "${'$'}VAR" ] && echo 'set' || echo 'not set'`. NEVER use echo ${'$'}VAR, printenv VAR, or any command that would output the actual value into the conversation context.${memorySystemSection}
 
 Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended, so in-app scheduled scripts may not run as expected. For recurring tasks that must fire while the app is backgrounded, use the cronjob tool (AlarmManager) or minis-scheduled, or tell the user to set up a system-level schedule (Google Calendar event, Tasker automation, etc.). (Waiting or polling WITHIN the current turn is different — that is what shell_execute `delay` chains are for, per the shell_execute notes above.)"""
@@ -10690,6 +10681,13 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             // Runtime context goes last so the prefix above stays byte-stable
             // across requests within the same day. Keep ordering deterministic
             // (date → tz → lang → model count) — any reorder defeats the cache.
+            val sessionPrompt = com.openminis.app.data.PromptTemplateStore.renderForSession(
+                realSessionId.ifEmpty { sessionId },
+            )
+            if (!sessionPrompt.isNullOrBlank()) {
+                append("\n\n")
+                append(sessionPrompt)
+            }
             append("\n\nRuntime context:\n")
             append("- Current date: ").append(dateStr).append(" (").append(tzId).append(")\n")
             append("- Device language: ").append(lang).append("\n")

@@ -9,6 +9,20 @@ import java.io.File
 
 object FileReadTool {
     const val NAME = "file_read"
+    const val MAX_LENGTH_HARD_CAP = 80_000
+    const val DEFAULT_MAX_LENGTH = 15_000
+
+    fun resolveMaxLength(requested: Int, userCap: Int): Int {
+        val cap = userCap.coerceIn(2_000, MAX_LENGTH_HARD_CAP)
+        return requested.coerceIn(1, cap)
+    }
+
+    fun resolveLineLimit(requested: Int?, userCap: Int): Int? {
+        if (userCap <= 0) return requested?.coerceAtLeast(1)
+        val cap = userCap.coerceAtMost(20_000)
+        return if (requested == null) cap else requested.coerceIn(1, cap)
+    }
+
 
     fun definition(): AgentToolDefinition = AgentToolDefinition(
         name = NAME,
@@ -18,7 +32,7 @@ object FileReadTool {
             "path" to AgentToolParam("string", "Absolute Linux path to read (e.g. /var/minis/workspace/data.csv)"),
             "offset" to AgentToolParam("integer", "1-based line number to start reading from (default: 1). Ignored when direction is 'tail'. If a previous read was truncated, its header ends with next_offset=N — pass that as offset to continue from where it stopped."),
             "lines" to AgentToolParam("integer", "Maximum number of lines to return (default: all lines up to max_length)"),
-            "max_length" to AgentToolParam("integer", "Maximum character length of returned content (default: 15000)"),
+            "max_length" to AgentToolParam("integer", "Maximum character length of returned content (capped in Settings → Tool limits; hard cap 80000)"),
             "direction" to AgentToolParam("string", "Read direction: 'head' (from start, default) or 'tail' (from end of file)"),
         ),
         required = listOf("tool_title", "path"),
@@ -42,8 +56,9 @@ object FileReadTool {
             // requested value; the truncation tail below tells the agent the
             // full file size so it can paginate with offset/lines if needed.
             // iOS mirrors this cap in AIChatViewModel.executeFileRead.
-            val MAX_LENGTH_HARD_CAP = 80_000
-            val maxLength = args.optInt("max_length", 15000).coerceAtMost(MAX_LENGTH_HARD_CAP)
+            val userChars = com.openminis.app.data.ToolLimitPrefs.fileReadMaxChars()
+            val requestedChars = if (args.has("max_length")) args.optInt("max_length") else userChars
+            val maxLength = resolveMaxLength(requestedChars, userChars)
             val direction = args.optString("direction", "head")
 
             if (path.isBlank()) {
@@ -81,7 +96,10 @@ object FileReadTool {
             val allLines = file.readLines()
             val totalLines = allLines.size
 
-            val requestedLines = if (args.has("lines")) args.optInt("lines") else null
+            val requestedLines = resolveLineLimit(
+                if (args.has("lines")) args.optInt("lines") else null,
+                com.openminis.app.data.ToolLimitPrefs.fileReadMaxLines(),
+            )
 
             val selectedLines = if (direction == "tail") {
                 val count = requestedLines ?: totalLines

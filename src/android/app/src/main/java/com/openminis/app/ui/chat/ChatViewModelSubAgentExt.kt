@@ -173,7 +173,7 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
         if (subAgentDepth.get() > 0) {
             return ToolExecutionResult("Error: sub-agents cannot spawn further sub-agents.", false)
         }
-        val spawns = parseSubAgentBatch(argsJson, SubAgentRunner.ABSOLUTE_MAX_TURNS)
+        val spawns = parseSubAgentBatch(argsJson, com.openminis.app.data.ToolLimitPrefs.subagentMaxTurns())
         if (spawns.isEmpty()) {
             return ToolExecutionResult(
                 if (argsJson.isBlank() || !argsJson.trim().startsWith("{"))

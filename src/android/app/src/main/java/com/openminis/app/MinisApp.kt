@@ -290,6 +290,9 @@ class MinisApp : Application(), ImageLoaderFactory {
         // Activity context.
         com.openminis.app.data.AutoCompactPrefs.prime(this)
         com.openminis.app.data.PlanDiscussionPrefs.prime(this)
+        com.openminis.app.data.PromptTemplateStore.prime(this)
+        com.openminis.app.data.ToolLimitPrefs.prime(this)
+        com.openminis.app.agent.WorkspaceRulesStore.prime(this)
         com.openminis.app.security.SecurityGateHolder.load(this)
 
         // T283: install NDK signal handler for native crashes (SIGSEGV/

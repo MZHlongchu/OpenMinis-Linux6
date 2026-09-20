@@ -35,6 +35,9 @@ import com.openminis.app.ui.navigation.Routes
  *                                               → Environment variables
  *   minis://settings/rootfs                     → Rootfs management (mirror config lives here)
  *   minis://settings/mirrors                    → alias for rootfs (mirrors live inside Rootfs UI)
+ *   minis://settings/prompt-templates           → Per-session prompt templates
+ *   minis://settings/workspace-rules            → Workspace rule library
+ *   minis://settings/tool-limits                → Shell / file_read / sub-agent caps
  *
  * Unknown settings paths fall back to Settings home rather than
  * Unknown — matches iOS's "best-effort land somewhere reasonable"
@@ -199,6 +202,9 @@ object DeepLinkHandler {
             "appearance" -> DeepLinkAction.OpenSettingsScreen(Routes.APPEARANCE)
             "background" -> DeepLinkAction.OpenSettingsScreen(Routes.BACKGROUND)
             "search", "web-search", "web_search" -> DeepLinkAction.OpenSettingsScreen(Routes.WEB_SEARCH)
+            "prompt-templates", "prompt_templates" -> DeepLinkAction.OpenSettingsScreen(Routes.PROMPT_TEMPLATES)
+            "workspace-rules", "workspace_rules" -> DeepLinkAction.OpenSettingsScreen(Routes.WORKSPACE_RULES)
+            "tool-limits", "tool_limits" -> DeepLinkAction.OpenSettingsScreen(Routes.TOOL_LIMITS)
             "about" -> DeepLinkAction.OpenSettingsScreen(Routes.ABOUT)
             "permissions" -> DeepLinkAction.OpenPermissionSettings
             "shizuku" -> DeepLinkAction.OpenSettingsScreen(Routes.SHIZUKU)
