@@ -309,15 +309,37 @@ private suspend fun ChatViewModel.runOneSubAgent(
             val maxAttempts = multiAgentSettings.subagentMaxAttempts.value
             var attempt = 0
             var lastError: Exception? = null
-            var lastFailedProviderId: String? = null
+            var lastFailedGateKey: String? = null
+            var lastFailedEntryId: String? = null
             while (attempt < maxAttempts) {
                 attempt++
-                val entry = if (attempt == 1) baseEntry else pickRetryEntry(
-                    entries = config.modelEntries,
-                    pool = pool,
-                    excludeProviderId = lastFailedProviderId,
-                    seed = subAgentRoundRobin.getAndIncrement(),
-                ) ?: baseEntry
+                val entry = if (attempt == 1) {
+                    baseEntry
+                } else {
+                    val rotated = pickRetryEntry(
+                        entries = config.modelEntries,
+                        pool = pool,
+                        excludeEntryId = lastFailedEntryId,
+                        excludeGateKey = lastFailedGateKey,
+                        gateKeyOf = { e -> providerForModelEntry(e)?.callGateKey },
+                        seed = subAgentRoundRobin.getAndIncrement(),
+                    )
+                    if (rotated != null) {
+                        rotated
+                    } else {
+                        val last = lastError
+                        val noSameKey = last is LLMError.RateLimited ||
+                            (last as? LLMError)?.isFallbackable == true
+                        if (noSameKey) {
+                            com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, false, last?.message)
+                            return ToolExecutionResult(
+                                "Sub-agent failed after ${attempt - 1} attempt(s): ${last?.message ?: last?.javaClass?.simpleName}",
+                                false,
+                            )
+                        }
+                        baseEntry
+                    }
+                }
                 val provider = providerForModelEntry(entry)
                 if (provider == null) {
                     if (attempt >= maxAttempts) {
@@ -326,7 +348,7 @@ private suspend fun ChatViewModel.runOneSubAgent(
                             false,
                         )
                     }
-                    lastFailedProviderId = entry.providerInstanceId
+                    lastFailedEntryId = entry.id
                     continue
                 }
                 if (attempt > 1) {
@@ -424,7 +446,8 @@ private suspend fun ChatViewModel.runOneSubAgent(
                 throw e
             } catch (e: Exception) {
                 lastError = e
-                lastFailedProviderId = entry.providerInstanceId
+                lastFailedEntryId = entry.id
+                lastFailedGateKey = provider.callGateKey
                 val retryable = (e as? LLMError)?.isRetryable ?: isUpstreamTruncation(e)
                 Log.w(ChatViewModel.TAG, "Sub-agent lane=$laneId attempt=$attempt/$maxAttempts retryable=$retryable err=${e.message}")
                 if (retryable && attempt < maxAttempts) {
@@ -476,18 +499,25 @@ private fun isUpstreamTruncation(e: Exception): Boolean {
     }
 
 /**
- * Re-pick a pool entry on a DIFFERENT provider instance than the one that just
- * failed, so a rate-limited / truncated relay is skipped on retry. Returns null
- * when the pool has no entry on another instance (caller retries the base entry).
+ * Re-pick a pool entry on a different rate-limit bucket (host + key + model).
+ * Same model name on another key is a different bucket and is eligible.
+ * Returns null when the pool has no other bucket (caller may stop on 429).
  */
 private fun pickRetryEntry(
         entries: List<ModelEntry>,
         pool: List<String>,
-        excludeProviderId: String?,
+        excludeEntryId: String?,
+        excludeGateKey: String?,
+        gateKeyOf: (ModelEntry) -> String?,
         seed: Int,
     ): ModelEntry? {
         val pooled = pool.filter { it.isNotBlank() }.mapNotNull { id -> entries.find { it.id == id } }
-        val rotated = pooled.filter { it.providerInstanceId != excludeProviderId }
+        val rotated = pooled.filter { candidate ->
+            if (excludeEntryId != null && candidate.id == excludeEntryId) return@filter false
+            val gk = gateKeyOf(candidate)
+            gk.isNullOrBlank() || excludeGateKey.isNullOrBlank() ||
+                !com.openminis.app.provider.ProviderKeyGate.sameBucket(gk, excludeGateKey)
+        }
         return if (rotated.isNotEmpty()) rotated[Math.floorMod(seed, rotated.size)] else null
     }
 

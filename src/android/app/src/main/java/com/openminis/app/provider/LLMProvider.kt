@@ -15,6 +15,9 @@ interface LLMProvider {
     val name: String
     var model: LLMModel
 
+    /** Host+credential+model fingerprint for [ProviderKeyGate]. Blank skips the gate. */
+    val callGateKey: String get() = ""
+
     /**
      * Effective max output tokens ceiling for the given model.
      * Priority: model.maxOutputTokens > models.dev (normalized id) >
@@ -67,10 +70,14 @@ interface LLMProvider {
         imageParts: List<LLMMessage.ImagePart> = emptyList(),
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
-    ): LLMResponse = sendMessageClamped(
-        messages, systemPrompt, maxTokens, temperature, imageParts, tools,
-        clampThinkingLevel(thinkingLevel),
-    )
+    ): LLMResponse {
+        val level = clampThinkingLevel(thinkingLevel)
+        return ProviderKeyGate.withPermit(callGateKey) {
+            sendMessageClamped(
+                messages, systemPrompt, maxTokens, temperature, imageParts, tools, level,
+            )
+        }
+    }
 
     /** See [sendMessage] — the clamped, provider-implemented counterpart. */
     fun streamMessage(
@@ -81,10 +88,19 @@ interface LLMProvider {
         imageParts: List<LLMMessage.ImagePart> = emptyList(),
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
-    ): Flow<LLMStreamChunk> = streamMessageClamped(
-        messages, systemPrompt, maxTokens, temperature, imageParts, tools,
-        clampThinkingLevel(thinkingLevel),
-    )
+    ): Flow<LLMStreamChunk> {
+        val level = clampThinkingLevel(thinkingLevel)
+        val inner = streamMessageClamped(
+            messages, systemPrompt, maxTokens, temperature, imageParts, tools, level,
+        )
+        val key = callGateKey
+        if (key.isBlank()) return inner
+        return flow {
+            ProviderKeyGate.withPermit(key) {
+                inner.collect { emit(it) }
+            }
+        }
+    }
 
     /**
      * [T-android-thinking-level-arch] Provider implementations override THIS

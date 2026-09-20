@@ -6,6 +6,7 @@ import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.sanitizeToolId
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.provider.HttpRetryAfter
+import com.openminis.app.provider.ProviderKeyGate
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.LLMResponse
@@ -48,6 +49,8 @@ class AnthropicProvider(
     private val customUserAgent: String? = null,
 ) : LLMProvider {
     override val name = "Anthropic"
+    override val callGateKey: String
+        get() = ProviderKeyGate.key(basePath, apiKey, model.id)
     override val defaultMaxOutputTokens: Int get() = 64_000
 
     /**
@@ -199,10 +202,14 @@ class AnthropicProvider(
                 if (payload == "[DONE]") break
 
                 val event = try { JSONObject(payload) } catch (_: Exception) { continue }
-                android.util.Log.d(
-                    "ToolChain[Provider]",
-                    "RAW SSE: ${com.openminis.app.text.BoundedText.clampSsePayload(payload)}",
-                )
+                if (payload.contains("\"error\"") ||
+                    android.util.Log.isLoggable("ToolChain[Provider]", android.util.Log.VERBOSE)
+                ) {
+                    android.util.Log.d(
+                        "ToolChain[Provider]",
+                        "RAW SSE: ${com.openminis.app.text.BoundedText.clampSsePayload(payload)}",
+                    )
+                }
                 val eventType = event.safeOptString("type", "")
 
                 when (eventType) {
@@ -1044,7 +1051,7 @@ class AnthropicProvider(
 
     private fun mapHttpError(statusCode: Int, body: String, retryAfterHeader: String? = null): LLMError {
         if (statusCode == 401 || statusCode == 403) return LLMError.InvalidApiKey()
-        if (statusCode == 429) return LLMError.RateLimited(HttpRetryAfter.parseSeconds(retryAfterHeader, body))
+        if (statusCode == 429) return HttpRetryAfter.map429(body, retryAfterHeader)
 
         val message = try {
             val json = JSONObject(body)

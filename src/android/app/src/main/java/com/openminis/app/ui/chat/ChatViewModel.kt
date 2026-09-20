@@ -205,9 +205,11 @@ class ChatViewModel(
                     is LLMError.TransientError,
                     is LLMError.InvalidApiKey,
                     -> false
-                    // ProviderError / DecodingError / Unknown stay retryable:
-                    // an over-length refusal arrives as a ProviderError on most
-                    // providers, and that is the case splitting exists for.
+                    is LLMError.ProviderError ->
+                        !error.detail.contains("[429]") &&
+                            !com.openminis.app.provider.HttpRetryAfter.isPermanentCapacityBody(error.detail)
+                    // DecodingError / Unknown stay retryable: an over-length
+                    // refusal arrives untyped, and that is the case splitting exists for.
                     else -> true
                 }
             }
@@ -4207,20 +4209,10 @@ class ChatViewModel(
                             currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context)
                             _providerName.value = instance.label.ifEmpty { entry.model.provider }
                             resolved = true
-                            // No binding row (e.g. a synced session that only
-                            // carried model_id). If the entry belongs to the
-                            // default group, adopt that group so group fallback
-                            // works — otherwise buildFallbackProviders returns
-                            // empty and provider errors never fall back. NOT
-                            // applied to an explicit "entry" binding (user pin),
-                            // which restoreFromBinding handles above. Mirrors
-                            // the iOS runAgentLoop group-discovery fix.
-                            val defaultGroupId = providerRepository.defaultPrimaryGroupId
-                            if (defaultGroupId != null &&
-                                providerRepository.group(defaultGroupId)?.memberEntryIds?.contains(entry.id) == true
-                            ) {
-                                _selectedGroupId.value = defaultGroupId
-                            }
+                            // Pin as a single provider model. Do NOT adopt a
+                            // Settings model group just because this entry also
+                            // appears in one — that would auto-switch models
+                            // (and billing) the user never selected as a group.
                         }
                     }
                 }
@@ -5063,6 +5055,9 @@ class ChatViewModel(
     )
 
     private fun buildFallbackProviders(primaryProvider: LLMProvider): List<FallbackCandidate> {
+        // Settings → Model Groups only. A model picked under a provider
+        // section never sets _selectedGroupId, so this returns empty and
+        // the turn stays on that one model.
         val groupId = _selectedGroupId.value ?: return emptyList()
         val config = providerRepository.config.value
         val group = config.modelGroups.find { it.id == groupId } ?: return emptyList()
@@ -5093,6 +5088,9 @@ class ChatViewModel(
             val p = try {
                 ProviderFactory.create(instance, apiKey, entry.model, context)
             } catch (_: Exception) { continue }
+            // Same host+key+model is the same relay bucket; skip it so fallback
+            // actually moves to another model name or another key.
+            if (com.openminis.app.provider.ProviderKeyGate.sameBucket(p.callGateKey, primaryProvider.callGateKey)) continue
             result.add(FallbackCandidate(provider = p, entryId = entry.id))
         }
         return result
@@ -8038,7 +8036,7 @@ class ChatViewModel(
             // callbackFlow wraps throws into CancellationException(cause=LLMError),
             // so we catch at collect level and unwrap.
             var collectDone = false
-            var retryAttempt = 0  // per-turn auto-retry counter (resets on each new turn)
+            var retryAttempt = 0  // per-provider; reset when falling back to the next member
             while (!collectDone) {
                 try {
                     // [T-android-enhanced-cache] Stamp the per-turn Enhanced
@@ -8485,16 +8483,25 @@ class ChatViewModel(
                     val actual = unwrapFlowException(e)
                     val isRateLimit = actual is com.openminis.app.data.model.LLMError.RateLimited
                     val is5xx = actual is com.openminis.app.data.model.LLMError.ProviderError &&
-                        actual.detail.contains(Regex("[5][0-9]{2}"))
+                        Regex("""\[5\d{2}\]""").containsMatchIn(actual.detail)
+                    val isPermanentCapacity = actual is com.openminis.app.data.model.LLMError.ProviderError &&
+                        (actual.detail.contains("[429]") ||
+                            com.openminis.app.provider.HttpRetryAfter.isPermanentCapacityBody(actual.detail))
                     // Auto-retry on transient network/5xx/transient errors on the SAME provider
                     // Same-provider retry for network / 5xx / 429 (honour Retry-After),
                     // then fall back to the next group member.
-                    val isTransient = actual is com.openminis.app.data.model.LLMError.NetworkError ||
+                    val isTransient = (actual is com.openminis.app.data.model.LLMError.NetworkError ||
                         actual is com.openminis.app.data.model.LLMError.TransientError ||
                         actual is com.openminis.app.data.model.LLMError.RateLimited ||
-                        is5xx
+                        is5xx) && !isPermanentCapacity
                     val maxRetries = effectiveMaxRetries()
-                    if (isTransient && maxRetries > 0 && retryAttempt < maxRetries) {
+                    // 429 with another group member: switch endpoints instead of
+                    // hammering the same key through 1/2/4/8/16s (inside a typical
+                    // 60s relay window). Same-provider retries remain for network
+                    // / 5xx, and for 429 when this is the last candidate — at most once.
+                    val skipSameProviderRetry = (isRateLimit && remainingFallbacks.isNotEmpty()) || isPermanentCapacity
+                    val sameProviderBudget = if (isRateLimit) minOf(maxRetries, 1) else maxRetries
+                    if (isTransient && !skipSameProviderRetry && sameProviderBudget > 0 && retryAttempt < sameProviderBudget) {
                         val retryAfter = (actual as? com.openminis.app.data.model.LLMError.RateLimited)?.retryAfterSeconds
                         val delaySec = com.openminis.app.provider.HttpRetryAfter.delaySeconds(
                             retryAttempt, retryAfter, AUTO_RETRY_DELAYS_SEC,
@@ -8513,6 +8520,8 @@ class ChatViewModel(
                                 _autoRetryCountdown.value = remaining
                                 kotlinx.coroutines.delay(1000)
                             }
+                            val jitter = com.openminis.app.provider.HttpRetryAfter.jitterMs()
+                            if (jitter > 0L) kotlinx.coroutines.delay(jitter)
                         } finally {
                             _autoRetryCountdown.value = 0
                         }
@@ -8576,13 +8585,22 @@ class ChatViewModel(
                     // makes the intent explicit and avoids a one-frame
                     // flash of the stale banner.
                     withContext(Dispatchers.Main) { clearInlineError() }
-                    val shouldFallback = isRateLimit || is5xx ||
-                        fallbackStrategy == com.openminis.app.data.model.FallbackStrategy.always
-                    val nextCandidate = if (shouldFallback) remainingFallbacks.removeFirstOrNull() else null
+                    val llmErr = actual as? com.openminis.app.data.model.LLMError
+                    val shouldFallback = fallbackStrategy == com.openminis.app.data.model.FallbackStrategy.always ||
+                        llmErr?.isFallbackable == true ||
+                        isRateLimit || is5xx || isPermanentCapacity
+                    val curGate = currentProvider.callGateKey
+                    val nextCandidate = if (shouldFallback && _selectedGroupId.value != null) {
+                        var c: FallbackCandidate? = remainingFallbacks.removeFirstOrNull()
+                        while (c != null && com.openminis.app.provider.ProviderKeyGate.sameBucket(c.provider.callGateKey, curGate)) {
+                            c = remainingFallbacks.removeFirstOrNull()
+                        }
+                        c
+                    } else null
                     val next = nextCandidate?.provider
                     if (next != null && nextCandidate != null) {
                         val reason = when {
-                            isRateLimit -> "Rate limited"
+                            isRateLimit -> actual.message ?: "Rate limited"
                             actual is com.openminis.app.data.model.LLMError.ProviderError -> actual.detail
                             else -> actual.message ?: "Error"
                         }
@@ -8601,6 +8619,7 @@ class ChatViewModel(
                         fallbackReasons.add("⚠️ ${currentProvider.model.displayName}: $reason")
                         Log.i(TAG, "🔀 $reason on ${currentProvider.model.displayName}, switching to ${next.model.displayName} (realModelChange=$isRealModelChange)")
                         currentProvider = next
+                        retryAttempt = 0
                         // Also update class-level provider so the next sendMessage() starts from here
                         this@ChatViewModel.currentProvider = next
                         // Update top bar model info + active entry. (For a same-
@@ -8639,8 +8658,6 @@ class ChatViewModel(
                         val groupId = _selectedGroupId.value
                         if (groupId != null && newEntry != null) {
                             persistBinding("""{"type":"group","groupId":"$groupId","lastEntryId":"${newEntry.id}"}""")
-                        } else if (newEntry != null) {
-                            persistBinding("""{"type":"entry","entryId":"${newEntry.id}"}""")
                         }
                         val infoText = fallbackReasons.joinToString("\n") + "\n🔄 Switched to ${currentProvider.model.displayName}"
                         allToolBlocks.removeAll { it.kind == "info" }

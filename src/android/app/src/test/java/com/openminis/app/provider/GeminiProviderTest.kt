@@ -382,6 +382,18 @@ class GeminiProviderTest {
     }
 
     @Test
+    fun `sendMessage throws ProviderError on 429 with no_available_providers`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(429).setBody("no_available_providers"))
+        try {
+            provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "test")), null, 100)
+        } catch (e: LLMError.ProviderError) {
+            assertTrue(e.detail.contains("[429]"))
+            return@runBlocking
+        }
+        throw AssertionError("Expected ProviderError")
+    }
+
+    @Test
     fun `sendMessage throws TransientError with message on 500`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(500).setBody("Internal Server Error"))
 

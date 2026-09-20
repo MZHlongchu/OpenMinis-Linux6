@@ -5,6 +5,7 @@ import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.provider.HttpRetryAfter
+import com.openminis.app.provider.ProviderKeyGate
 import com.openminis.app.data.model.LLMMediaAttachment
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
@@ -94,6 +95,12 @@ class OpenAIProvider private constructor(
     private val azureBase: String? = null,
 ) : LLMProvider {
     override val name = "OpenAI"
+    override val callGateKey: String
+        get() = ProviderKeyGate.key(
+            basePath,
+            apiKey ?: "oauth:${codexAccountId ?: "codex"}",
+            model.id,
+        )
 
     /**
      * [T-android-thinking-rules-phase2] Owning provider-instance id, set by
@@ -607,7 +614,7 @@ class OpenAIProvider private constructor(
         // minis-model-use (ModelUseOffloadHandler) — get them on
         // LLMResponse.mediaAttachments and can write the image to --output.
         val media = mutableListOf<LLMMediaAttachment>()
-        streamMessage(
+        streamMessageClamped(
             messages = messages,
             systemPrompt = systemPrompt,
             maxTokens = maxTokens,
@@ -990,10 +997,14 @@ class OpenAIProvider private constructor(
                     )
                     continue
                 }
-                android.util.Log.d(
-                    "ToolChain[Provider]",
-                    "RAW SSE: ${com.openminis.app.text.BoundedText.clampSsePayload(payload)}",
-                )
+                if (payload.contains("\"error\"") ||
+                    android.util.Log.isLoggable("ToolChain[Provider]", android.util.Log.VERBOSE)
+                ) {
+                    android.util.Log.d(
+                        "ToolChain[Provider]",
+                        "RAW SSE: ${com.openminis.app.text.BoundedText.clampSsePayload(payload)}",
+                    )
+                }
                 sseEventCount++
 
                 // T321: per-event delta-field summary. Only counts/lengths,
@@ -1008,7 +1019,9 @@ class OpenAIProvider private constructor(
                         val rLen = delta.optString("reasoning", "").length
                         val tcLen = delta.optJSONArray("tool_calls")?.length() ?: 0
                         val role = delta.optString("role", "")
-                        if (cLen + rcLen + rLen + tcLen > 0 || delta.has("role")) {
+                        if ((cLen + rcLen + rLen + tcLen > 0 || delta.has("role")) &&
+                            android.util.Log.isLoggable("OpenAIProvider", android.util.Log.VERBOSE)
+                        ) {
                             com.openminis.app.logging.AppLogger.debug(
                                 "OpenAIProvider",
                                 "[T321] SSE delta: contentLen=$cLen rcLen=$rcLen rLen=$rLen toolCalls=$tcLen role='$role'"
@@ -3443,7 +3456,7 @@ class OpenAIProvider private constructor(
 
     private fun mapHttpError(statusCode: Int, body: String, retryAfterHeader: String? = null): LLMError {
         if (statusCode == 401 || statusCode == 403) return LLMError.InvalidApiKey()
-        if (statusCode == 429) return LLMError.RateLimited(HttpRetryAfter.parseSeconds(retryAfterHeader, body))
+        if (statusCode == 429) return HttpRetryAfter.map429(body, retryAfterHeader)
 
         val message = try {
             val json = JSONObject(body)
@@ -3457,7 +3470,7 @@ class OpenAIProvider private constructor(
         val transientCodes = setOf(500, 502, 503, 504, 529)
         if (statusCode in transientCodes) {
             // 503 with permanent failure indicators → ProviderError (trigger group fallback)
-            if (statusCode == 503 && (body.contains("no_available_providers") || body.contains("model_not_found"))) {
+            if (statusCode == 503 && HttpRetryAfter.isPermanentCapacityBody(body)) {
                 return LLMError.ProviderError(message)
             }
             return LLMError.TransientError(message)

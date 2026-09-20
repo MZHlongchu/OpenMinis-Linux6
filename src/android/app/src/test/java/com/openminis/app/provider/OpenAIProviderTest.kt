@@ -324,6 +324,19 @@ class OpenAIProviderTest {
     }
 
     @Test
+    fun `sendMessage throws ProviderError on 429 with no available channel`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(429).setBody("无可用渠道"))
+        try {
+            provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "test")), null, 100)
+        } catch (e: LLMError.ProviderError) {
+            assertTrue(e.detail.contains("[429]"))
+            assertTrue(e.detail.contains("无可用渠道"))
+            return@runBlocking
+        }
+        throw AssertionError("Expected ProviderError")
+    }
+
+    @Test
     fun `sendMessage parses error body for ProviderError`() = runBlocking {
         val errorBody = """{"error":{"message":"The model does not exist","type":"invalid_request_error"}}"""
         server.enqueue(MockResponse().setResponseCode(400).setBody(errorBody))

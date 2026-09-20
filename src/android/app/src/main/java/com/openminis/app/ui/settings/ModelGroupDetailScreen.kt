@@ -62,6 +62,7 @@ import com.openminis.app.data.model.RoutingStrategy
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.provider.effectiveMaxThinkingLevel
 import com.openminis.app.data.repository.ProviderRepository
+import com.openminis.app.provider.ModelGroupBuckets
 import com.openminis.app.R
 import kotlinx.coroutines.launch
 import sh.calvin.reorderable.ReorderableItem
@@ -121,6 +122,27 @@ fun ModelGroupDetailScreen(
     // Local copy of member IDs for live reorder
     var memberIds by remember(group.memberEntryIds) { mutableStateOf(group.memberEntryIds.toList()) }
     var entryToRemove by remember { mutableStateOf<String?>(null) }
+
+    val memberBucketById = remember(memberIds, config) {
+        buildMap {
+            for (id in memberIds) {
+                val entry = config.modelEntries.find { it.id == id } ?: continue
+                val instance = config.instances.find { it.id == entry.providerInstanceId } ?: continue
+                val secret = providerRepository.usableApiKey(instance)
+                put(
+                    id,
+                    ModelGroupBuckets.bucket(
+                        instance.effectiveBaseURL ?: instance.customBaseURL,
+                        secret,
+                        entry.model.id,
+                    ),
+                )
+            }
+        }
+    }
+    val duplicateBuckets = remember(memberBucketById) {
+        ModelGroupBuckets.duplicateBuckets(memberBucketById.values)
+    }
 
     val lazyListState = rememberLazyListState()
     val reorderState = rememberReorderableLazyListState(lazyListState) { from, to ->
@@ -191,8 +213,8 @@ fun ModelGroupDetailScreen(
                 SettingsSection(
                     header = stringResource(R.string.model_group_detail_routing_strategy),
                     footer = when (strategy) {
-                        RoutingStrategy.fallback -> "Try models in order. If one fails, advance to the next."
-                        RoutingStrategy.loadBalance -> "Distribute sessions across models in the group."
+                        RoutingStrategy.fallback -> stringResource(R.string.model_group_detail_routing_fallback_footer)
+                        RoutingStrategy.loadBalance -> stringResource(R.string.model_group_detail_routing_load_balance_footer)
                     },
                 ) {
                     SettingsChoiceRow(
@@ -221,8 +243,8 @@ fun ModelGroupDetailScreen(
                     SettingsSection(
                         header = stringResource(R.string.model_group_detail_fallback_trigger),
                         footer = when (fallbackStrategy) {
-                            FallbackStrategy.default -> "Fall back on rate limits (429) and server errors (5xx) only."
-                            FallbackStrategy.always -> "Fall back on any error, including network and auth failures."
+                            FallbackStrategy.default -> stringResource(R.string.model_group_detail_fallback_default_footer)
+                            FallbackStrategy.always -> stringResource(R.string.model_group_detail_fallback_always_footer)
                         },
                     ) {
                         SettingsChoiceRow(
@@ -255,6 +277,12 @@ fun ModelGroupDetailScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.padding(horizontal = 32.dp, vertical = 6.dp),
+                )
+                Text(
+                    text = stringResource(R.string.model_group_detail_members_footer),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 32.dp, vertical = 4.dp),
                 )
             }
 
@@ -345,7 +373,24 @@ fun ModelGroupDetailScreen(
                                             )
                                         }
                                     } else {
-                                        Text(instanceLabel ?: "")
+                                        val bucket = memberBucketById[entryId]
+                                        val caption = bucket?.let { ModelGroupBuckets.caption(it) }.orEmpty()
+                                        val dup = bucket != null && bucket in duplicateBuckets
+                                        Column {
+                                            Text(instanceLabel ?: "")
+                                            if (caption.isNotEmpty()) {
+                                                Text(
+                                                    text = stringResource(
+                                                        if (dup) R.string.model_group_detail_bucket_duplicate
+                                                        else R.string.model_group_detail_bucket_line,
+                                                        caption,
+                                                    ),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = if (dup) MaterialTheme.colorScheme.error
+                                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            }
+                                        }
                                     }
                                 },
                                 leadingContent = {
@@ -378,6 +423,17 @@ fun ModelGroupDetailScreen(
                             )
                         }
                     }
+                }
+            }
+
+            if (duplicateBuckets.isNotEmpty()) {
+                item {
+                    Text(
+                        text = stringResource(R.string.model_group_detail_duplicate_banner),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(horizontal = 32.dp, vertical = 8.dp),
+                    )
                 }
             }
 

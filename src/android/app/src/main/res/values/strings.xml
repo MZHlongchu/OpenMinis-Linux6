@@ -1320,6 +1320,14 @@
     <string name="model_group_detail_fallback">Fallback</string>
     <string name="model_group_detail_load_balance">Load Balance</string>
     <string name="model_group_detail_fallback_trigger">Fallback Trigger</string>
+    <string name="model_group_detail_routing_fallback_footer">When this group is selected in chat, try members in the order below. Never jumps to another group. Relays often price models differently — put cheaper ones first.</string>
+    <string name="model_group_detail_routing_load_balance_footer">Spreads new sessions across members of this group only. Does not switch to another group.</string>
+    <string name="model_group_detail_fallback_default_footer">Only while this group is selected: fall back to the next member on 429 and 5xx. A single model (no group) is never switched.</string>
+    <string name="model_group_detail_fallback_always_footer">Only while this group is selected: fall back to the next member on any error. A single model (no group) is never switched.</string>
+    <string name="model_group_detail_members_footer">Fallback stays inside this group. Same relay + same key + same model name share one rate-limit bucket (429 will not be saved by a duplicate). Same model name on a different key is a different bucket.</string>
+    <string name="model_group_detail_bucket_line">Rate-limit bucket %1$s</string>
+    <string name="model_group_detail_bucket_duplicate">Same rate-limit bucket %1$s — 429 will not fail over between these rows</string>
+    <string name="model_group_detail_duplicate_banner">Some members share a rate-limit bucket (same relay, key, and model name). They cannot back each other up on 429. Same model name on another key is a separate bucket.</string>
     <string name="common_default">Default</string>
     <string name="model_group_detail_always">Always</string>
     <string name="model_group_detail_unavailable">Unavailable</string>

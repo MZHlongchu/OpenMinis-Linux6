@@ -1,3 +1,23 @@
+# OpenMinis-Linux 1.36.2-linux
+
+- versionCode **55**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.1-linux：
+
+- **429 分类**：无可用渠道 / 额度不足 / 未知模型等不再当瞬时限流连打；普通 429 带正文摘要。
+- **按桶限流**：host + 密钥 + 模型名；同桶排队，不同 key 的同名模型是不同桶。
+- **模型组回退**：仅当会话选中「设置 → 模型组」时按组序换人。只选提供商下的某个模型时绝不自动换。
+- **设置 → 模型组**：显示限流桶、重复桶警告；页脚说明不跳组、计价可能不同。
+- **压缩 / 子代理 / 日志**：429 不再分裂压缩；子代理不打回同一死桶；SSE 不再淹没 429 日志。
+
+---
+
 # OpenMinis-Linux 1.36.1-linux
 
 - versionCode **54**

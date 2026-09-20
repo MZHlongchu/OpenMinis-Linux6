@@ -87,6 +87,8 @@ class CompactSplitPredicateTest {
             LLMError.RateLimited(),
             LLMError.TransientError("503"),
             LLMError.InvalidApiKey(),
+            LLMError.ProviderError("[429] 无可用渠道"),
+            LLMError.ProviderError("insufficient_quota"),
         )
         for (e in previouslyAmplified) {
             assertFalse("${e.javaClass.simpleName} must not split", shouldSplitOnError(e))

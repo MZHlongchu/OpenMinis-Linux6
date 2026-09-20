@@ -326,6 +326,18 @@ class AnthropicProviderTest {
     }
 
     @Test
+    fun `sendMessage throws ProviderError on 429 with quota body`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(429).setBody("insufficient_quota"))
+        try {
+            provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "test")), null, 100)
+        } catch (e: LLMError.ProviderError) {
+            assertTrue(e.detail.contains("[429]"))
+            return@runBlocking
+        }
+        throw AssertionError("Expected ProviderError")
+    }
+
+    @Test
     fun `sendMessage parses error body for ProviderError`() = runBlocking {
         val errorBody = """{"error":{"type":"invalid_request_error","message":"max_tokens too large"}}"""
         server.enqueue(MockResponse().setResponseCode(400).setBody(errorBody))

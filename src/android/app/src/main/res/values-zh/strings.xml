@@ -1226,6 +1226,14 @@
     <string name="model_group_detail_fallback">回退</string>
     <string name="model_group_detail_load_balance">负载均衡</string>
     <string name="model_group_detail_fallback_trigger">Fallback 触发条件</string>
+    <string name="model_group_detail_routing_fallback_footer">仅当会话选中本组时，按下面的顺序尝试组内成员。不会跳到其它分组。中转常按模型名分别计价，请把便宜的放前面。</string>
+    <string name="model_group_detail_routing_load_balance_footer">只在本组内打散新会话，不会切到其它分组。</string>
+    <string name="model_group_detail_fallback_default_footer">仅当会话选中本组：遇到 429 / 5xx 才换组内下一个成员。未选分组、单独用某个模型时不会切换。</string>
+    <string name="model_group_detail_fallback_always_footer">仅当会话选中本组：任何错误都换组内下一个成员。未选分组、单独用某个模型时不会切换。</string>
+    <string name="model_group_detail_members_footer">回退只发生在本组内。同一中转 + 同一密钥 + 同一模型名共用一个限流桶，重复行无法互相顶上 429。不同密钥上的同名模型是不同的桶。</string>
+    <string name="model_group_detail_bucket_line">限流桶 %1$s</string>
+    <string name="model_group_detail_bucket_duplicate">与其它成员同一限流桶 %1$s，429 时不能互相顶上</string>
+    <string name="model_group_detail_duplicate_banner">有成员共用限流桶（同一中转、密钥和模型名），429 时无法互为备份。不同密钥上的同名模型是不同的桶。</string>
     <string name="common_default">默认</string>
     <string name="model_group_detail_always">始终</string>
     <string name="model_group_detail_unavailable">不可用</string>
