@@ -225,7 +225,7 @@
     <string name="plugin_market_api_key">API key</string>
     <string name="plugin_market_install">Install</string>
     <string name="settings_collab_roles_section">Catalog roles</string>
-    <string name="settings_collab_roles_footer">Pass these names as spawn_agent role to inject focus, do-not, when-silent, and who-to-ask routing.</string>
+    <string name="settings_collab_roles_footer">Pass these names as spawn_agent role to inject focus, do-not, when-silent, and who-to-ask routing. Tap a custom role to edit or delete; new roles with the same name shadow built-ins.</string>
     <string name="mcp_title">MCP Integrations</string>
     <string name="mcp_add">Add MCP Server</string>
     <string name="mcp_edit">Edit MCP Server</string>

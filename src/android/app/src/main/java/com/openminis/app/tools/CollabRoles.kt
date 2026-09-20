@@ -1,11 +1,18 @@
 package com.openminis.app.tools
 
+import android.content.Context
+
 /**
  * Catalog role cards for spawn_agent: focus / don't-do / when-silent / who-to-ask.
  *
- * Adapted from XINCODE-Public PresetTeam
+ * Built-in roles are adapted from XINCODE-Public PresetTeam
  * (GPL-3.0-or-later, https://github.com/kusesad-1122/XINCODE-Public).
  * Tool names mapped onto OpenMinis 1.31 (shell_execute, file_*, grep_source, web_search).
+ *
+ * [1.35] Roles are no longer hard-coded only: users can add custom roles in
+ * the multi-agent settings page. Customs live in SubAgentTypeStore-style JSON
+ * prefs (own file, "collab_roles") and are merged over the built-in catalog.
+ * A custom role with the same name shadows the built-in one.
  */
 object CollabRoles {
 
@@ -14,6 +21,7 @@ object CollabRoles {
         val description: String,
         val prompt: String,
         val tools: Set<String>,
+        val builtin: Boolean = true,
     )
 
     data class Team(
@@ -212,6 +220,64 @@ object CollabRoles {
 
     val ALL: List<Role> = PRODUCT + REVERSE
 
+    // ---- custom roles (user-defined, stored in prefs) -----------------------
+
+    private const val PREFS = "collab_roles"
+    private const val KEY = "roles_json"
+
+    fun loadCustom(context: Context): List<Role> = try {
+        val json = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY, null) ?: return emptyList()
+        val arr = org.json.JSONArray(json)
+        (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val tools = mutableListOf<String>()
+            val ta = o.optJSONArray("tools")
+            if (ta != null) for (j in 0 until ta.length()) tools.add(ta.optString(j))
+            Role(
+                name = o.optString("name"),
+                description = o.optString("description"),
+                prompt = o.optString("prompt"),
+                tools = tools.toSet(),
+                builtin = false,
+            )
+        }.filter { it.name.isNotBlank() }
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    fun saveCustom(context: Context, roles: List<Role>) {
+        val arr = org.json.JSONArray()
+        roles.forEach { r ->
+            arr.put(
+                org.json.JSONObject()
+                    .put("name", r.name)
+                    .put("description", r.description)
+                    .put("prompt", r.prompt)
+                    .put("tools", org.json.JSONArray(r.tools.toList())),
+            )
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY, arr.toString()).apply()
+    }
+
+    /** Built-ins + customs; a custom with the same name shadows the builtin. */
+    fun allWithCustom(context: Context): List<Role> {
+        val customs = loadCustom(context)
+        if (customs.isEmpty()) return ALL
+        val names = customs.map { it.name.lowercase() }.toSet()
+        return customs + ALL.filter { it.name.lowercase() !in names }
+    }
+
+    fun byName(context: Context, raw: String?): Role? {
+        val n = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val custom = loadCustom(context).find { it.name.equals(n, ignoreCase = true) }
+        if (custom != null) return custom
+        return ALL.find { it.name.equals(n, ignoreCase = true) }
+    }
+
+    // Legacy catalog-only lookups (kept for callers without a Context).
+
     fun namesCsv(): String = ALL.joinToString(", ") { it.name }
 
     fun byName(raw: String?): Role? {
@@ -222,4 +288,7 @@ object CollabRoles {
     fun toolsFor(raw: String?): Set<String>? = byName(raw)?.tools
 
     fun promptFor(raw: String?): String? = byName(raw)?.prompt
+
+    /** Tool whitelist for a role name, customs included. */
+    fun toolsFor(context: Context, raw: String?): Set<String>? = byName(context, raw)?.tools
 }

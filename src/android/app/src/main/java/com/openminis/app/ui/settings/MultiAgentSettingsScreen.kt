@@ -230,13 +230,44 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
             header = stringResource(R.string.settings_collab_roles_section),
             footer = stringResource(R.string.settings_collab_roles_footer),
         ) {
-            val roles = com.openminis.app.tools.CollabRoles.ALL
+            var editingRole by remember { mutableStateOf<com.openminis.app.tools.CollabRoles.Role?>(null) }
+            var showAddDialog by remember { mutableStateOf(false) }
+            val roles = com.openminis.app.tools.CollabRoles.allWithCustom(context)
             roles.forEachIndexed { index, role ->
                 SettingsRow(
-                    title = role.name,
-                    subtitle = role.description,
-                    showChevron = false,
+                    title = role.name + if (role.builtin) "" else " *",
+                    subtitle = role.description +
+                        " · 工具: " + role.tools.sorted().take(6).joinToString(),
+                    showChevron = !role.builtin,
+                    onClick = if (role.builtin) null else ({ editingRole = role }),
                     showDivider = index < roles.lastIndex,
+                )
+            }
+            SettingsRow(
+                title = "+ 新增角色",
+                subtitle = "自定义名字/描述/提示词/工具白名单, 同名覆盖内置",
+                showChevron = false,
+                onClick = { showAddDialog = true },
+                showDivider = false,
+            )
+            if (editingRole != null || showAddDialog) {
+                CollabRoleEditDialog(
+                    initial = editingRole,
+                    onDismiss = { editingRole = null; showAddDialog = false },
+                    onSave = { saved ->
+                        val customs = com.openminis.app.tools.CollabRoles
+                            .loadCustom(context).filter { it.name != saved.name }
+                        com.openminis.app.tools.CollabRoles.saveCustom(context, customs + saved)
+                        editingRole = null
+                        showAddDialog = false
+                    },
+                    onDelete = if (editingRole?.builtin == false) ({
+                        val target = editingRole!!
+                        val customs = com.openminis.app.tools.CollabRoles
+                            .loadCustom(context).filter { it.name != target.name }
+                        com.openminis.app.tools.CollabRoles.saveCustom(context, customs)
+                        editingRole = null
+                    }) else null,
                 )
             }
         }
@@ -487,4 +518,75 @@ private fun LimitStepper(
             }
         },
     )
+
+@Composable
+private fun CollabRoleEditDialog(
+    initial: com.openminis.app.tools.CollabRoles.Role?,
+    onDismiss: () -> Unit,
+    onSave: (com.openminis.app.tools.CollabRoles.Role) -> Unit,
+    onDelete: (() -> Unit)?,
+) {
+    val builtin = initial?.builtin == true
+    // builtin roles are copied into a custom draft on tap; customs edit in place
+    var name by remember(initial) { mutableStateOf(initial?.name ?: "") }
+    var description by remember(initial) { mutableStateOf(initial?.description ?: "") }
+    var prompt by remember(initial) { mutableStateOf(initial?.prompt ?: "") }
+    var toolsCsv by remember(initial) { mutableStateOf(initial?.tools?.sorted()?.joinToString() ?: "") }
+    val valid = name.isNotBlank() && prompt.isNotBlank()
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (builtin) "内置角色 (保存为自定义副本)" else if (initial == null) "新增协作角色" else "编辑角色") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("角色名 (spawn_agent 的 role)") },
+                    singleLine = true,
+                    readOnly = builtin,
+                )
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("一句话描述") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = prompt,
+                    onValueChange = { prompt = it },
+                    label = { Text("角色提示词 (盯着/不管/该找谁/闭嘴)") },
+                    minLines = 4,
+                    maxLines = 8,
+                )
+                OutlinedTextField(
+                    value = toolsCsv,
+                    onValueChange = { toolsCsv = it },
+                    label = { Text("工具白名单 (逗号分隔, 空=不限)") },
+                    minLines = 2,
+                    maxLines = 3,
+                )
+                if (onDelete != null) {
+                    TextButton(onClick = onDelete) {
+                        Text("删除此角色", color = androidx.compose.material3.MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = valid, onClick = {
+                val toolSet = toolsCsv.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+                onSave(
+                    com.openminis.app.tools.CollabRoles.Role(
+                        name = name.trim(),
+                        description = description.trim(),
+                        prompt = prompt.trim(),
+                        tools = if (toolSet.isEmpty()) com.openminis.app.tools.CollabRoles.ALL.first().tools else toolSet,
+                        builtin = false,
+                    ),
+                )
+            }) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
 }

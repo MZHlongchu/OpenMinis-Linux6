@@ -195,7 +195,7 @@
     <string name="plugin_market_api_key">API 密钥</string>
     <string name="plugin_market_install">安装</string>
     <string name="settings_collab_roles_section">协作角色</string>
-    <string name="settings_collab_roles_footer">把这些名字填进 spawn_agent 的 role，会注入盯着/不管/闭嘴/该找谁。</string>
+    <string name="settings_collab_roles_footer">把这些名字填进 spawn_agent 的 role，会注入盯着/不管/闭嘴/该找谁。点自定义角色可编辑/删除，同名角色覆盖内置；带 * 为自定义。</string>
     <string name="mcp_title">MCP 集成</string>
     <string name="mcp_add">添加 MCP 服务器</string>
     <string name="mcp_edit">编辑 MCP 服务器</string>

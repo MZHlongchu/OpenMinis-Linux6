@@ -1,5 +1,6 @@
 package com.openminis.app.tools
 
+import android.content.Context
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMMessage
@@ -40,6 +41,7 @@ object SubAgentRunner {
         kind: String = SubAgentKind.WORKER,
         writePaths: List<String> = emptyList(),
         maxTurns: Int = ABSOLUTE_MAX_TURNS,
+        roleContext: Context? = null,
     ): ToolExecutionResult {
         val briefed = SubAgentBrief.wrap(userPrompt, kind = kind, role = role, writePaths = writePaths)
         val history = mutableListOf(
@@ -49,7 +51,7 @@ object SubAgentRunner {
         // explicit), bounded only by ABSOLUTE_MAX_TURNS as a runaway guard —
         // there is no longer a low global settings clamp here.
         val turns = maxTurns.coerceIn(1, ABSOLUTE_MAX_TURNS)
-        val system = workerSystemPrompt(modelDisplayName, role, skillsHint, kind, writePaths, turns)
+        val system = workerSystemPrompt(modelDisplayName, role, skillsHint, kind, writePaths, turns, roleContext)
         val report = StringBuilder()
         var warned = false
         var forced = false
@@ -230,8 +232,9 @@ object SubAgentRunner {
         kind: String,
         writePaths: List<String>,
         turns: Int,
+        roleContext: Context? = null,
     ): String {
-        val catalog = CollabRoles.byName(role)
+        val catalog = roleContext?.let { CollabRoles.byName(it, role) } ?: CollabRoles.byName(role)
         val roleLine = when {
             catalog != null -> "Assigned role: ${catalog.name}.\n\n${catalog.prompt}\n\n"
             !role.isNullOrBlank() -> "Assigned role: ${role.trim()}.\n"

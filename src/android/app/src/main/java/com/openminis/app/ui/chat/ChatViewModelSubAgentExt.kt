@@ -368,6 +368,7 @@ private suspend fun ChatViewModel.runOneSubAgent(
                     modelDisplayName = entry.model.displayName,
                     userPrompt = prompt,
                     role = role,
+                    roleContext = context,
                     skillsHint = skills,
                     tools = com.openminis.app.tools.DispatchAgentsTool.filterToolsForType(
                         com.openminis.app.tools.SubAgentTypeStore.find(context, role.orEmpty()),
@@ -382,13 +383,14 @@ private suspend fun ChatViewModel.runOneSubAgent(
                                 subAgentEnabled = false,
                             ) + AgentTools.makeSubAgentExtraTools(),
                             role,
+                            context,
                         ),
                     ),
                     maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 8192),
                     executeTool = { name, json ->
                         if (SubAgentKind.blocks(kind, name)) {
                             ToolExecutionResult("Error: $kind sub-agent cannot use $name.", false)
-                        } else if (com.openminis.app.tools.CollabRoles.toolsFor(role)?.let { name !in it } == true) {
+                        } else if (com.openminis.app.tools.CollabRoles.toolsFor(context, role)?.let { name !in it } == true) {
                             ToolExecutionResult("Error: role $role cannot use $name.", false)
                         } else if (run {
                             val type = com.openminis.app.tools.SubAgentTypeStore.find(context, role.orEmpty())

@@ -95,9 +95,12 @@ object SubAgentKind {
         kind: String,
         tools: List<AgentToolDefinition>,
         role: String? = null,
+        roleContext: android.content.Context? = null,
     ): List<AgentToolDefinition> {
         val base = tools.filter { !blocks(kind, it.name) }
-        val allowed = CollabRoles.toolsFor(role) ?: return base
+        val allowed = roleContext?.let { CollabRoles.toolsFor(it, role) }
+            ?: CollabRoles.toolsFor(role)
+            ?: return base
         return base.filter { it.name in allowed }
     }
 
