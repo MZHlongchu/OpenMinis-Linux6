@@ -146,4 +146,27 @@ class UpdateVersionLogicTest {
             UpdateVersionLogic.pickUpgrade(listOf(rolling(apk = null)), "1.16", 28, 0L),
         )
     }
+
+    @Test
+    fun `stripReleaseMetadata drops version lines`() {
+        val raw = "Rolling Android build.\n\n- versionName: `1.17-linux`\n- versionCode: 29"
+        assertEquals("Rolling Android build.", UpdateVersionLogic.stripReleaseMetadata(raw))
+    }
+
+    @Test
+    fun `resolveChangelog uses tagged notes when rolling body is metadata`() {
+        val notes = "## Changes\n- chat video generation in-session\n- Videos API fallbacks"
+        val rollingRel = rolling(code = 57, name = "1.36.4-linux")
+        val tag = tagged("1.36.4-linux").copy(changelog = notes)
+        val resolved = UpdateVersionLogic.resolveChangelog(rollingRel, listOf(rollingRel, tag))
+        assertTrue(resolved.contains("chat video generation"))
+        assertFalse(resolved.contains("versionCode"))
+    }
+
+    @Test
+    fun `resolveChangelog keeps long notes on the chosen release`() {
+        val notes = "# Minis Ultra 1.36.4\n\n" + ("x".repeat(80))
+        val c = tagged("1.36.4-linux").copy(changelog = notes)
+        assertEquals(notes, UpdateVersionLogic.resolveChangelog(c, listOf(c)))
+    }
 }

@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.Fullscreen
+import androidx.compose.material.icons.outlined.FullscreenExit
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -38,6 +40,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.R
@@ -59,6 +62,9 @@ import kotlinx.coroutines.launch
  * [TokenUsageSheet] passes 0.5f to match iOS's `.medium` detent
  * (AIChatView.swift:508). The fraction is clamped to (0, 1] so callers can't
  * accidentally collapse the sheet to nothing.
+ *
+ * [closeOnStart] / [showExpandButton] are for browser-style chrome: close on
+ * the left, expand-to-fullscreen on the right.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -67,6 +73,8 @@ fun StandardChatSheet(
     onDismiss: () -> Unit,
     leadingAction: (@Composable () -> Unit)? = null,
     heightFraction: Float = 0.9f,
+    closeOnStart: Boolean = false,
+    showExpandButton: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -125,6 +133,22 @@ fun StandardChatSheet(
                 title = title,
                 onDismiss = onDismiss,
                 leadingAction = leadingAction,
+                closeOnStart = closeOnStart,
+                expanded = expanded,
+                onToggleExpand = if (showExpandButton) {
+                    {
+                        val next = !expanded
+                        expanded = next
+                        scope.launch {
+                            fractionAnim.animateTo(
+                                if (next) 1f else baseFraction,
+                                spring(stiffness = Spring.StiffnessMedium),
+                            )
+                        }
+                    }
+                } else {
+                    null
+                },
             )
             HorizontalDivider(thickness = 0.5.dp, color = ChatColors.separator)
             Box(modifier = Modifier.fillMaxSize()) {
@@ -173,15 +197,19 @@ private fun CompactDragHandle(
 }
 
 /**
- * Shared header row used by all chat sheets — close button on the right,
- * centered title, and an optional leading slot. Reserving a 48.dp slot on the
- * left when [leadingAction] is null keeps the title optically centered.
+ * Shared header row used by all chat sheets. Default: optional leading slot,
+ * centered title, close on the right. [closeOnStart] moves close to the left
+ * (browser chrome); [onToggleExpand] puts a fullscreen control on the right.
+ * 48.dp spacers keep the title optically centered when a side is empty.
  */
 @Composable
 fun StandardChatSheetHeader(
     title: String,
     onDismiss: () -> Unit,
     leadingAction: (@Composable () -> Unit)? = null,
+    closeOnStart: Boolean = false,
+    expanded: Boolean = false,
+    onToggleExpand: (() -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier
@@ -189,7 +217,10 @@ fun StandardChatSheetHeader(
             .padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (leadingAction != null) {
+        if (closeOnStart) {
+            SheetCloseButton(onDismiss)
+            if (leadingAction != null) leadingAction()
+        } else if (leadingAction != null) {
             leadingAction()
         } else {
             Spacer(modifier = Modifier.size(48.dp))
@@ -200,14 +231,37 @@ fun StandardChatSheetHeader(
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold,
             color = ChatColors.primaryText,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(2f, fill = false),
         )
         Spacer(modifier = Modifier.weight(1f))
-        IconButton(onClick = onDismiss) {
-            Icon(
-                imageVector = Icons.Default.Close,
-                contentDescription = stringResource(R.string.standard_sheet_close),
-                tint = ChatColors.secondaryText,
-            )
+        if (onToggleExpand != null) {
+            IconButton(onClick = onToggleExpand) {
+                Icon(
+                    imageVector = if (expanded) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen,
+                    contentDescription = stringResource(
+                        if (expanded) R.string.standard_sheet_collapse else R.string.standard_sheet_expand,
+                    ),
+                    tint = ChatColors.secondaryText,
+                )
+            }
+        } else if (closeOnStart) {
+            Spacer(modifier = Modifier.size(48.dp))
         }
+        if (!closeOnStart) {
+            SheetCloseButton(onDismiss)
+        }
+    }
+}
+
+@Composable
+private fun SheetCloseButton(onDismiss: () -> Unit) {
+    IconButton(onClick = onDismiss) {
+        Icon(
+            imageVector = Icons.Default.Close,
+            contentDescription = stringResource(R.string.standard_sheet_close),
+            tint = ChatColors.secondaryText,
+        )
     }
 }

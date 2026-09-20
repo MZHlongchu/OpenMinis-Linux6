@@ -52,6 +52,7 @@
     <string name="check_update_available_title">Update Available</string>
     <string name="check_update_available_subtitle">%1$s → %2$s</string>
     <string name="check_update_changelog_header">What\'s New</string>
+    <string name="check_update_changelog_empty">No release notes were published for this build.</string>
     <string name="check_update_download_button">Download &amp; Install</string>
     <string name="check_update_downloading">Downloading… %1$d%%</string>
     <string name="check_update_download_failed">Download failed: %1$s</string>
@@ -496,6 +497,8 @@
     <string name="speech_lang_picker_empty">No languages available from the active recognizer.</string>
     <string name="speech_lang_picker_selected">Selected</string>
     <string name="standard_sheet_close">Close</string>
+    <string name="standard_sheet_expand">Expand fullscreen</string>
+    <string name="standard_sheet_collapse">Exit fullscreen</string>
     <string name="token_usage_sheet_title">Session Token Usage</string>
     <string name="token_usage_section_context">Context</string>
     <string name="token_usage_context_used">Context Used</string>
@@ -688,7 +691,8 @@
     <string name="browser_close_tab">Close tab</string>
     <string name="browser_search_placeholder">Search or enter URL</string>
     <string name="browser_no_tab_open">No browser tab open</string>
-    <string name="browser_enter_url_hint">Enter a URL above to start browsing</string>
+    <string name="browser_enter_url_hint">Enter a URL below to start browsing</string>
+    <string name="browser_open_external">Open in browser</string>
     <string name="browser_nav_back">Back</string>
     <string name="browser_nav_forward">Forward</string>
     <string name="browser_stop">Stop</string>
@@ -2145,12 +2149,26 @@
     <string name="compact_progress_split">Compacting… %1$d s · summarizing in segments (%2$d/%3$d)</string>
 <!-- 1.15-linux -->
     <string name="settings_web_search">Web search</string>
-    <string name="settings_web_search_subtitle">DuckDuckGo, SearXNG, or Bing</string>
+    <string name="settings_web_search_subtitle">DuckDuckGo, SearXNG, Bing, or custom</string>
     <string name="web_search_engine_header">Engine</string>
-    <string name="web_search_engine_footer">DuckDuckGo needs no key. SearXNG needs an instance URL. Bing needs an API key. Failed searches fall back to DuckDuckGo, then suggest browser_use.</string>
+    <string name="web_search_engine_footer">Tap an engine to configure it. DuckDuckGo needs no key. SearXNG needs an instance URL. Bing needs an API key. Custom uses a URL template with {query}. Failed searches fall back to DuckDuckGo, then suggest browser_use.</string>
     <string name="web_search_engine_ddg">DuckDuckGo HTML</string>
     <string name="web_search_engine_searxng">SearXNG</string>
     <string name="web_search_engine_bing">Bing Web Search API</string>
+    <string name="web_search_engine_custom">Custom</string>
+    <string name="web_search_use_engine">Use this engine</string>
+    <string name="web_search_in_use">In use</string>
+    <string name="web_search_no_key_needed">No API key needed</string>
+    <string name="web_search_not_configured">Not configured</string>
+    <string name="web_search_key_saved">API key saved</string>
+    <string name="web_search_ddg_detail">HTML search with no credentials. Default engine.</string>
+    <string name="web_search_searxng_detail">Public or self-hosted SearXNG instance. Paste the search endpoint or site origin.</string>
+    <string name="web_search_bing_detail">Microsoft Bing Web Search v7 subscription key.</string>
+    <string name="web_search_custom_url">Search URL</string>
+    <string name="web_search_custom_key">API key (optional)</string>
+    <string name="web_search_custom_key_placeholder">Leave blank if unused</string>
+    <string name="web_search_custom_key_header">API key header (optional)</string>
+    <string name="web_search_custom_detail">Use {query} (and optional {key}) in the URL. JSON arrays named results/items/data are parsed; HTML falls back to DuckDuckGo-style cards. If the header is Authorization, the key is sent as Bearer.</string>
     <string name="web_search_credentials_header">Endpoints</string>
     <string name="web_search_searxng_url">SearXNG URL</string>
     <string name="web_search_bing_key">Bing subscription key</string>

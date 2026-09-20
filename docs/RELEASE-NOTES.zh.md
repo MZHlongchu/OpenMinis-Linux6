@@ -1,3 +1,21 @@
+# OpenMinis-Linux 1.36.5-linux
+
+- versionCode **58**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.4-linux：
+
+- **浏览器**：地址栏和 UA/设置移到底栏；关闭在左、全屏在右；默认高度 80%。
+- **检查更新**：滚动包正文过短时从同版本 tag 补更新说明；选包按版本互比。
+- **网页搜索**：自定义引擎（`{query}` / `{key}`）；API 与密钥改到各引擎二级页。
+
+---
+
 # OpenMinis-Linux 1.36.4-linux
 
 - versionCode **57**

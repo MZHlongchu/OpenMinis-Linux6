@@ -531,7 +531,7 @@
     <string name="browser_close_tab">關閉分頁</string>
     <string name="browser_search_placeholder">搜尋或輸入網址</string>
     <string name="browser_no_tab_open">沒有開啟的分頁</string>
-    <string name="browser_enter_url_hint">請在上方輸入網址開始瀏覽</string>
+    <string name="browser_enter_url_hint">請在下方輸入網址開始瀏覽</string>
     <string name="browser_nav_back">後退</string>
     <string name="browser_nav_forward">前進</string>
     <string name="browser_stop">停止</string>

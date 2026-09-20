@@ -4,7 +4,7 @@ import android.content.Context
 
 /**
  * User-configurable search backend for [WebSearchTool].
- * DuckDuckGo stays the default (no key). SearXNG / Bing are opt-in.
+ * DuckDuckGo stays the default (no key). SearXNG / Bing / custom are opt-in.
  */
 object WebSearchSettings {
     const val PREFS = "web_search_prefs"
@@ -12,11 +12,15 @@ object WebSearchSettings {
     const val KEY_SEARXNG_URL = "searxng_url"
     const val KEY_BING_KEY = "bing_key"
     const val KEY_FALLBACK = "fallback_ddg"
+    const val KEY_CUSTOM_URL = "custom_url"
+    const val KEY_CUSTOM_KEY = "custom_key"
+    const val KEY_CUSTOM_KEY_HEADER = "custom_key_header"
 
     enum class Engine(val id: String) {
         DDG("ddg"),
         SEARXNG("searxng"),
         BING("bing"),
+        CUSTOM("custom"),
         ;
 
         companion object {
@@ -44,6 +48,27 @@ object WebSearchSettings {
 
     fun setBingKey(context: Context, key: String) {
         prefs(context).edit().putString(KEY_BING_KEY, key.trim()).apply()
+    }
+
+    fun customUrl(context: Context): String =
+        prefs(context).getString(KEY_CUSTOM_URL, "")?.trim().orEmpty()
+
+    fun setCustomUrl(context: Context, url: String) {
+        prefs(context).edit().putString(KEY_CUSTOM_URL, url.trim()).apply()
+    }
+
+    fun customKey(context: Context): String =
+        prefs(context).getString(KEY_CUSTOM_KEY, "")?.trim().orEmpty()
+
+    fun setCustomKey(context: Context, key: String) {
+        prefs(context).edit().putString(KEY_CUSTOM_KEY, key.trim()).apply()
+    }
+
+    fun customKeyHeader(context: Context): String =
+        prefs(context).getString(KEY_CUSTOM_KEY_HEADER, "")?.trim().orEmpty()
+
+    fun setCustomKeyHeader(context: Context, header: String) {
+        prefs(context).edit().putString(KEY_CUSTOM_KEY_HEADER, header.trim()).apply()
     }
 
     fun fallbackEnabled(context: Context): Boolean =

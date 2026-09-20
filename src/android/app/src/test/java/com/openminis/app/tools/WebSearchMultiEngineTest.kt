@@ -36,5 +36,36 @@ class WebSearchMultiEngineTest {
     fun engineFromIdDefaultsToDdg() {
         assertEquals(WebSearchSettings.Engine.SEARXNG, WebSearchSettings.Engine.fromId("searxng"))
         assertEquals(WebSearchSettings.Engine.DDG, WebSearchSettings.Engine.fromId("nope"))
+        assertEquals(WebSearchSettings.Engine.CUSTOM, WebSearchSettings.Engine.fromId("custom"))
+    }
+
+    @Test
+    fun expandCustomUrlReplacesQueryAndKey() {
+        val url = WebSearchTool.expandCustomUrl(
+            "https://api.example/search?q={query}&token={key}",
+            "hello world",
+            "ab c",
+        )
+        assertEquals("https://api.example/search?q=hello+world&token=ab+c", url)
+    }
+
+    @Test
+    fun expandCustomUrlAppendsQueryWhenPlaceholderMissing() {
+        val url = WebSearchTool.expandCustomUrl("https://api.example/search", "kotlin")
+        assertEquals("https://api.example/search?q=kotlin", url)
+    }
+
+    @Test
+    fun parseGenericSearchJsonItems() {
+        val json = """
+            {"items":[
+              {"title":"Delta","link":"https://d.example","snippet":"cse hit"}
+            ]}
+        """.trimIndent()
+        val results = WebSearchTool.parseGenericSearchJson(json, max = 5)
+        assertEquals(1, results.size)
+        assertEquals("Delta", results[0].title)
+        assertEquals("https://d.example", results[0].url)
+        assertTrue(results[0].snippet.contains("cse"))
     }
 }

@@ -1,5 +1,7 @@
 package com.openminis.app.ui.browser
 
+import android.content.Intent
+import android.net.Uri
 import com.openminis.app.R
 import androidx.compose.ui.res.stringResource
 import androidx.compose.animation.AnimatedVisibility
@@ -20,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -39,6 +42,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
@@ -138,23 +142,11 @@ fun BrowserSheet(
     StandardChatSheet(
         title = pageTitle.ifEmpty { stringResource(R.string.browser_title) },
         onDismiss = onDismiss,
-        leadingAction = {
-            // UA-profile icon doubles as the entry point to settings, matching
-            // the prior centered-title-with-icon affordance.
-            IconButton(onClick = { showSettings = true }) {
-                Icon(
-                    when (userAgentProfile) {
-                        UserAgentProfile.MOBILE_CHROME -> Icons.Default.PhoneAndroid
-                        UserAgentProfile.DESKTOP_CHROME -> Icons.Default.Computer
-                        UserAgentProfile.CUSTOM -> Icons.Default.Edit
-                    },
-                    contentDescription = stringResource(R.string.browser_settings_title),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        },
+        heightFraction = 0.8f,
+        closeOnStart = true,
+        showExpandButton = true,
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize().imePadding()) {
             // ── Tab Bar with leading "+" and trailing History icon ──
             // (Add/History flank the tabs row so all tab-related controls
             // sit on one line, leaving the URL bar uncluttered below.)
@@ -213,81 +205,6 @@ fun BrowserSheet(
                     modifier = Modifier.size(36.dp),
                 ) {
                     Icon(Icons.Default.History, contentDescription = stringResource(R.string.browser_history_action), modifier = Modifier.size(20.dp))
-                }
-            }
-
-            // ── URL Bar ── (compact 36dp pill — OutlinedTextField defaults to
-            // ~56dp which dominates the sheet header; users want to spend the
-            // space on the WebView.)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(secondaryBg)
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(36.dp)
-                        .background(tertiaryBg, RoundedCornerShape(10.dp))
-                        .border(
-                            0.5.dp,
-                            MaterialTheme.colorScheme.outlineVariant,
-                            RoundedCornerShape(10.dp),
-                        )
-                        .padding(horizontal = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    BrowserAddressBarIcon(isLoading = isLoading, accent = accent)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Box(modifier = Modifier.weight(1f)) {
-                        androidx.compose.foundation.text.BasicTextField(
-                            value = urlInput,
-                            onValueChange = { urlInput = it },
-                            singleLine = true,
-                            enabled = !isAgentBusy,
-                            textStyle = LocalTextStyle.current.copy(
-                                fontSize = 13.sp,
-                                fontFamily = FontFamily.Monospace,
-                                color = MaterialTheme.colorScheme.onSurface,
-                            ),
-                            cursorBrush = androidx.compose.ui.graphics.SolidColor(accent),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                            keyboardActions = KeyboardActions(onGo = {
-                                val trimmed = urlInput.trim()
-                                if (trimmed.isNotEmpty()) {
-                                    val normalized = normalizeURLInput(trimmed)
-                                    selectedTab?.manager?.loadURL(normalized)
-                                    urlInput = normalized
-                                }
-                                keyboardController?.hide()
-                                focusManager.clearFocus()
-                            }),
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        if (urlInput.isEmpty()) {
-                            Text(
-                                stringResource(R.string.browser_search_placeholder),
-                                fontSize = 13.sp,
-                                fontFamily = FontFamily.Monospace,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                    if (isLoading) {
-                        Spacer(modifier = Modifier.width(4.dp))
-                        IconButton(
-                            onClick = { selectedTab?.manager?.stopLoading() },
-                            modifier = Modifier.size(28.dp),
-                        ) {
-                            Icon(
-                                Icons.Default.Close,
-                                contentDescription = stringResource(R.string.browser_stop),
-                                modifier = Modifier.size(14.dp),
-                            )
-                        }
-                    }
                 }
             }
 
@@ -376,13 +293,84 @@ fun BrowserSheet(
                 }
             }
 
-            // ── Bottom Toolbar ──
+            // ── Bottom chrome: address bar + nav (settings / UA live here) ──
             HorizontalDivider()
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(secondaryBg)
-                    .padding(vertical = 10.dp),
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(36.dp)
+                        .background(tertiaryBg, RoundedCornerShape(10.dp))
+                        .border(
+                            0.5.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                            RoundedCornerShape(10.dp),
+                        )
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    BrowserAddressBarIcon(isLoading = isLoading, accent = accent)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Box(modifier = Modifier.weight(1f)) {
+                        androidx.compose.foundation.text.BasicTextField(
+                            value = urlInput,
+                            onValueChange = { urlInput = it },
+                            singleLine = true,
+                            enabled = !isAgentBusy,
+                            textStyle = LocalTextStyle.current.copy(
+                                fontSize = 13.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            ),
+                            cursorBrush = androidx.compose.ui.graphics.SolidColor(accent),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                            keyboardActions = KeyboardActions(onGo = {
+                                val trimmed = urlInput.trim()
+                                if (trimmed.isNotEmpty()) {
+                                    val normalized = normalizeURLInput(trimmed)
+                                    selectedTab?.manager?.loadURL(normalized)
+                                    urlInput = normalized
+                                }
+                                keyboardController?.hide()
+                                focusManager.clearFocus()
+                            }),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        if (urlInput.isEmpty()) {
+                            Text(
+                                stringResource(R.string.browser_search_placeholder),
+                                fontSize = 13.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    if (isLoading) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        IconButton(
+                            onClick = { selectedTab?.manager?.stopLoading() },
+                            modifier = Modifier.size(28.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = stringResource(R.string.browser_stop),
+                                modifier = Modifier.size(14.dp),
+                            )
+                        }
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(secondaryBg)
+                    .padding(vertical = 4.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -398,27 +386,23 @@ fun BrowserSheet(
                     enabled = canGoForward && !isAgentBusy,
                     onClick = { selectedTab?.manager?.goForward() },
                 )
-                // [T-android-browser-download-ux] Downloads entry: shows while
-                // the session has ANY download records, disappears when the
-                // user clears the last one; the badge counts in-flight +
-                // unviewed terminal entries and hides at 0 (iOS v2 spec).
-                if (downloadEntries.isNotEmpty()) {
-                    val badgeCount = tabPool.downloadBadgeCount(downloadEntries)
-                    androidx.compose.material3.BadgedBox(
-                        badge = {
-                            if (badgeCount > 0) {
-                                androidx.compose.material3.Badge { Text("$badgeCount") }
-                            }
-                        },
-                    ) {
-                        ToolbarIcon(
-                            icon = Icons.Default.Download,
-                            contentDesc = stringResource(R.string.browser_downloads_title),
-                            enabled = true,
-                            tint = accent,
-                            onClick = { showDownloads = true },
-                        )
-                    }
+                // [T-android-browser-download-ux] Always show downloads; badge
+                // counts in-flight + unviewed terminal entries and hides at 0.
+                androidx.compose.material3.BadgedBox(
+                    badge = {
+                        val badgeCount = tabPool.downloadBadgeCount(downloadEntries)
+                        if (badgeCount > 0) {
+                            androidx.compose.material3.Badge { Text("$badgeCount") }
+                        }
+                    },
+                ) {
+                    ToolbarIcon(
+                        icon = Icons.Default.Download,
+                        contentDesc = stringResource(R.string.browser_downloads_title),
+                        enabled = true,
+                        tint = if (downloadEntries.isNotEmpty()) accent else null,
+                        onClick = { showDownloads = true },
+                    )
                 }
                 if (isLoading) {
                     ToolbarIcon(
@@ -437,6 +421,30 @@ fun BrowserSheet(
                         onClick = { selectedTab?.manager?.reload() },
                     )
                 }
+                ToolbarIcon(
+                    icon = when (userAgentProfile) {
+                        UserAgentProfile.MOBILE_CHROME -> Icons.Default.PhoneAndroid
+                        UserAgentProfile.DESKTOP_CHROME -> Icons.Default.Computer
+                        UserAgentProfile.CUSTOM -> Icons.Default.Edit
+                    },
+                    contentDesc = stringResource(R.string.browser_settings_title),
+                    enabled = true,
+                    onClick = { showSettings = true },
+                )
+                ToolbarIcon(
+                    icon = Icons.Default.OpenInBrowser,
+                    contentDesc = stringResource(R.string.browser_open_external),
+                    enabled = currentURL.startsWith("http://") || currentURL.startsWith("https://"),
+                    onClick = {
+                        runCatching {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(currentURL)).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                },
+                            )
+                        }
+                    },
+                )
             }
         }
     }

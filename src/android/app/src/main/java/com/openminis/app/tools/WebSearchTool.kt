@@ -3,6 +3,7 @@ package com.openminis.app.tools
 import android.content.Context
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.AgentToolParam
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -128,6 +129,34 @@ object WebSearchTool {
                     val parsed = parseBingJson(body, max)
                     Attempt(parsed, if (parsed.isEmpty()) "Bing returned no results" else null)
                 }
+                WebSearchSettings.Engine.CUSTOM -> {
+                    val template = context?.let { WebSearchSettings.customUrl(it) }.orEmpty()
+                    if (template.isEmpty()) return Attempt(emptyList(), "Custom search URL is not configured")
+                    val key = context?.let { WebSearchSettings.customKey(it) }.orEmpty()
+                    val headerName = context?.let { WebSearchSettings.customKeyHeader(it) }.orEmpty()
+                    val endpoint = expandCustomUrl(template, query, key)
+                    val headers = linkedMapOf("Accept" to "application/json, text/html")
+                    if (key.isNotEmpty() && !template.contains("{key}", ignoreCase = true)) {
+                        val h = headerName.ifBlank { "Authorization" }
+                        val v = if (h.equals("Authorization", ignoreCase = true) &&
+                            !key.startsWith("Bearer ", ignoreCase = true)
+                        ) {
+                            "Bearer $key"
+                        } else {
+                            key
+                        }
+                        headers[h] = v
+                    }
+                    val body = fetchUrl(endpoint, extraHeaders = headers, context = context)
+                        ?: return Attempt(emptyList(), "empty response from custom search")
+                    val trimmed = body.trimStart()
+                    val parsed = if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+                        parseGenericSearchJson(body, max)
+                    } else {
+                        parseHtml(body, max)
+                    }
+                    Attempt(parsed, if (parsed.isEmpty()) "Custom search returned no results" else null)
+                }
             }
         } catch (e: Exception) {
             Attempt(emptyList(), e.message ?: engine.id)
@@ -159,6 +188,56 @@ object WebSearchTool {
             val title = o.optString("name").trim()
             if (url.isBlank() || title.isBlank()) continue
             out += Result(title, url, o.optString("snippet").trim())
+            if (out.size >= max) break
+        }
+        return out
+    }
+
+    internal fun expandCustomUrl(template: String, query: String, key: String = ""): String {
+        var url = template.trim()
+        val q = enc(query)
+        val k = URLEncoder.encode(key, StandardCharsets.UTF_8.name())
+        url = url.replace("{query}", q, ignoreCase = true)
+            .replace("{q}", q, ignoreCase = true)
+            .replace("{key}", k, ignoreCase = true)
+        if (!template.contains("{query}", ignoreCase = true) &&
+            !template.contains("{q}", ignoreCase = true)
+        ) {
+            val sep = if (url.contains('?')) "&" else "?"
+            url = "$url${sep}q=$q"
+        }
+        return url
+    }
+
+    internal fun parseGenericSearchJson(json: String, max: Int): List<Result> {
+        val trimmed = json.trim()
+        if (trimmed.startsWith("[")) {
+            return parseResultArray(JSONArray(trimmed), max)
+        }
+        val fromSearx = parseSearxJson(json, max)
+        if (fromSearx.isNotEmpty()) return fromSearx
+        val fromBing = parseBingJson(json, max)
+        if (fromBing.isNotEmpty()) return fromBing
+        val root = JSONObject(json)
+        for (key in arrayOf("items", "data", "organic", "organic_results", "results")) {
+            val arr = root.optJSONArray(key) ?: continue
+            val parsed = parseResultArray(arr, max)
+            if (parsed.isNotEmpty()) return parsed
+        }
+        return emptyList()
+    }
+
+    private fun parseResultArray(arr: JSONArray, max: Int): List<Result> {
+        val out = ArrayList<Result>(max)
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val url = o.optString("url").ifBlank { o.optString("link") }
+                .ifBlank { o.optString("href") }.trim()
+            val title = o.optString("title").ifBlank { o.optString("name") }.trim()
+            if (url.isBlank() || title.isBlank()) continue
+            val snippet = o.optString("snippet").ifBlank { o.optString("content") }
+                .ifBlank { o.optString("description") }.trim()
+            out += Result(title, url, snippet)
             if (out.size >= max) break
         }
         return out

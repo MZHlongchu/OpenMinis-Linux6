@@ -48,6 +48,7 @@
     <string name="check_update_available_title">发现新版本</string>
     <string name="check_update_available_subtitle">%1$s → %2$s</string>
     <string name="check_update_changelog_header">更新内容</string>
+    <string name="check_update_changelog_empty">此版本未发布更新说明。</string>
     <string name="check_update_download_button">下载并安装</string>
     <string name="check_update_downloading">下载中… %1$d%%</string>
     <string name="check_update_download_failed">下载失败：%1$s</string>
@@ -450,6 +451,8 @@
     <string name="speech_lang_picker_empty">当前识别引擎没有可用的语言。</string>
     <string name="speech_lang_picker_selected">已选中</string>
     <string name="standard_sheet_close">关闭</string>
+    <string name="standard_sheet_expand">展开全屏</string>
+    <string name="standard_sheet_collapse">退出全屏</string>
     <string name="token_usage_sheet_title">会话 Token 用量</string>
     <string name="token_usage_section_context">上下文</string>
     <string name="token_usage_context_used">已用上下文</string>
@@ -627,7 +630,8 @@
     <string name="browser_close_tab">关闭标签页</string>
     <string name="browser_search_placeholder">搜索或输入网址</string>
     <string name="browser_no_tab_open">没有打开的标签页</string>
-    <string name="browser_enter_url_hint">请在上方输入网址开始浏览</string>
+    <string name="browser_enter_url_hint">请在下方输入网址开始浏览</string>
+    <string name="browser_open_external">在系统浏览器中打开</string>
     <string name="browser_nav_back">后退</string>
     <string name="browser_nav_forward">前进</string>
     <string name="browser_stop">停止</string>
@@ -1972,12 +1976,26 @@
     <string name="compact_progress_split">正在压缩… %1$d 秒 · 分段摘要中（%2$d/%3$d）</string>
 <!-- 1.15-linux -->
     <string name="settings_web_search">网络搜索</string>
-    <string name="settings_web_search_subtitle">DuckDuckGo、SearXNG 或 Bing</string>
+    <string name="settings_web_search_subtitle">DuckDuckGo、SearXNG、Bing 或自定义</string>
     <string name="web_search_engine_header">搜索引擎</string>
-    <string name="web_search_engine_footer">DuckDuckGo 无需密钥。SearXNG 需要实例 URL。Bing 需要 API 密钥。失败时回退 DuckDuckGo，再建议用 browser_use 打开具体网址。</string>
+    <string name="web_search_engine_footer">点进引擎即可配置。DuckDuckGo 无需密钥。SearXNG 需要实例 URL。Bing 需要 API 密钥。自定义使用带 {query} 的地址模板。失败时回退 DuckDuckGo，再建议用 browser_use 打开具体网址。</string>
     <string name="web_search_engine_ddg">DuckDuckGo HTML</string>
     <string name="web_search_engine_searxng">SearXNG</string>
     <string name="web_search_engine_bing">Bing 网页搜索 API</string>
+    <string name="web_search_engine_custom">自定义</string>
+    <string name="web_search_use_engine">使用此引擎</string>
+    <string name="web_search_in_use">当前使用</string>
+    <string name="web_search_no_key_needed">无需 API 密钥</string>
+    <string name="web_search_not_configured">尚未配置</string>
+    <string name="web_search_key_saved">已保存密钥</string>
+    <string name="web_search_ddg_detail">无需凭证的 HTML 搜索，默认引擎。</string>
+    <string name="web_search_searxng_detail">公共或自建 SearXNG 实例。填写搜索接口或站点根地址。</string>
+    <string name="web_search_bing_detail">Microsoft Bing Web Search v7 订阅密钥。</string>
+    <string name="web_search_custom_url">搜索地址</string>
+    <string name="web_search_custom_key">API 密钥（可选）</string>
+    <string name="web_search_custom_key_placeholder">不需要可留空</string>
+    <string name="web_search_custom_key_header">密钥请求头（可选）</string>
+    <string name="web_search_custom_detail">在地址中使用 {query}（以及可选的 {key}）。会解析 results/items/data 等 JSON 数组；HTML 则按 DuckDuckGo 卡片解析。请求头为 Authorization 时密钥会以 Bearer 发送。</string>
     <string name="web_search_credentials_header">接口</string>
     <string name="web_search_searxng_url">SearXNG 地址</string>
     <string name="web_search_bing_key">Bing 订阅密钥</string>

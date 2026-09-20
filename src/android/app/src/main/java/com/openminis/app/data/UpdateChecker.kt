@@ -139,18 +139,18 @@ object UpdateChecker {
                     if (r.optBoolean("draft", false)) continue
                     val tag = r.optString("tag_name")
                     if (tag.isEmpty()) continue
-                    val body = r.optString("body", "")
+                    val releaseBody = if (r.isNull("body")) "" else r.optString("body", "")
                     val (apkUrl, apkSize, apkUpdatedAtMs) = findApkAsset(r.optJSONArray("assets"))
                     candidates += UpdateVersionLogic.ReleaseCandidate(
                         tagName = tag,
                         versionName = UpdateVersionLogic.normalizeTag(tag),
                         releaseName = r.optString("name").ifEmpty { tag },
-                        changelog = body,
+                        changelog = releaseBody,
                         apkUrl = apkUrl,
                         apkSize = apkSize,
                         apkUpdatedAtMs = apkUpdatedAtMs,
-                        bodyVersionCode = UpdateVersionLogic.parseVersionCodeFromBody(body),
-                        bodyVersionName = UpdateVersionLogic.parseVersionNameFromBody(body),
+                        bodyVersionCode = UpdateVersionLogic.parseVersionCodeFromBody(releaseBody),
+                        bodyVersionName = UpdateVersionLogic.parseVersionNameFromBody(releaseBody),
                     )
                 }
                 AppLogger.info(
@@ -204,7 +204,7 @@ object UpdateChecker {
                         tagName = upgradeCandidate.tagName,
                         versionName = shown,
                         releaseName = upgradeCandidate.releaseName,
-                        changelog = upgradeCandidate.changelog,
+                        changelog = UpdateVersionLogic.resolveChangelog(upgradeCandidate, candidates),
                         apkUrl = upgradeCandidate.apkUrl!!,
                         apkSizeBytes = upgradeCandidate.apkSize,
                     )

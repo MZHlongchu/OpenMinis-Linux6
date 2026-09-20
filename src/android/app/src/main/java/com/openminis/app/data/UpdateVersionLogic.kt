@@ -121,10 +121,22 @@ object UpdateVersionLogic {
             isNewerThanLocal(it, localVer, localCode, localLastUpdateMs)
         }
         if (newer.isEmpty()) return null
+        // Compare candidates to each other. Ranking everyone against "0" collapses
+        // every version > 0 to the same Int and then bodyVersionCode would always
+        // prefer a rolling build over a higher semver tag.
         return newer.maxWithOrNull(
-            compareBy<ReleaseCandidate> { compareVersions(displayVersion(it), "0") }
-                .thenBy { it.bodyVersionCode ?: -1 }
-                .thenBy { it.apkUpdatedAtMs },
+            Comparator { a, b ->
+                val byName = compareVersions(
+                    normalizeTag(displayVersion(a)),
+                    normalizeTag(displayVersion(b)),
+                )
+                if (byName != 0) {
+                    byName
+                } else {
+                    val byCode = (a.bodyVersionCode ?: -1).compareTo(b.bodyVersionCode ?: -1)
+                    if (byCode != 0) byCode else a.apkUpdatedAtMs.compareTo(b.apkUpdatedAtMs)
+                }
+            },
         )
     }
 
@@ -132,5 +144,44 @@ object UpdateVersionLogic {
         val semver = candidates.filter { !isRollingTag(it.tagName) }
         val pool = semver.ifEmpty { candidates }
         return pool.maxWithOrNull(compareBy { compareVersions(it.versionName, "0") })
+    }
+
+    /** Drop CI metadata lines so the dialog can show real release notes. */
+    fun stripReleaseMetadata(body: String): String {
+        if (body.isBlank() || body.equals("null", ignoreCase = true)) return ""
+        val metadata = Regex(
+            """(?i)^\s*(?:[-*]\s*)?(?:versionCode|versionName|applicationId)\s*[:=].*$""",
+        )
+        return body.replace("\r\n", "\n")
+            .lineSequence()
+            .filterNot { metadata.matches(it) }
+            .joinToString("\n")
+            .trim()
+    }
+
+    /**
+     * Rolling `android-latest` bodies are often just versionCode/versionName.
+     * Prefer the matching tagged release's notes when the chosen body is thin.
+     */
+    fun resolveChangelog(chosen: ReleaseCandidate, all: List<ReleaseCandidate>): String {
+        val own = stripReleaseMetadata(chosen.changelog)
+        val target = normalizeTag(displayVersion(chosen))
+        fun sameVersion(other: ReleaseCandidate): Boolean {
+            if (other.tagName == chosen.tagName) return false
+            if (isRollingTag(other.tagName)) return false
+            return normalizeTag(other.versionName) == target ||
+                other.bodyVersionName?.let { normalizeTag(it) } == target ||
+                normalizeTag(other.tagName) == target
+        }
+        val sibling = all.firstNotNullOfOrNull { other ->
+            if (!sameVersion(other)) null
+            else stripReleaseMetadata(other.changelog).takeIf { it.isNotBlank() }
+        }
+        return when {
+            own.length >= 80 -> own
+            sibling != null && sibling.length > own.length -> sibling
+            own.isNotBlank() -> own
+            else -> sibling.orEmpty()
+        }
     }
 }
