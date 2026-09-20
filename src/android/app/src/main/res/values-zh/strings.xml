@@ -1201,7 +1201,7 @@
     <string name="modeldetail_image_output">图片输出</string>
     <string name="modeldetail_audio_output">音频输出</string>
     <string name="modeldetail_video_output">视频输出</string>
-    <string name="modeldetail_output_modality_footer">仅对生成图片或音频的模型启用（例如 gpt-image-1、TTS）。文本输出始终可用。</string>
+    <string name="modeldetail_output_modality_footer">仅对生成图片、音频或视频的模型启用（例如 gpt-image-1、TTS、Sora）。文本输出始终可用。</string>
     <string name="quicktest_title">快速测试</string>
     <string name="quicktest_button">快速测试</string>
     <string name="quicktest_footer">针对该模型的主要能力运行一次快速测试。</string>

@@ -34,6 +34,7 @@ import com.openminis.app.data.model.hasImageInput
 import com.openminis.app.data.model.hasVoiceModality
 import com.openminis.app.data.model.isVoiceTemplateSeedShape
 import com.openminis.app.data.model.withInferredVoiceModality
+import com.openminis.app.data.model.withInferredVideoModality
 import com.openminis.app.provider.ModelReleaseIndex
 import com.openminis.app.provider.ModelsDevApi
 import com.openminis.app.provider.anthropic.AnthropicModelsApi
@@ -1115,7 +1116,7 @@ class ProviderRepository(private val context: Context) {
             val prior = existingByModelId[model.id]
             // Dedicated ASR/TTS id/name patterns fill the exact voice shape when
             // the API returned no modality info; the template's shape wins last.
-            var resolved = model.withInferredVoiceModality()
+            var resolved = model.withInferredVoiceModality().withInferredVideoModality()
             templateVoiceModelById[model.id]?.let { tplModel ->
                 resolved = resolved.copy(
                     inputModalities = tplModel.inputModalities,

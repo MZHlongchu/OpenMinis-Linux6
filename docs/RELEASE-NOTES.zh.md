@@ -1,3 +1,21 @@
+# OpenMinis-Linux 1.36.4-linux
+
+- versionCode **57**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.3-linux：
+
+- **聊天生成视频**：纯视频模型（Sora / Veo / Kling 等，或打开「视频输出」）发消息即按提示词出片；文本会话可通过 `generate_video` 工具调用已配置的视频模型。mp4 落到气泡 `minis://attachments/generated/` 播放。
+- **设置**：模型详情增加视频输出开关，保存不再冲掉 catalog 的 `video`。
+- **接口**：OpenAI 兼容 `POST /videos`（404 再试 `/video/generations`、`/videos/generations`），支持同步 url 与异步轮询 + `/content`。原生 Gemini Veo 未接。
+
+---
+
 # OpenMinis-Linux 1.36.3-linux
 
 - versionCode **56**

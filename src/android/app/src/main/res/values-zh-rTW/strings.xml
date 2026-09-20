@@ -1061,7 +1061,7 @@
     <string name="modeldetail_image_output">圖片輸出</string>
     <string name="modeldetail_audio_output">音訊輸出</string>
     <string name="modeldetail_video_output">影片輸出</string>
-    <string name="modeldetail_output_modality_footer">僅對生成圖片或音訊的模型啟用（例如 gpt-image-1、TTS）。文字輸出始終可用。</string>
+    <string name="modeldetail_output_modality_footer">僅對生成圖片、音訊或影片的模型啟用（例如 gpt-image-1、TTS、Sora）。文字輸出始終可用。</string>
     <string name="quicktest_title">快速測試</string>
     <string name="quicktest_button">快速測試</string>
     <string name="quicktest_footer">針對該模型的主要能力執行一次快速測試。</string>

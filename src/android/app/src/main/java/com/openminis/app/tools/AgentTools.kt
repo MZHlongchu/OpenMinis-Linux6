@@ -55,6 +55,7 @@ object AgentTools {
         add(SkillManageTool.definition())
         add(AskReasoningTool.definition())
         add(ProductMediaTools.generateImageDefinition())
+        add(ProductMediaTools.generateVideoDefinition())
         add(ProductMediaTools.describeImageDefinition())
         add(ProductMediaTools.transcribeAudioDefinition())
         add(ProductMediaTools.translateTextDefinition())

@@ -38,6 +38,7 @@ import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ModelGroup
 import com.openminis.app.data.model.RoutingStrategy
 import com.openminis.app.data.model.hasImageInput
+import com.openminis.app.data.model.isPureVideoGenerator
 import com.openminis.app.data.CapabilityRouter
 import com.openminis.app.data.ModelCapability
 import com.openminis.app.data.model.ThinkingLevel
@@ -6772,18 +6773,24 @@ class ChatViewModel(
                     val fallbackProviders = buildFallbackProviders(provider)
 
                     try {
-                        AppLogger.info(TAG_STREAM, "send runAgentLoop CALL")
-                        runAgentLoop(
-                            provider = provider,
-                            systemPrompt = systemPrompt,
-                            fallbackProviders = fallbackProviders,
-                            fallbackStrategy = activeFallbackStrategy,
-                        )
-                        AppLogger.info(TAG_STREAM, "send runAgentLoop RETURN normal")
-                        // Drain any prompts the user queued while this loop was running.
-                        // Skipped on cancel: cancelled job won't reach here.
-                        drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
-                        AppLogger.info(TAG_STREAM, "send drainQueuedPrompts RETURN")
+                        if (provider.model.isPureVideoGenerator) {
+                            AppLogger.info(TAG_STREAM, "send runVideoGenerationTurn CALL")
+                            runVideoGenerationTurn(provider, modelBody, activeSessionId)
+                            AppLogger.info(TAG_STREAM, "send runVideoGenerationTurn RETURN")
+                        } else {
+                            AppLogger.info(TAG_STREAM, "send runAgentLoop CALL")
+                            runAgentLoop(
+                                provider = provider,
+                                systemPrompt = systemPrompt,
+                                fallbackProviders = fallbackProviders,
+                                fallbackStrategy = activeFallbackStrategy,
+                            )
+                            AppLogger.info(TAG_STREAM, "send runAgentLoop RETURN normal")
+                            // Drain any prompts the user queued while this loop was running.
+                            // Skipped on cancel: cancelled job won't reach here.
+                            drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
+                            AppLogger.info(TAG_STREAM, "send drainQueuedPrompts RETURN")
+                        }
                     } catch (e: CancellationException) {
                         AppLogger.info(TAG_STREAM, "send runAgentLoop CANCELLED")
                         Log.d(TAG, "Agent loop cancelled")
@@ -9497,6 +9504,8 @@ class ChatViewModel(
                     com.openminis.app.tools.ProductMediaTools.GENERATE_IMAGE,
                     "Use an image-capable model in chat, or configure image generation in provider settings.",
                 )
+            com.openminis.app.tools.ProductMediaTools.GENERATE_VIDEO ->
+                executeGenerateVideoTool(argsJson, currentProvider, activeSessionId)
             com.openminis.app.tools.ProductMediaTools.TRANSCRIBE_AUDIO ->
                 com.openminis.app.tools.ProductMediaTools.notConfigured(
                     com.openminis.app.tools.ProductMediaTools.TRANSCRIBE_AUDIO,

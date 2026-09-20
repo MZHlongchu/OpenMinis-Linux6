@@ -1294,7 +1294,7 @@
     <string name="modeldetail_image_output">Image Output</string>
     <string name="modeldetail_audio_output">Audio Output</string>
     <string name="modeldetail_video_output">Video Output</string>
-    <string name="modeldetail_output_modality_footer">Enable for models that generate images or audio (e.g. gpt-image-1, TTS). Text output is always available.</string>
+    <string name="modeldetail_output_modality_footer">Enable for models that generate images, audio, or video (e.g. gpt-image-1, TTS, Sora). Text output is always available.</string>
     <!-- [T-android-model-quick-test] Quick Test sheet -->
     <string name="quicktest_title">Quick Test</string>
     <string name="quicktest_button">Quick Test</string>

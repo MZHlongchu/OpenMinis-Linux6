@@ -107,6 +107,14 @@ interface LLMProvider {
     }
 
     /**
+     * Generate a video clip from a text prompt. Default throws; OpenAI-compatible
+     * providers implement the Videos API / relay `/video/generations` shapes.
+     */
+    suspend fun generateVideo(prompt: String): LLMResponse {
+        throw LLMError.ProviderError("This provider does not support video generation")
+    }
+
+    /**
      * [T-android-thinking-level-arch] Provider implementations override THIS
      * (not [sendMessage]). The `thinkingLevel` received here has already been
      * clamped to the model's ceiling by [sendMessage] — implementations must NOT

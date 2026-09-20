@@ -6,13 +6,14 @@ import org.json.JSONObject
 
 /**
  * Product-facing media tools. describe_image aliases read_image.
- * generate_image / transcribe_audio / translate_text are executed from ChatViewModel
- * against the active provider when possible.
+ * generate_image / generate_video / transcribe_audio / translate_text are
+ * executed from ChatViewModel against the active provider when possible.
  *
  * Names match XINCODE-Public (GPL-3.0-or-later).
  */
 object ProductMediaTools {
     const val GENERATE_IMAGE = "generate_image"
+    const val GENERATE_VIDEO = "generate_video"
     const val DESCRIBE_IMAGE = "describe_image"
     const val TRANSCRIBE_AUDIO = "transcribe_audio"
     const val TRANSLATE_TEXT = "translate_text"
@@ -23,6 +24,17 @@ object ProductMediaTools {
         parameters = mapOf(
             "tool_title" to AgentToolParam("string", "A concise 5-10 word summary shown to the user."),
             "prompt" to AgentToolParam("string", "Image prompt."),
+        ),
+        required = listOf("tool_title", "prompt"),
+        propertyOrdering = listOf("tool_title", "prompt"),
+    )
+
+    fun generateVideoDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = GENERATE_VIDEO,
+        description = "Generate a short video from a text prompt using a configured video model (Sora, Veo, Kling, or an OpenAI-compatible /videos endpoint). Returns markdown that plays in chat.",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "A concise 5-10 word summary shown to the user."),
+            "prompt" to AgentToolParam("string", "Video prompt. Describe the shot, motion, and style."),
         ),
         required = listOf("tool_title", "prompt"),
         propertyOrdering = listOf("tool_title", "prompt"),

@@ -34,6 +34,7 @@ internal fun friendlyToolTitle(toolName: String): String = when (toolName) {
     "skill_manage" -> "Manage Skill"
     "ask_reasoning" -> "Ask Reasoning"
     "generate_image" -> "Generate Image"
+    "generate_video" -> "Generate Video"
     "describe_image" -> "Describe Image"
     "transcribe_audio" -> "Transcribe"
     "translate_text" -> "Translate"

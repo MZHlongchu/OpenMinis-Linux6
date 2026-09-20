@@ -91,6 +91,7 @@ fun ModelEntryDetailScreen(
     var videoInput by remember { mutableStateOf("video" in effectiveInput) }
     var imageOutput by remember { mutableStateOf("image" in effectiveOutput) }
     var audioOutput by remember { mutableStateOf("audio" in effectiveOutput) }
+    var videoOutput by remember { mutableStateOf("video" in effectiveOutput) }
     var autoCompactOn by remember {
         mutableStateOf(overrides.autoCompactEnabled ?: com.openminis.app.data.AutoCompactPrefs.isEnabled())
     }
@@ -140,6 +141,7 @@ fun ModelEntryDetailScreen(
                     val newOutputs = buildList {
                         if (imageOutput) add("image")
                         if (audioOutput) add("audio")
+                        if (videoOutput) add("video")
                     }
                     val newOverrides = ModelOverrides(
                         displayName = displayName.trim().takeIf { it.isNotEmpty() && it != baseModel.displayName },
@@ -335,6 +337,11 @@ fun ModelEntryDetailScreen(
                 title = stringResource(R.string.modeldetail_audio_output),
                 checked = audioOutput,
                 onCheckedChange = { audioOutput = it },
+            )
+            SettingsSwitchRow(
+                title = stringResource(R.string.modeldetail_video_output),
+                checked = videoOutput,
+                onCheckedChange = { videoOutput = it },
                 showDivider = false,
             )
         }

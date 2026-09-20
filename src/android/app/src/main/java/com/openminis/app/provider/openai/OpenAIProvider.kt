@@ -259,6 +259,10 @@ class OpenAIProvider private constructor(
      */
     var imageExtraBody: Map<String, Any?> = emptyMap()
 
+    /** Test hook: Videos API poll cadence (create → first GET → later GETs). */
+    internal var videoFirstPollMillis: Long = 1_500L
+    internal var videoPollMillis: Long = 5_000L
+
     /**
      * Extra HTTP headers merged into the /images/generations request (added, not
      * replacing the ctor extraHeaders). Per-call, never persisted.
@@ -1926,6 +1930,214 @@ class OpenAIProvider private constructor(
 
         val text = revisedPrompts.joinToString("\n")
         return LLMResponse(text, "end_turn", null, attachments)
+    }
+
+    /**
+     * OpenAI Videos API (`POST /videos` + poll + `/content`) and common
+     * OpenAI-compatible relay shapes (`/video/generations`, sync `data[].url`).
+     */
+    override suspend fun generateVideo(prompt: String): LLMResponse = withContext(Dispatchers.IO) {
+        ProviderKeyGate.withPermit(callGateKey) {
+            generateVideoLocked(prompt.trim())
+        }
+    }
+
+    private suspend fun generateVideoLocked(prompt: String): LLMResponse {
+        if (prompt.isEmpty()) throw LLMError.ProviderError("Video prompt is empty")
+        val token = getToken()
+        val paths = listOf("/videos", "/video/generations", "/videos/generations")
+        var lastError: LLMError? = null
+        for (path in paths) {
+            val url = "$basePath$path"
+            val body = org.json.JSONObject()
+                .put("model", model.id)
+                .put("prompt", prompt)
+            val req = Request.Builder()
+                .url(url)
+                .post(body.toString().toRequestBody("application/json".toMediaType()))
+                .applyKeyAuth(token)
+                .header("Content-Type", "application/json")
+                .apply {
+                    for ((k, v) in extraHeaders) header(k, v)
+                }
+                .applyUserAgentOverride(customUserAgent)
+                .build()
+            val response = client.newCall(req).execute()
+            val code = response.code
+            val bytes = response.body?.bytes() ?: ByteArray(0)
+            val contentType = response.header("Content-Type").orEmpty()
+            response.close()
+            if (code == 404 || code == 405) {
+                lastError = mapHttpError(code, bytes.decodeToString())
+                continue
+            }
+            if (code !in 200..299) {
+                throw mapHttpError(code, bytes.decodeToString(), null)
+            }
+            if (looksLikeMp4(bytes)) {
+                return LLMResponse("", "end_turn", null, listOf(videoAtt(bytes)))
+            }
+            val text = bytes.decodeToString()
+            val json = try {
+                org.json.JSONObject(text)
+            } catch (_: Exception) {
+                throw LLMError.ProviderError("Video create: not JSON (${contentType.take(40)})")
+            }
+            return resolveVideoJob(json, token, path)
+        }
+        throw lastError ?: LLMError.ProviderError("No video endpoint on this provider")
+    }
+
+    private suspend fun resolveVideoJob(
+        json: org.json.JSONObject,
+        token: String,
+        createPath: String,
+    ): LLMResponse {
+        extractVideoAttachment(json)?.let { return it }
+        val err = json.optJSONObject("error")?.safeOptString("message", "")
+            ?: json.safeOptString("message", "")
+        val status0 = json.safeOptString("status", json.safeOptString("task_status", ""))
+        if (status0.equals("failed", true) || status0.equals("error", true)) {
+            throw LLMError.ProviderError(err.ifBlank { "Video generation failed" })
+        }
+        val id = json.safeOptString("id", json.safeOptString("task_id", json.safeOptString("taskId", "")))
+        if (id.isEmpty()) {
+            if (err.isNotBlank()) throw LLMError.ProviderError(err)
+            throw LLMError.ProviderError("Video create returned no id and no file")
+        }
+        val pollPath = when {
+            createPath.contains("video/generations") -> "/video/generations/$id"
+            createPath.contains("videos/generations") -> "/videos/generations/$id"
+            else -> "/videos/$id"
+        }
+        var lastJson = json
+        repeat(120) { attempt ->
+            kotlinx.coroutines.delay(if (attempt == 0) videoFirstPollMillis else videoPollMillis)
+            val pollReq = Request.Builder()
+                .url("$basePath$pollPath")
+                .get()
+                .applyKeyAuth(token)
+                .apply {
+                    for ((k, v) in extraHeaders) header(k, v)
+                }
+                .applyUserAgentOverride(customUserAgent)
+                .build()
+            val resp = client.newCall(pollReq).execute()
+            val code = resp.code
+            val bodyBytes = resp.body?.bytes() ?: ByteArray(0)
+            resp.close()
+            if (code !in 200..299) throw mapHttpError(code, bodyBytes.decodeToString())
+            if (looksLikeMp4(bodyBytes)) {
+                return LLMResponse("", "end_turn", null, listOf(videoAtt(bodyBytes)))
+            }
+            lastJson = try {
+                org.json.JSONObject(bodyBytes.decodeToString())
+            } catch (_: Exception) {
+                throw LLMError.ProviderError("Video poll: not JSON")
+            }
+            extractVideoAttachment(lastJson)?.let { return it }
+            val st = lastJson.safeOptString("status", lastJson.safeOptString("task_status", ""))
+            if (st.equals("failed", true) || st.equals("error", true)) {
+                val msg = lastJson.optJSONObject("error")?.safeOptString("message", "")
+                    ?: lastJson.safeOptString("message", "Video generation failed")
+                throw LLMError.ProviderError(msg)
+            }
+            if (st.equals("completed", true) || st.equals("success", true) || st.equals("succeeded", true)) {
+                downloadVideoContent(token, id)?.let { return it }
+                throw LLMError.ProviderError("Video completed but no file/url")
+            }
+        }
+        throw LLMError.ProviderError("Video generation timed out")
+    }
+
+    private fun extractVideoAttachment(json: org.json.JSONObject): LLMResponse? {
+        val data = json.optJSONArray("data")
+        if (data != null) {
+            for (i in 0 until data.length()) {
+                val item = data.optJSONObject(i) ?: continue
+                attachmentFromItem(item)?.let { return LLMResponse(item.safeOptString("revised_prompt", ""), "end_turn", null, listOf(it)) }
+            }
+        }
+        attachmentFromItem(json)?.let { return LLMResponse("", "end_turn", null, listOf(it)) }
+        json.optJSONObject("output")?.let { out ->
+            attachmentFromItem(out)?.let { return LLMResponse("", "end_turn", null, listOf(it)) }
+        }
+        json.optJSONObject("result")?.let { out ->
+            attachmentFromItem(out)?.let { return LLMResponse("", "end_turn", null, listOf(it)) }
+        }
+        return null
+    }
+
+    private fun attachmentFromItem(item: org.json.JSONObject): LLMMediaAttachment? {
+        val b64 = item.safeOptString("b64_json", item.safeOptString("video_b64", ""))
+        if (b64.isNotEmpty()) {
+            val raw = try {
+                Base64.decode(b64, Base64.DEFAULT)
+            } catch (_: Exception) {
+                null
+            }
+            if (raw != null && raw.isNotEmpty()) return videoAtt(raw)
+        }
+        val url = item.safeOptString(
+            "url",
+            item.safeOptString("video_url", item.safeOptString("output", "")),
+        )
+        if (url.startsWith("http")) {
+            return downloadUrl(url)
+        }
+        return null
+    }
+
+    private fun downloadUrl(url: String): LLMMediaAttachment? {
+        return try {
+            val resp = client.newCall(Request.Builder().url(url).get().build()).execute()
+            val mime = resp.header("Content-Type")
+            val raw = resp.body?.bytes()
+            resp.close()
+            if (raw != null && raw.isNotEmpty()) videoAtt(raw, mime) else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun downloadVideoContent(token: String, id: String): LLMResponse? {
+        val url = "$basePath/videos/$id/content"
+        val req = Request.Builder()
+            .url(url)
+            .get()
+            .applyKeyAuth(token)
+            .apply {
+                for ((k, v) in extraHeaders) header(k, v)
+            }
+            .applyUserAgentOverride(customUserAgent)
+            .build()
+        val resp = client.newCall(req).execute()
+        val code = resp.code
+        val raw = resp.body?.bytes() ?: ByteArray(0)
+        resp.close()
+        if (code !in 200..299) return null
+        if (raw.isEmpty()) return null
+        if (looksLikeMp4(raw) || raw.size > 256) {
+            return LLMResponse("", "end_turn", null, listOf(videoAtt(raw)))
+        }
+        return null
+    }
+
+    private fun videoAtt(bytes: ByteArray, mimeHint: String? = null): LLMMediaAttachment {
+        val mime = when {
+            mimeHint != null && mimeHint.startsWith("video/") -> mimeHint.substringBefore(';')
+            else -> "video/mp4"
+        }
+        return LLMMediaAttachment(LLMMediaAttachment.MediaType.VIDEO, mime, bytes)
+    }
+
+    private fun looksLikeMp4(bytes: ByteArray): Boolean {
+        if (bytes.size < 12) return false
+        // ....ftyp
+        return bytes[4] == 'f'.code.toByte() &&
+            bytes[5] == 't'.code.toByte() &&
+            bytes[6] == 'y'.code.toByte() &&
+            bytes[7] == 'p'.code.toByte()
     }
 
     // `internal` rather than private so the serialization can be asserted
