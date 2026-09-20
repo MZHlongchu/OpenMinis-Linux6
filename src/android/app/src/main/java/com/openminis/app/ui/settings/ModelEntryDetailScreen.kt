@@ -23,6 +23,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.data.model.ModelOverrides
+import com.openminis.app.data.model.applyUnrecognizedModelDefaults
 import com.openminis.app.data.model.normalizeModalityName
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.ui.components.RowLabel
@@ -60,13 +61,14 @@ fun ModelEntryDetailScreen(
 
     val baseModel = entry.baseModel
     val overrides = entry.overrides
+    val defaulted = remember(baseModel) { applyUnrecognizedModelDefaults(baseModel) }
 
     var modelId by remember { mutableStateOf(baseModel.id) }
     var displayName by remember { mutableStateOf(overrides.displayName ?: baseModel.displayName) }
     var maxOutputTokensText by remember { mutableStateOf(overrides.maxOutputTokens?.toString() ?: "") }
     var contextWindowText by remember { mutableStateOf(overrides.contextWindow?.toString() ?: "") }
     var thinkingEnabled by remember {
-        mutableStateOf(overrides.supportsReasoning ?: baseModel.supportsReasoning ?: false)
+        mutableStateOf(overrides.supportsReasoning ?: defaulted.supportsReasoning ?: true)
     }
     var isHidden by remember { mutableStateOf(entry.isHidden) }
     var showQuickTest by remember { mutableStateOf(false) }
@@ -144,7 +146,9 @@ fun ModelEntryDetailScreen(
                         maxOutputTokens = maxOutputTokensText.trim().toIntOrNull()?.takeIf { it > 0 },
                         contextWindow = contextWindowText.trim().toIntOrNull()?.takeIf { it > 0 },
                         // supportsReasoning: persist only when user diverged from base.
-                        supportsReasoning = thinkingEnabled.takeIf { it != (baseModel.supportsReasoning ?: false) },
+                        supportsReasoning = thinkingEnabled.takeIf {
+                            it != (baseModel.supportsReasoning ?: defaulted.supportsReasoning ?: true)
+                        },
                         // Modality lists: persist only when user-edited set differs
                         // from baseModel's set; otherwise leave null so the entry
                         // tracks future provider updates to the base modalities.
@@ -239,7 +243,7 @@ fun ModelEntryDetailScreen(
                 SectionTextField(
                     value = contextWindowText,
                     onValueChange = { contextWindowText = it.filter { c -> c.isDigit() } },
-                    placeholder = baseModel.contextWindow?.toString()
+                    placeholder = defaulted.contextWindow?.toString()
                         ?: stringResource(R.string.modeldetail_provider_default),
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -249,7 +253,7 @@ fun ModelEntryDetailScreen(
                 SectionTextField(
                     value = maxOutputTokensText,
                     onValueChange = { maxOutputTokensText = it.filter { c -> c.isDigit() } },
-                    placeholder = baseModel.maxOutputTokens?.toString()
+                    placeholder = defaulted.maxOutputTokens?.toString()
                         ?: stringResource(R.string.modeldetail_provider_default),
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),

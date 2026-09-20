@@ -385,14 +385,17 @@ data class ModelEntry(
 
     /** Effective model as seen by the rest of the app: baseModel with overrides applied. */
     val model: LLMModel
-        get() = if (overrides.isEmpty) baseModel else baseModel.copy(
-            displayName = overrides.displayName ?: baseModel.displayName,
-            maxOutputTokens = overrides.maxOutputTokens ?: baseModel.maxOutputTokens,
-            contextWindow = overrides.contextWindow ?: baseModel.contextWindow,
-            supportsReasoning = overrides.supportsReasoning ?: baseModel.supportsReasoning,
-            inputModalities = overrides.inputModalities ?: baseModel.inputModalities,
-            outputModalities = overrides.outputModalities ?: baseModel.outputModalities,
-        )
+        get() {
+            val resolved = if (overrides.isEmpty) baseModel else baseModel.copy(
+                displayName = overrides.displayName ?: baseModel.displayName,
+                maxOutputTokens = overrides.maxOutputTokens ?: baseModel.maxOutputTokens,
+                contextWindow = overrides.contextWindow ?: baseModel.contextWindow,
+                supportsReasoning = overrides.supportsReasoning ?: baseModel.supportsReasoning,
+                inputModalities = overrides.inputModalities ?: baseModel.inputModalities,
+                outputModalities = overrides.outputModalities ?: baseModel.outputModalities,
+            )
+            return applyUnrecognizedModelDefaults(resolved)
+        }
 
     /** True when this entry carries user intent beyond API-reported defaults. */
     val isUserModified: Boolean

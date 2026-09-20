@@ -149,8 +149,21 @@ class ModelAliasMatcherTest {
         val claude = applyUnrecognizedModelDefaults(
             LLMModel("claude-opus-4-8", "Claude Opus 4.8", "Anthropic"),
         )
-        assertNull(claude.contextWindow)
-        assertNull(claude.maxOutputTokens)
-        assertNull(claude.supportsReasoning)
+        assertEquals(256_000, claude.contextWindow)
+        assertEquals(128_000, claude.maxOutputTokens)
+        assertEquals(true, claude.supportsReasoning)
+        val catalogued = applyUnrecognizedModelDefaults(
+            LLMModel(
+                id = "gpt-5.4",
+                displayName = "GPT-5.4",
+                provider = "OpenAI",
+                contextWindow = 400_000,
+                maxOutputTokens = 128_000,
+                supportsReasoning = true,
+                reasoningEffortValues = listOf("low", "medium", "high"),
+            ),
+        )
+        assertEquals(400_000, catalogued.contextWindow)
+        assertEquals(listOf("low", "medium", "high"), catalogued.reasoningEffortValues)
     }
 }

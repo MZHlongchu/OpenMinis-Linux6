@@ -17,6 +17,7 @@ import com.openminis.app.data.db.toProviderConfig
 import com.openminis.app.data.db.toSnapshot
 import com.openminis.app.data.model.ImageEndpointMode
 import com.openminis.app.data.model.LLMModel
+import com.openminis.app.data.model.applyUnrecognizedModelDefaults
 import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.data.model.ModelOverrides
 import com.openminis.app.data.model.ModelGroup
@@ -1123,7 +1124,7 @@ class ProviderRepository(private val context: Context) {
             }
             ModelEntry(
                 providerInstanceId = instanceId,
-                baseModel = resolved,
+                baseModel = applyUnrecognizedModelDefaults(resolved),
                 overrides = prior?.overrides ?: ModelOverrides(),
                 isCustom = false,
                 isHidden = prior?.isHidden ?: false,

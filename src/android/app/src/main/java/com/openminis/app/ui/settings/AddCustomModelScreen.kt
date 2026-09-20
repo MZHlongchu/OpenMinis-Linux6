@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ModelEntry
+import com.openminis.app.data.model.applyUnrecognizedModelDefaults
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.ui.components.RowLabel
 import com.openminis.app.ui.components.SectionTextField
@@ -77,10 +78,12 @@ fun AddCustomModelScreen(
         MinisButton(
             onClick = {
                 val name = displayName.ifBlank { modelId }
-                val model = LLMModel(
-                    id = modelId.trim(),
-                    displayName = name.trim(),
-                    provider = instance.providerType.displayName,
+                val model = applyUnrecognizedModelDefaults(
+                    LLMModel(
+                        id = modelId.trim(),
+                        displayName = name.trim(),
+                        provider = instance.providerType.displayName,
+                    ),
                 )
                 val entry = ModelEntry(
                     providerInstanceId = instanceId,

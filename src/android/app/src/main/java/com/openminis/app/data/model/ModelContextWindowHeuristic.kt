@@ -47,12 +47,12 @@ internal fun inferredMaxOutputTokens(modelId: String, displayName: String = ""):
 }
 
 /**
- * Stamp context / output / thinking / text modalities on ids no catalog and no
- * family heuristic recognized. Never overwrites a field that is already set,
- * and never runs on Claude/GPT/Gemini/… family names.
+ * Fill holes when the catalog / DataLearner / provider left a field empty.
+ * Unknown ids and "we have an id but no params" share the same stamp:
+ * 256k context, 128k output, thinking on (ceiling max), text modalities.
+ * Never overwrites a field that is already set (catalog, family overlay, user).
  */
 internal fun applyUnrecognizedModelDefaults(model: LLMModel): LLMModel {
-    if (isRecognizedModelFamily(model.id, model.displayName)) return model
     return model.copy(
         contextWindow = model.contextWindow?.takeIf { it > 0 } ?: UNKNOWN_CONTEXT_WINDOW,
         maxOutputTokens = model.maxOutputTokens?.takeIf { it > 0 } ?: UNKNOWN_MAX_OUTPUT,
