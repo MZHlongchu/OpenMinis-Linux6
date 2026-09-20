@@ -25,6 +25,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Remove
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -59,6 +61,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.openminis.app.R
 import com.openminis.app.i18n.uppercaseForDisplay
 
@@ -518,8 +521,56 @@ fun SettingsCardBlock(
 }
 
 /**
+ * − / value / + cluster. The number is a real tap target (not stolen by the
+ * 48dp IconButton minimum); confirming a typed value clamps to [min]..[max].
+ */
+@Composable
+fun PlusMinusStepper(
+    value: Int,
+    min: Int,
+    max: Int,
+    onValueChange: (Int) -> Unit,
+    decreaseContentDescription: String,
+    increaseContentDescription: String,
+    modifier: Modifier = Modifier,
+    step: Int = 1,
+    enabled: Boolean = true,
+) {
+    CompositionLocalProvider(
+        LocalMinimumInteractiveComponentSize provides 36.dp,
+    ) {
+        Row(
+            modifier = modifier,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(
+                onClick = { onValueChange((value - step).coerceAtLeast(min)) },
+                enabled = enabled && value > min,
+                modifier = Modifier.size(36.dp),
+            ) {
+                Icon(Icons.Outlined.Remove, contentDescription = decreaseContentDescription)
+            }
+            EditableStepperValue(
+                value = value,
+                min = min,
+                max = max,
+                enabled = enabled,
+                onValueChange = onValueChange,
+            )
+            IconButton(
+                onClick = { onValueChange((value + step).coerceAtMost(max)) },
+                enabled = enabled && value < max,
+                modifier = Modifier.size(36.dp),
+            ) {
+                Icon(Icons.Outlined.Add, contentDescription = increaseContentDescription)
+            }
+        }
+    }
+}
+
+/**
  * Numeric value between a − / + stepper. Tapping the number opens a dialog
- * so the user can type any in-range integer (not just step by step).
+ * so the user can type; Confirm clamps to [min]..[max] instead of rejecting.
  */
 @Composable
 fun EditableStepperValue(
@@ -530,22 +581,32 @@ fun EditableStepperValue(
     onValueChange: (Int) -> Unit,
 ) {
     var editing by remember { mutableStateOf(false) }
-    val maxDigits = maxOf(min.toString().length, max.toString().length, 1)
-    Text(
-        value.toString(),
-        style = MaterialTheme.typography.titleMedium,
-        color = if (enabled) MaterialTheme.colorScheme.primary
-        else MaterialTheme.colorScheme.onSurfaceVariant,
-        textAlign = TextAlign.Center,
+    val maxLen = maxOf(min.toString().length, max.toString().length, 1) + 3
+    Box(
+        contentAlignment = Alignment.Center,
         modifier = Modifier
-            .padding(horizontal = 4.dp)
-            .widthIn(min = 28.dp)
-            .clickable(enabled = enabled) { editing = true },
-    )
+            .zIndex(1f)
+            .heightIn(min = 40.dp)
+            .widthIn(min = 48.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(
+                if (enabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                else MaterialTheme.colorScheme.surfaceVariant,
+            )
+            .clickable(enabled = enabled) { editing = true }
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    ) {
+        Text(
+            value.toString(),
+            style = MaterialTheme.typography.titleMedium,
+            color = if (enabled) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
     if (editing) {
         var text by remember { mutableStateOf(value.toString()) }
-        val parsed = text.trim().toIntOrNull()
-        val valid = parsed != null && parsed in min..max
+        val clamped = parseClampedStepperValue(text, min, max)
         AlertDialog(
             onDismissRequest = { editing = false },
             title = { Text(stringResource(R.string.settings_multi_agent_enter_value)) },
@@ -553,21 +614,21 @@ fun EditableStepperValue(
                 OutlinedTextField(
                     value = text,
                     onValueChange = { input ->
-                        text = input.filter { it.isDigit() }.take(maxDigits)
+                        text = input.filter { it.isDigit() }.take(maxLen)
                     },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     label = { Text(stringResource(R.string.settings_multi_agent_value_range, min, max)) },
-                    isError = text.isNotEmpty() && !valid,
+                    isError = text.isNotEmpty() && clamped == null,
                 )
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        parsed?.let { onValueChange(it) }
+                        clamped?.let(onValueChange)
                         editing = false
                     },
-                    enabled = valid,
+                    enabled = clamped != null,
                 ) { Text(stringResource(R.string.settings_multi_agent_confirm)) }
             },
             dismissButton = {

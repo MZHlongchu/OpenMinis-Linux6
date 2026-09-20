@@ -7,14 +7,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Groups
-import androidx.compose.material.icons.outlined.Remove
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -103,27 +99,14 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = { repo.setMaxConcurrent(maxConcurrent - 1) },
-                        enabled = enabled && maxConcurrent > MultiAgentSettings.MIN_CONCURRENT,
-                    ) {
-                        Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.settings_multi_agent_decrease))
-                    }
-                    EditableStepperValue(
-                        value = maxConcurrent,
-                        min = MultiAgentSettings.MIN_CONCURRENT,
-                        max = MultiAgentSettings.MAX_CONCURRENT,
-                        enabled = enabled,
-                        onValueChange = { repo.setMaxConcurrent(it) },
-                    )
-                    IconButton(
-                        onClick = { repo.setMaxConcurrent(maxConcurrent + 1) },
-                        enabled = enabled && maxConcurrent < MultiAgentSettings.MAX_CONCURRENT,
-                    ) {
-                        Icon(Icons.Outlined.Add, contentDescription = stringResource(R.string.settings_multi_agent_increase))
-                    }
-                }
+                PlusMinusStepper(
+                    value = maxConcurrent,
+                    min = MultiAgentSettings.MIN_CONCURRENT,
+                    max = MultiAgentSettings.MAX_CONCURRENT,
+                    onValueChange = { repo.setMaxConcurrent(it) },
+                    decreaseContentDescription = stringResource(R.string.settings_multi_agent_decrease),
+                    increaseContentDescription = stringResource(R.string.settings_multi_agent_increase),
+                )
             }
 
             Row(
@@ -144,27 +127,14 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = { repo.setSubagentMaxAttempts(subagentMaxAttempts - 1) },
-                        enabled = enabled && subagentMaxAttempts > MultiAgentSettings.MIN_SUBAGENT_ATTEMPTS,
-                    ) {
-                        Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.settings_multi_agent_decrease))
-                    }
-                    EditableStepperValue(
-                        value = subagentMaxAttempts,
-                        min = MultiAgentSettings.MIN_SUBAGENT_ATTEMPTS,
-                        max = MultiAgentSettings.MAX_SUBAGENT_ATTEMPTS,
-                        enabled = enabled,
-                        onValueChange = { repo.setSubagentMaxAttempts(it) },
-                    )
-                    IconButton(
-                        onClick = { repo.setSubagentMaxAttempts(subagentMaxAttempts + 1) },
-                        enabled = enabled && subagentMaxAttempts < MultiAgentSettings.MAX_SUBAGENT_ATTEMPTS,
-                    ) {
-                        Icon(Icons.Outlined.Add, contentDescription = stringResource(R.string.settings_multi_agent_increase))
-                    }
-                }
+                PlusMinusStepper(
+                    value = subagentMaxAttempts,
+                    min = MultiAgentSettings.MIN_SUBAGENT_ATTEMPTS,
+                    max = MultiAgentSettings.MAX_SUBAGENT_ATTEMPTS,
+                    onValueChange = { repo.setSubagentMaxAttempts(it) },
+                    decreaseContentDescription = stringResource(R.string.settings_multi_agent_decrease),
+                    increaseContentDescription = stringResource(R.string.settings_multi_agent_increase),
+                )
             }
         }
 
@@ -441,26 +411,15 @@ private fun LimitStepper(
         showChevron = false,
         showDivider = showDivider,
         trailing = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = { onChange((value - step).coerceAtLeast(min)) },
-                    enabled = value > min,
-                ) {
-                    Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.tool_limits_decrease))
-                }
-                EditableStepperValue(
-                    value = value,
-                    min = min,
-                    max = max,
-                    onValueChange = onChange,
-                )
-                IconButton(
-                    onClick = { onChange((value + step).coerceAtMost(max)) },
-                    enabled = value < max,
-                ) {
-                    Icon(Icons.Outlined.Add, contentDescription = stringResource(R.string.tool_limits_increase))
-                }
-            }
+            PlusMinusStepper(
+                value = value,
+                min = min,
+                max = max,
+                step = step,
+                onValueChange = onChange,
+                decreaseContentDescription = stringResource(R.string.tool_limits_decrease),
+                increaseContentDescription = stringResource(R.string.tool_limits_increase),
+            )
         },
     )
 }
@@ -534,4 +493,4 @@ private fun CollabRoleEditDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
-}
+}

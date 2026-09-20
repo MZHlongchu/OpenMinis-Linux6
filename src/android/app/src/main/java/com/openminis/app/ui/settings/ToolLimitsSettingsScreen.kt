@@ -1,16 +1,9 @@
 package com.openminis.app.ui.settings
 
-import androidx.compose.foundation.layout.Row
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.Remove
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.R
 import com.openminis.app.data.ToolLimitPrefs
@@ -93,26 +86,15 @@ private fun LimitStepper(
         showChevron = false,
         showDivider = showDivider,
         trailing = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = { onChange((value - step).coerceAtLeast(min)) },
-                    enabled = value > min,
-                ) {
-                    Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.tool_limits_decrease))
-                }
-                EditableStepperValue(
-                    value = value,
-                    min = min,
-                    max = max,
-                    onValueChange = onChange,
-                )
-                IconButton(
-                    onClick = { onChange((value + step).coerceAtMost(max)) },
-                    enabled = value < max,
-                ) {
-                    Icon(Icons.Outlined.Add, contentDescription = stringResource(R.string.tool_limits_increase))
-                }
-            }
+            PlusMinusStepper(
+                value = value,
+                min = min,
+                max = max,
+                step = step,
+                onValueChange = onChange,
+                decreaseContentDescription = stringResource(R.string.tool_limits_decrease),
+                increaseContentDescription = stringResource(R.string.tool_limits_increase),
+            )
         },
     )
 }
