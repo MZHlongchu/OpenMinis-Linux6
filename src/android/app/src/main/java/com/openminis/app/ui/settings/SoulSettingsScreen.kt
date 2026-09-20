@@ -237,7 +237,8 @@ fun SoulSettingsScreen(onBack: () -> Unit) {
             // (long) prompt editor to the bottom.
             MinisTextButton(
                 onClick = save,
-                enabled = loaded && isDirty && !bodyLimitCheck.isOverLimit,
+                // [persona-unlimited] No length cap — dirty + loaded is enough.
+                enabled = loaded && isDirty,
             ) { Text(stringResource(R.string.soul_save)) }
         },
     ) {
@@ -369,9 +370,7 @@ fun SoulSettingsScreen(onBack: () -> Unit) {
                     else MaterialTheme.colorScheme.onSurfaceVariant
                 val indicatorText: String = when (val c = bodyLimitCheck) {
                     is SoulBodyLimitCheck.Ok -> {
-                        // Show the unit that matches whichever rule the
-                        // current body is being measured against — mirrors
-                        // iOS soulBodyCountText.
+                        // [persona-unlimited] Count-only display, no cap to hit.
                         soulBodyCountTextAndroid(body)
                     }
                     is SoulBodyLimitCheck.OverLimitChinese -> stringResource(
@@ -700,12 +699,13 @@ private fun soulBodyCountTextAndroid(body: String): String {
         i += Character.charCount(cp)
     }
     val ratio = if (total > 0) cjk.toDouble() / total else 0.0
+    // [persona-unlimited] Pure count display — no cap referenced.
     return if (ratio > SoulStore.CJK_RATIO_THRESHOLD) {
         val chars = trimmed.codePointCount(0, trimmed.length)
-        stringResource(R.string.soul_count_chars, chars, SoulStore.CHINESE_CHAR_LIMIT)
+        stringResource(R.string.soul_count_plain_chars, chars)
     } else {
         val words = trimmed.split(Regex("\\s+")).count { it.isNotEmpty() }
-        stringResource(R.string.soul_count_words, words, SoulStore.ENGLISH_WORD_LIMIT)
+        stringResource(R.string.soul_count_plain_words, words)
     }
 }
 

@@ -243,6 +243,11 @@ object SoulStore {
      * / whitespace-only bodies always return [SoulBodyLimitCheck.Ok].
      */
     fun isOverLimit(body: String): SoulBodyLimitCheck {
+        // [persona-unlimited] Personality length is no longer capped — the
+        // body is user-authored content and the model's context window is
+        // the only real budget. Kept as Ok so every write surface (Settings,
+        // minis-config, prompt builder) and the truncation fallback degrade
+        // to pass-through without touching their call sites.
         val trimmed = body.trim()
         if (trimmed.isEmpty()) return SoulBodyLimitCheck.Ok
 
@@ -541,7 +546,7 @@ object SystemPromptBuilder {
         // SOUL body length limit (#356 / 1000 EN words / 1600 CN chars).
         val soulEditHint =
             "---\n" +
-            "SOUL.md is your persona. Keep edits short (voice, stance, a few rules). " +
+            "SOUL.md is your persona. Write it as the persona requires — there is no length cap. " +
             "Change it via `minis-config` (user approves) or Settings → Soul. Do not claim you cannot change personality."
 
         // [T-soul-style-injection 2026-05-18, port iOS 0409e24f] The `style`
@@ -565,20 +570,9 @@ object SystemPromptBuilder {
             return identityTrimmed + styleBlock(style) + "\n\n" + soulEditHint + "\n\n"
         }
 
-        val check = SoulStore.isOverLimit(trimmed)
-        val personalityRaw = if (check.isOverLimit) {
-            AppLogger.warning(TAG, "personality body is over the language-aware limit ($check) — truncating, not dropping.")
-            val cap = if (trimmed.count { it.code > 0x2E80 } * 10 > trimmed.length * 3) {
-                SoulStore.CHINESE_CHAR_LIMIT
-            } else {
-                // Approximate: keep ~limit words by cutting characters generously.
-                (SoulStore.ENGLISH_WORD_LIMIT * 8).coerceAtMost(trimmed.length)
-            }
-            val cut = trimmed.take(cap.coerceAtMost(trimmed.length))
-            val nl = cut.lastIndexOf('\n')
-            (if (nl > cap / 2) cut.take(nl) else cut).trimEnd() +
-                "\n…[persona truncated for context; remaining SOUL.md still applies — stay in character]"
-        } else trimmed
+        // [persona-unlimited] No length cap, no truncation — inject the body
+        // verbatim. isOverLimit() is a pass-through Ok now.
+        val personalityRaw = trimmed
 
         val personality = scrubInjections(personalityRaw)
 
