@@ -1,3 +1,22 @@
+# OpenMinis-Linux 1.36-linux
+
+- versionCode **53**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.35.1-linux：
+
+- **models.dev 归一化匹配**：去厂商前缀、统一大小写和 `./_` → `-`，再按「自家供应商精确 ID → 归一化 ID → 全库多数票」补上下文 / 最大输出 / 思考档位 / 模态。
+- **DataLearner 补充**：目录没有上下文或最大输出时，后台拉 DataLearner 详情页补洞，不覆盖已有字段。
+- **脏名按字重合**：`GPT-6免费` / `免费GPT-6 Astra` 这类中转站名字按命中最多的字匹配，不误吃 Pro，品牌空壳不套型号。
+- **未知 id 默认**：256k 上下文、128k 输出、开启思考（最高 max）、文本模态。
+
+---
+
 # OpenMinis-Linux 1.35.1-linux
 
 - versionCode **52**

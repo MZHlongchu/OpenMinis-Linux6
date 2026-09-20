@@ -27,7 +27,7 @@ interface LLMProvider {
         // `z-ai/glm-5.2` still picks up models.dev's output cap instead of
         // falling through to the 16k provider default.
         ModelsDevApi.enrichModel(model).maxOutputTokens?.takeIf { it > 0 }?.let { return it }
-        return inferredMaxOutputTokens(model.id) ?: defaultMaxOutputTokens
+        return inferredMaxOutputTokens(model.id, model.displayName) ?: defaultMaxOutputTokens
     }
 
     /** Provider-level fallback when model.maxOutputTokens is unknown. */

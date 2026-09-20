@@ -5,7 +5,6 @@ import com.openminis.app.data.model.inferredMaxOutputTokens
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -146,9 +145,10 @@ class ModelsDevIdNormalizationTest {
     @Test
     fun `family heuristic covers new-model last resort without catalog`() {
         assertEquals(128_000, inferredMaxOutputTokens("gpt-5.5"))
+        assertEquals(128_000, inferredMaxOutputTokens("GPT-6免费"))
         assertEquals(128_000, inferredMaxOutputTokens("claude-opus-4.8"))
         assertEquals(64_000, inferredMaxOutputTokens("claude-sonnet-4.6"))
         assertEquals(65_536, inferredMaxOutputTokens("gemini-3-flash"))
-        assertNull(inferredMaxOutputTokens("totally-unknown-local-gguf"))
+        assertEquals(128_000, inferredMaxOutputTokens("totally-unknown-local-gguf"))
     }
 }

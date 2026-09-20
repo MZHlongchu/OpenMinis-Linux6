@@ -8,18 +8,23 @@ package com.openminis.app.data.model
  */
 internal fun inferContextWindowTokens(model: LLMModel): Int = model.contextWindowTokens
 
+internal const val UNKNOWN_CONTEXT_WINDOW = 256_000
+internal const val UNKNOWN_MAX_OUTPUT = 128_000
+internal val UNKNOWN_REASONING_EFFORT = listOf("low", "medium", "high", "xhigh", "max")
+internal val UNKNOWN_TEXT_MODALITY = listOf("text")
+
 /**
- * Last-resort max-output when models.dev has never heard of this id.
- * Returns null so the provider's own default (Anthropic 64k, else 16k) can win
- * for unrecognized families — guessing 128k on an 8k model is a hard 400.
+ * Family-only max-output. Null means the id is not a known cloud family.
  */
-internal fun inferredMaxOutputTokens(modelId: String): Int? {
-    val lid = modelId.lowercase()
+internal fun inferredFamilyMaxOutputTokens(modelId: String, displayName: String = ""): Int? {
+    val lid = "$modelId $displayName".lowercase()
     if ("claude" in lid) {
         return if ("haiku" in lid || "sonnet" in lid) 64_000 else 128_000
     }
     if ("gemini" in lid) return 65_536
-    if ("gpt-5" in lid || "o3" in lid || "o4" in lid || "codex" in lid) return 128_000
+    if (hasGptFamily(lid, 6) || "gpt-5" in lid || "o3" in lid || "o4" in lid || "codex" in lid) {
+        return 128_000
+    }
     if ("grok" in lid) {
         return if ("grok-2" in lid || "grok-3" in lid) 8_192 else 64_000
     }
@@ -27,4 +32,45 @@ internal fun inferredMaxOutputTokens(modelId: String): Int? {
     if ("glm" in lid || "kimi" in lid || "moonshot" in lid) return 32_768
     if ("qwen" in lid || "minimax" in lid) return 32_768
     return null
+}
+
+internal fun isRecognizedModelFamily(modelId: String, displayName: String = ""): Boolean =
+    inferredFamilyMaxOutputTokens(modelId, displayName) != null
+
+/**
+ * Last-resort max-output when models.dev / DataLearner have never heard of this id.
+ * Unknown ids get 128k (with 256k context, thinking max, text modalities) rather
+ * than the provider's 16k default.
+ */
+internal fun inferredMaxOutputTokens(modelId: String, displayName: String = ""): Int? {
+    return inferredFamilyMaxOutputTokens(modelId, displayName) ?: UNKNOWN_MAX_OUTPUT
+}
+
+/**
+ * Stamp context / output / thinking / text modalities on ids no catalog and no
+ * family heuristic recognized. Never overwrites a field that is already set,
+ * and never runs on Claude/GPT/Gemini/… family names.
+ */
+internal fun applyUnrecognizedModelDefaults(model: LLMModel): LLMModel {
+    if (isRecognizedModelFamily(model.id, model.displayName)) return model
+    return model.copy(
+        contextWindow = model.contextWindow?.takeIf { it > 0 } ?: UNKNOWN_CONTEXT_WINDOW,
+        maxOutputTokens = model.maxOutputTokens?.takeIf { it > 0 } ?: UNKNOWN_MAX_OUTPUT,
+        supportsReasoning = model.supportsReasoning ?: true,
+        reasoningEffortValues = model.reasoningEffortValues?.takeIf { it.isNotEmpty() }
+            ?: UNKNOWN_REASONING_EFFORT,
+        inputModalities = model.inputModalities ?: UNKNOWN_TEXT_MODALITY,
+        outputModalities = model.outputModalities ?: UNKNOWN_TEXT_MODALITY,
+    )
+}
+
+/** `gpt-6` / `GPT6` / `gpt-6免费`, but not `gpt-60`. */
+internal fun hasGptFamily(haystack: String, version: Int): Boolean {
+    if ("gpt-$version" in haystack) return true
+    val compact = haystack.replace("-", "").replace("_", "").replace(" ", "")
+    val needle = "gpt$version"
+    val idx = compact.indexOf(needle)
+    if (idx < 0) return false
+    val after = compact.getOrNull(idx + needle.length)
+    return after == null || !after.isDigit()
 }

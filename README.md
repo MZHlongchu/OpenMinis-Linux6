@@ -6,14 +6,18 @@
 
 **你的私人、端侧 AI Agent（本仓库是 OpenMinis 的 Linux 沙箱 Android 分支）。**
 
-> **Minis Ultra** — `applicationId` `com.openminis.linux`，当前 **1.34.1-linux** / versionCode 50，可与官方 OpenMinis 并排安装。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。主机 `su`、工具链（`minis-dev-setup`）、POSIX `/sdcard` 挂载、Ubuntu 24.04 PRoot 客户机见 [LINUX.md](LINUX.md)。多智能体调度见设置 → 多智能体（`minis://settings/multi-agent`）。签名与 libunwind 见 [docs/SIGNING.md](docs/SIGNING.md)。中国大陆编译 Android SDK / 切勿覆盖 aarch64 aapt2 见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。中文发行说明见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
+> **Minis Ultra** — `applicationId` `com.openminis.linux`，当前 **1.36-linux** / versionCode 53，可与官方 OpenMinis 并排安装。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。主机 `su`、工具链（`minis-dev-setup`）、POSIX `/sdcard` 挂载、Ubuntu 24.04 PRoot 客户机见 [LINUX.md](LINUX.md)。多智能体调度见设置 → 多智能体（`minis://settings/multi-agent`）。签名与 libunwind 见 [docs/SIGNING.md](docs/SIGNING.md)。中国大陆编译 Android SDK / 切勿覆盖 aarch64 aapt2 见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。中文发行说明见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ## 下载
 
-- **本版发行包（1.34.1-linux / versionCode 50）**：[Releases `1.34.1-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.34.1-linux) → `minis-ultra-com.openminis.linux.apk`
+- **本版发行包（1.36-linux / versionCode 53）**：[Releases `1.36-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36-linux) → `minis-ultra-com.openminis.linux.apk`
 - **滚动构建**：[Releases `android-latest`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest)（main 每次成功构建都会覆盖）
 
 侧载前允许「安装未知应用」。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本，见 [docs/SIGNING.md](docs/SIGNING.md)。
+
+### 1.36 要点
+
+中转模型参数自动补全（models.dev 归一化 + DataLearner + 脏名按字重合）。认不出的 id 默认 256k 上下文 / 128k 输出 / 思考 max / 文本模态。完整说明：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ### 1.34.1 要点
 

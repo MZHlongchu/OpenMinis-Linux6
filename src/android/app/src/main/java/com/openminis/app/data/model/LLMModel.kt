@@ -237,7 +237,7 @@ data class LLMModel(
     val contextWindowTokens: Int
         get() {
             contextWindow?.let { if (it > 0) return it }
-            val lid = id.lowercase()
+            val lid = "$id $displayName".lowercase()
             // Anthropic Claude — modern Opus/Sonnet 4.x & 5 and Fable/Mythos 5
             // ship 1M; Haiku and legacy 2.x/3.x are 200K.
             if (lid.contains("claude")) {
@@ -253,6 +253,7 @@ data class LLMModel(
             // OpenAI family
             if (lid.contains("gpt-3.5")) return 16_000
             if (lid.contains("gpt-4o") || lid.contains("gpt-4-turbo")) return 128_000
+            if (hasGptFamily(lid, 6)) return 1_050_000
             if (lid.contains("gpt-5")) return 400_000
             if (lid.contains("gpt-4")) return 8_000
             if (lid.contains("o3") || lid.contains("o4")) return 200_000
@@ -282,9 +283,9 @@ data class LLMModel(
             if (lid.contains("glm")) return 200_000
             if (lid.contains("qwen")) return 128_000
             if (lid.contains("minimax")) return 196_000
-            // Default: assume a modern long-context model rather than 64K so the
-            // group context-limit slider doesn't collapse to a single stop.
-            return 128_000
+            // Unrecognized ids: 256K so the slider and compact threshold do not
+            // collapse to the old 128K/16k pair.
+            return UNKNOWN_CONTEXT_WINDOW
         }
 
     /**

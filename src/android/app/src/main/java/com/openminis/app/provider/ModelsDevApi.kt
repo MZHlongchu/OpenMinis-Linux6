@@ -3,6 +3,7 @@ package com.openminis.app.provider
 import android.content.Context
 import android.util.Log
 import com.openminis.app.data.model.LLMModel
+import com.openminis.app.data.model.applyUnrecognizedModelDefaults
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -41,7 +42,9 @@ object ModelsDevApi {
     // [T-modelsdev-id-normalization] Memoized stage-2 winner per normalized id.
     // Rebuilt whenever cacheTimestamp moves (disk load / network refresh).
     private var cachedStage2Index: Map<String, DevModelMatch>? = null
+    private var cachedStage3Corpus: List<FuzzyRow>? = null
     private var stage2IndexBuiltFrom: Long? = null
+    private var stage2IndexRegistryId: Int? = null
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -51,6 +54,7 @@ object ModelsDevApi {
     /** Must be called once at app startup with application context. */
     fun init(context: Context) {
         appContext = context.applicationContext
+        DataLearnerApi.init(context)
     }
 
     // MARK: - Public: Fetch models by base URL (fallback)
@@ -94,17 +98,24 @@ object ModelsDevApi {
     // MARK: - Public: Enrich models with models.dev data
 
     fun enrichModel(model: LLMModel): LLMModel {
-        val registry = loadRegistry() ?: return model
-        val match = resolveDevModel(model, registry) ?: return model
-        return applyDevData(model, match.model)
+        val fromDev = applyDevMatch(model)
+        // Cache only on this path: enrichModel is also called from Compose /
+        // the send path. A synchronous HTML scrape would ANR. Misses are
+        // filled in the background; the next enrich sees the overlay.
+        val supplemented = DataLearnerApi.supplement(fromDev, fetchIfMissing = false)
+        DataLearnerApi.scheduleSupplement(supplemented)
+        return applyUnrecognizedModelDefaults(supplemented)
     }
 
     fun enrichModels(models: List<LLMModel>): List<LLMModel> {
-        val registry = loadRegistry() ?: return models
-        return models.map { model ->
-            val match = resolveDevModel(model, registry) ?: return@map model
-            applyDevData(model, match.model)
-        }
+        val fromDev = models.map { applyDevMatch(it) }
+        return DataLearnerApi.supplementAll(fromDev).map { applyUnrecognizedModelDefaults(it) }
+    }
+
+    private fun applyDevMatch(model: LLMModel): LLMModel {
+        val registry = loadRegistry() ?: return model
+        val match = resolveDevModel(model, registry) ?: return model
+        return applyDevData(model, match.model)
     }
 
     /**
@@ -134,7 +145,9 @@ object ModelsDevApi {
      *   1. the model's OWN provider (mapped key), exact id then normalized —
      *      an authoritative statement about this exact endpoint;
      *   2. every provider, matching on the NORMALIZED id, majority-vote among
-     *      entries that declare effort tiers (ties: first in sorted scan order).
+     *      entries that declare effort tiers (ties: first in sorted scan order);
+     *   3. dirty relay names (`GPT-6免费`, `免费GPT-6 Astra`): most matching
+     *      characters against catalog id+name, never brand-only.
      */
     internal fun resolveDevModel(
         model: LLMModel,
@@ -155,18 +168,56 @@ object ModelsDevApi {
             }
         }
 
-        return stage2Index(registry)[wanted]
+        return stage2Index(registry)[wanted] ?: fuzzyMatch(model, registry)
     }
 
     @Synchronized
     private fun stage2Index(registry: Map<String, ProviderEntry>): Map<String, DevModelMatch> {
         val cached = cachedStage2Index
-        if (cached != null && stage2IndexBuiltFrom == cacheTimestamp) return cached
+        val registryId = System.identityHashCode(registry)
+        if (cached != null &&
+            stage2IndexBuiltFrom == cacheTimestamp &&
+            stage2IndexRegistryId == registryId
+        ) {
+            return cached
+        }
         val index = buildStage2Index(registry)
         cachedStage2Index = index
+        cachedStage3Corpus = buildStage3Corpus(index)
         stage2IndexBuiltFrom = cacheTimestamp
+        stage2IndexRegistryId = registryId
         Log.d(TAG, "[ModelsDev] stage-2 index built: ${index.size} normalized keys")
         return index
+    }
+
+    internal data class FuzzyRow(
+        val match: DevModelMatch,
+        val tokens: Set<String>,
+    )
+
+    internal fun buildStage3Corpus(index: Map<String, DevModelMatch>): List<FuzzyRow> {
+        return index.values.map { match ->
+            val text = listOfNotNull(match.model.id, match.model.name).joinToString(" ")
+            FuzzyRow(match, ModelAliasMatcher.tokens(text).toSet())
+        }
+    }
+
+    internal fun fuzzyMatch(
+        model: LLMModel,
+        registry: Map<String, ProviderEntry>,
+    ): DevModelMatch? {
+        val tail = model.id.substringAfterLast('/')
+        if (':' in tail || tail.endsWith(".gguf", ignoreCase = true)) return null
+        stage2Index(registry)
+        val corpus = cachedStage3Corpus.orEmpty()
+        if (corpus.isEmpty()) return null
+        return ModelAliasMatcher.pickBest(
+            model.id,
+            model.displayName,
+            corpus,
+            tokensOf = { it.tokens },
+            idOf = { it.match.model.id },
+        )?.match
     }
 
     internal fun buildStage2Index(registry: Map<String, ProviderEntry>): Map<String, DevModelMatch> {
