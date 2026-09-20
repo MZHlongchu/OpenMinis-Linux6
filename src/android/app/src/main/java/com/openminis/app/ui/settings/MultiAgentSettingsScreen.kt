@@ -518,6 +518,7 @@ private fun LimitStepper(
             }
         },
     )
+}
 
 @Composable
 private fun CollabRoleEditDialog(
@@ -588,5 +589,4 @@ private fun CollabRoleEditDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
-}
-}
+}
