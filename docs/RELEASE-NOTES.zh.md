@@ -1,3 +1,24 @@
+# OpenMinis-Linux 1.35-linux
+
+- versionCode **51**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.34.1-linux：
+
+- 审批卡片与聊天内横幅新增「**本会话全部允许**」：本会话后续敏感操作自动放行，会话结束自动复位。
+- 提示词模板与工作区规则合并为设置页的「**人格扩展**」单一入口（旧 deep link 仍可达）。
+- 工具限额四项并入**多智能体**设置页；设置页工具限额入口删除。
+- 协作角色**不再写死**：可新增 / 编辑 / 删除，同名覆盖内置，提示词与工具白名单在派发时生效。
+- 人格**不再限制字数**：保存、minis-config 写入、系统提示注入三处长度闸全部移除，正文逐字注入。
+- 默认人格升级：覆盖安装时若 SOUL.md 仍是原始 starter（用户从没改过）则升级为内置人格；改过则永不触碰。
+
+---
+
 # OpenMinis-Linux 1.34.1-linux
 
 - versionCode **50**
