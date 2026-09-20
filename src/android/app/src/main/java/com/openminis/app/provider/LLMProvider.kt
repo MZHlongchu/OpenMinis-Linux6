@@ -4,6 +4,7 @@ import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
+import com.openminis.app.data.model.inferredMaxOutputTokens
 import com.openminis.app.data.model.LLMResponse
 import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.ThinkingLevel
@@ -16,11 +17,18 @@ interface LLMProvider {
 
     /**
      * Effective max output tokens ceiling for the given model.
-     * Priority: model.maxOutputTokens > provider-level default.
+     * Priority: model.maxOutputTokens > models.dev (normalized id) >
+     * family heuristic > provider-level default.
      * Used as the upper bound in dynamicMaxTokens().
      */
-    fun effectiveMaxOutputTokens(model: LLMModel): Int =
-        model.maxOutputTokens ?: defaultMaxOutputTokens
+    fun effectiveMaxOutputTokens(model: LLMModel): Int {
+        model.maxOutputTokens?.takeIf { it > 0 }?.let { return it }
+        // Catalog lookup with normalized ids so a relay spelling like
+        // `z-ai/glm-5.2` still picks up models.dev's output cap instead of
+        // falling through to the 16k provider default.
+        ModelsDevApi.enrichModel(model).maxOutputTokens?.takeIf { it > 0 }?.let { return it }
+        return inferredMaxOutputTokens(model.id) ?: defaultMaxOutputTokens
+    }
 
     /** Provider-level fallback when model.maxOutputTokens is unknown. */
     val defaultMaxOutputTokens: Int get() = 16_384

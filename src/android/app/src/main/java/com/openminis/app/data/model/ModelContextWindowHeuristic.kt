@@ -1,46 +1,30 @@
 package com.openminis.app.data.model
 
 /**
- * T-ctxslider 54ab8e93: heuristic context-window inference used by the
- * model-group "Limit Context Window" slider when a member's
- * `LLMModel.contextWindow` field is missing or non-positive.
- *
- * IMPORTANT: this is intentionally NOT folded into [LLMModel.contextWindowTokens]
- * — that getter is read by the agent loop / token accounting paths and we
- * don't want to silently overwrite source-of-truth metadata. This helper is
- * used ONLY when computing the slider's "Unlimited" ceiling so that a group
- * whose members lack contextWindow metadata still gets a reasonable cap
- * instead of degrading to the 64K floor.
+ * T-ctxslider 54ab8e93: context-window ceiling for the model-group slider.
+ * Delegates to [LLMModel.contextWindowTokens] so the slider, the agent loop
+ * and token accounting share one heuristic (the old copy here was stuck on
+ * gpt-5 → 128K while the getter already knew 400K).
  */
-internal fun inferContextWindowTokens(model: LLMModel): Int {
-    model.contextWindow?.takeIf { it > 0 }?.let { return it }
-    val idLower = model.id.lowercase()
+internal fun inferContextWindowTokens(model: LLMModel): Int = model.contextWindowTokens
 
-    // 1M-class models — match before the generic claude-* / gemini-* fall-throughs.
-    val millionClassPatterns = listOf(
-        Regex("claude-.*-1m"),
-        Regex("claude-opus-4-[5678]"),
-        Regex("claude-sonnet-4-[567]"),
-    )
-    if (millionClassPatterns.any { it.containsMatchIn(idLower) }) return 1_000_000
-    if (idLower.contains("gemini-2.5-pro") ||
-        idLower.contains("gemini-2.0-pro") ||
-        idLower.contains("gemini-1.5-pro") ||
-        idLower.contains("gemini-2.5-flash") ||
-        idLower.contains("gemini-3-pro") ||
-        idLower.contains("gemini-3-flash")
-    ) return 1_000_000
-
-    if (idLower.startsWith("claude-") || idLower.contains("/claude-")) return 200_000
-
-    if (idLower.startsWith("gpt-4o") || idLower.contains("/gpt-4o")) return 128_000
-    if (idLower.startsWith("gpt-4-turbo") || idLower.contains("/gpt-4-turbo")) return 128_000
-    if (idLower.startsWith("gpt-5") || idLower.contains("/gpt-5")) return 128_000
-
-    if (idLower.startsWith("gpt-4") || idLower.contains("/gpt-4")) return 16_000
-    if (idLower.startsWith("gpt-3.5") || idLower.contains("/gpt-3.5")) return 16_000
-
-    if (idLower.startsWith("deepseek-") || idLower.contains("/deepseek-")) return 128_000
-
-    return 128_000
+/**
+ * Last-resort max-output when models.dev has never heard of this id.
+ * Returns null so the provider's own default (Anthropic 64k, else 16k) can win
+ * for unrecognized families — guessing 128k on an 8k model is a hard 400.
+ */
+internal fun inferredMaxOutputTokens(modelId: String): Int? {
+    val lid = modelId.lowercase()
+    if ("claude" in lid) {
+        return if ("haiku" in lid || "sonnet" in lid) 64_000 else 128_000
+    }
+    if ("gemini" in lid) return 65_536
+    if ("gpt-5" in lid || "o3" in lid || "o4" in lid || "codex" in lid) return 128_000
+    if ("grok" in lid) {
+        return if ("grok-2" in lid || "grok-3" in lid) 8_192 else 64_000
+    }
+    if ("deepseek" in lid) return 64_000
+    if ("glm" in lid || "kimi" in lid || "moonshot" in lid) return 32_768
+    if ("qwen" in lid || "minimax" in lid) return 32_768
+    return null
 }

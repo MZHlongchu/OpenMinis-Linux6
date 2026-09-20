@@ -38,6 +38,10 @@ object ModelsDevApi {
     private var cacheTimestamp: Long = 0L
     private val isRefreshing = AtomicBoolean(false)
     private var appContext: Context? = null
+    // [T-modelsdev-id-normalization] Memoized stage-2 winner per normalized id.
+    // Rebuilt whenever cacheTimestamp moves (disk load / network refresh).
+    private var cachedStage2Index: Map<String, DevModelMatch>? = null
+    private var stage2IndexBuiltFrom: Long? = null
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -91,50 +95,123 @@ object ModelsDevApi {
 
     fun enrichModel(model: LLMModel): LLMModel {
         val registry = loadRegistry() ?: return model
-
-        // Try mapped provider keys first
-        val keys = providerKeyMap[model.provider] ?: emptyList()
-        for (key in keys) {
-            val prov = registry[key] ?: continue
-            val devModel = prov.models[model.id] ?: continue
-            return applyDevData(model, devModel)
-        }
-
-        // Fallback: scan all providers for the model ID
-        for ((_, prov) in registry) {
-            val devModel = prov.models[model.id] ?: continue
-            return applyDevData(model, devModel)
-        }
-
-        return model
+        val match = resolveDevModel(model, registry) ?: return model
+        return applyDevData(model, match.model)
     }
 
     fun enrichModels(models: List<LLMModel>): List<LLMModel> {
         val registry = loadRegistry() ?: return models
         return models.map { model ->
-            val keys = providerKeyMap[model.provider] ?: emptyList()
-            for (key in keys) {
-                val prov = registry[key] ?: continue
-                val devModel = prov.models[model.id] ?: continue
-                return@map applyDevData(model, devModel)
-            }
-            // Fallback scan: the same model id is published by many providers
-            // (e.g. `glm-5.2` appears under 19), and a custom relay's provider
-            // name matches none of them, so this scan is what third-party
-            // gateways actually hit.
-            //
-            // [T-reasoning-effort-data-driven] Map iteration order is not a
-            // stable contract, and these entries disagree on capabilities: 17 of
-            // the 19 `glm-5.2` entries declare effort tiers, 2 declare none.
-            // Sort by key for a stable pick and prefer an entry that carries
-            // reasoning metadata, so the richer declaration wins over a sparser
-            // duplicate. Mirrors iOS ModelsDevAPI.enrichModels.
-            val candidates = registry.keys.sorted().mapNotNull { registry[it]?.models?.get(model.id) }
-            val best = candidates.firstOrNull { !it.reasoningEffortValues.isNullOrEmpty() }
-                ?: candidates.firstOrNull()
-            if (best != null) return@map applyDevData(model, best)
-            model
+            val match = resolveDevModel(model, registry) ?: return@map model
+            applyDevData(model, match.model)
         }
+    }
+
+    /**
+     * [T-modelsdev-id-normalization] Relays publish the same model under many
+     * spellings — `glm-5.2`, `z-ai/glm-5.2`, `zai-org/GLM-5.2`. Exact-id
+     * matching made context / max-output / effort tiers depend on which
+     * spelling the gateway happened to use, so new models fell through to
+     * provider defaults (16k output, 128k context).
+     *
+     * Drop the vendor/namespace path, lowercase, unify `.` / `_` to `-`.
+     * Distinct families stay distinct (`glm-5.2` vs `glm-5.1`).
+     */
+    fun normalizedModelKey(id: String): String {
+        val bare = id.substringAfterLast('/')
+        return bare.lowercase()
+            .replace('.', '-')
+            .replace('_', '-')
+    }
+
+    internal data class DevModelMatch(
+        val model: ModelDevEntry,
+        val authoritative: Boolean,
+    )
+
+    /**
+     * Resolution order (mirrors iOS ModelsDevAPI.resolveDevModel):
+     *   1. the model's OWN provider (mapped key), exact id then normalized —
+     *      an authoritative statement about this exact endpoint;
+     *   2. every provider, matching on the NORMALIZED id, majority-vote among
+     *      entries that declare effort tiers (ties: first in sorted scan order).
+     */
+    internal fun resolveDevModel(
+        model: LLMModel,
+        registry: Map<String, ProviderEntry>,
+    ): DevModelMatch? {
+        val wanted = normalizedModelKey(model.id)
+
+        for (key in providerKeyMap[model.provider].orEmpty()) {
+            val prov = registry[key] ?: continue
+            prov.models[model.id]?.let {
+                return DevModelMatch(it, authoritative = true)
+            }
+            for (id in prov.models.keys.sorted()) {
+                if (normalizedModelKey(id) == wanted) {
+                    val devModel = prov.models[id] ?: continue
+                    return DevModelMatch(devModel, authoritative = true)
+                }
+            }
+        }
+
+        return stage2Index(registry)[wanted]
+    }
+
+    @Synchronized
+    private fun stage2Index(registry: Map<String, ProviderEntry>): Map<String, DevModelMatch> {
+        val cached = cachedStage2Index
+        if (cached != null && stage2IndexBuiltFrom == cacheTimestamp) return cached
+        val index = buildStage2Index(registry)
+        cachedStage2Index = index
+        stage2IndexBuiltFrom = cacheTimestamp
+        Log.d(TAG, "[ModelsDev] stage-2 index built: ${index.size} normalized keys")
+        return index
+    }
+
+    internal fun buildStage2Index(registry: Map<String, ProviderEntry>): Map<String, DevModelMatch> {
+        val grouped = linkedMapOf<String, MutableList<ModelDevEntry>>()
+        for (key in registry.keys.sorted()) {
+            val prov = registry[key] ?: continue
+            for (id in prov.models.keys.sorted()) {
+                val devModel = prov.models[id] ?: continue
+                grouped.getOrPut(normalizedModelKey(id)) { mutableListOf() }.add(devModel)
+            }
+        }
+        val index = HashMap<String, DevModelMatch>(grouped.size)
+        for ((normalized, candidates) in grouped) {
+            pickStage2Winner(candidates)?.let { winner ->
+                index[normalized] = DevModelMatch(winner, authoritative = false)
+            }
+        }
+        return index
+    }
+
+    /**
+     * Among candidates that declare effort tiers, the most commonly declared
+     * set wins; ties keep the first-seen (scan-order) candidate. If nobody
+     * declares effort, the first candidate still supplies context/output.
+     */
+    internal fun pickStage2Winner(candidates: List<ModelDevEntry>): ModelDevEntry? {
+        if (candidates.isEmpty()) return null
+        val declaring = candidates.filter { !it.reasoningEffortValues.isNullOrEmpty() }
+        if (declaring.isEmpty()) return candidates.first()
+        val counts = HashMap<List<String>, Int>()
+        for (c in declaring) {
+            val values = c.reasoningEffortValues ?: continue
+            counts[values] = (counts[values] ?: 0) + 1
+        }
+        var winner: List<String>? = null
+        var winnerCount = 0
+        for (c in declaring) {
+            val values = c.reasoningEffortValues ?: continue
+            val count = counts[values] ?: 0
+            if (count > winnerCount) {
+                winnerCount = count
+                winner = values
+            }
+        }
+        return declaring.firstOrNull { it.reasoningEffortValues == winner } ?: declaring.first()
     }
 
     // MARK: - Apply models.dev data
@@ -218,6 +295,14 @@ object ModelsDevApi {
     fun registrySnapshot(): Map<String, ProviderEntry> = loadRegistry() ?: emptyMap()
 
     @Synchronized
+    private fun installRegistry(parsed: Map<String, ProviderEntry>, timestamp: Long) {
+        cachedRegistry = parsed
+        cacheTimestamp = timestamp
+        cachedStage2Index = null
+        stage2IndexBuiltFrom = null
+    }
+
+    @Synchronized
     private fun loadRegistry(): Map<String, ProviderEntry>? {
         // 1. In-memory cache (fresh)
         val cached = cachedRegistry
@@ -235,8 +320,7 @@ object ModelsDevApi {
         val diskResult = loadDiskCache()
         if (diskResult != null) {
             val (parsed, diskDate) = diskResult
-            cachedRegistry = parsed
-            cacheTimestamp = diskDate
+            installRegistry(parsed, diskDate)
             if (System.currentTimeMillis() - diskDate >= CACHE_TTL_MS) {
                 scheduleBackgroundRefresh()
             }
@@ -246,8 +330,7 @@ object ModelsDevApi {
         // 4. Bundled fallback
         val bundled = loadBundledRegistry()
         if (bundled != null) {
-            cachedRegistry = bundled
-            cacheTimestamp = System.currentTimeMillis()
+            installRegistry(bundled, System.currentTimeMillis())
             scheduleBackgroundRefresh()
             return bundled
         }
@@ -285,8 +368,7 @@ object ModelsDevApi {
             val parsed = parseRegistry(body)
             if (parsed != null) {
                 synchronized(this) {
-                    cachedRegistry = parsed
-                    cacheTimestamp = System.currentTimeMillis()
+                    installRegistry(parsed, System.currentTimeMillis())
                 }
                 saveDiskCache(body)
                 Log.d(TAG, "Background-refreshed models.dev registry: ${parsed.size} providers")

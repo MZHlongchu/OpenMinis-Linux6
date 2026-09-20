@@ -1810,7 +1810,12 @@ class ChatViewModel(
     }
 
     val currentModelMaxOutputTokens: Int?
-        get() = currentModel?.maxOutputTokens
+        get() {
+            val m = currentModel ?: return null
+            m.maxOutputTokens?.takeIf { it > 0 }?.let { return it }
+            return com.openminis.app.provider.ModelsDevApi.enrichModel(m).maxOutputTokens
+                ?: com.openminis.app.data.model.inferredMaxOutputTokens(m.id)
+        }
 
     // [T-context-ring] Live context token counter for the session-menu ring.
     val contextUsage = MutableStateFlow(com.openminis.app.data.model.ContextUsage(0L, 0L))

@@ -278,6 +278,10 @@ data class LLMModel(
                 if (lid.contains("grok-2") || lid.contains("grok-3")) return 131_072
                 return 256_000
             }
+            if (lid.contains("kimi") || lid.contains("moonshot")) return 256_000
+            if (lid.contains("glm")) return 200_000
+            if (lid.contains("qwen")) return 128_000
+            if (lid.contains("minimax")) return 196_000
             // Default: assume a modern long-context model rather than 64K so the
             // group context-limit slider doesn't collapse to a single stop.
             return 128_000
