@@ -343,6 +343,9 @@ object SoulStore {
         }.getOrNull()?.let { assetsDefault = it }
     }
 
+    // Last-resort fallback if assets/default_soul.md is missing at
+    // runtime (should not happen in release builds). Byte-equal to the
+    // pre-asset starter that shipped before [T-default-assets].
     private val EMBEDDED_DEFAULT: String = """---
 name: "Minis"
 style: ""
@@ -372,6 +375,65 @@ lang: "auto"
         }
     }
 
+    /**
+     * [T-default-upgrade] Replace a SOUL.md that still holds the ORIGINAL
+     * shipped starter (pre-asset, "Minis" 4-liner) with the current asset
+     * default. Runs once per launch after [ensureExists].
+     *
+     * Contract:
+     *  - File missing            -> no-op (ensureExists just seeded it).
+     *  - File == asset default   -> no-op (already current).
+     *  - File == old starter     -> overwritten with asset default (upgrade).
+     *  - Anything else           -> untouched. Any user edit — one keystroke,
+     *    a minis-config write, a restored backup — changes the bytes away
+     *    from the old starter, and the file is respected forever after.
+     *
+     * Idempotent: after the swap the file equals the asset default, so the
+     * "already current" branch matches on every later launch.
+     */
+    fun upgradeStaleDefault(context: Context) {
+        val file = fileLocation(context)
+        if (!file.exists()) return
+        val current = try {
+            file.readText()
+        } catch (t: Throwable) {
+            AppLogger.warning(TAG, "upgradeStaleDefault read failed: ${t.message}")
+            return
+        }
+        val asset = DEFAULT_CONTENT
+        if (current == asset) return            // already up to date
+        if (current != OLD_DEFAULT_STARTER) return // user-customized: respect it
+        try {
+            val tmp = File(file.parentFile, "${file.name}.upgrade")
+            tmp.writeText(asset)
+            if (!tmp.renameTo(file)) {
+                file.writeText(asset)
+                tmp.delete()
+            }
+            AppLogger.info(TAG, "upgraded stale default SOUL.md to shipped persona (${asset.length} bytes)")
+            refreshCache(context)
+        } catch (t: Throwable) {
+            AppLogger.warning(TAG, "upgradeStaleDefault write failed: ${t.message}")
+        }
+    }
+
+    /**
+     * The ORIGINAL starter text that shipped before the asset extraction.
+     * Used by [upgradeStaleDefault] to recognize untouched installs. Kept
+     * verbatim — do not edit, or upgrade detection breaks.
+     */
+    private const val OLD_DEFAULT_STARTER = """---
+name: "Minis"
+style: ""
+lang: "auto"
+---
+
+**Don't perform — help.** Skip the "Sure!" and "Happy to assist!" — just do the work.
+
+**Have a stance.** It's fine to disagree, prefer one thing over another, find some things interesting and others dull.
+
+**Act first, ask second.** If you can look it up, look it up. Come back with answers, not questions.
+"""
     /**
      * Read + parse the current SOUL.md. Returns null when the file is
      * missing or unreadable; an empty body parses to default-meta with

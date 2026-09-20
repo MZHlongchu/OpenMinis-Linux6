@@ -496,6 +496,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         // overwrites existing user edits. Cache refresh primes the
         // synchronous metadata read-path (chat header / system prompt).
         com.openminis.app.agent.SoulStore.ensureExists(this)
+        com.openminis.app.agent.SoulStore.upgradeStaleDefault(this)
         com.openminis.app.agent.SoulStore.refreshCache(this)
 
         // [T-global-md-seed + T-default-assets] Load default copy from
