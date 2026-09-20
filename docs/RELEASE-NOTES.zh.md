@@ -1,3 +1,20 @@
+# OpenMinis-Linux 1.36.1-linux
+
+- versionCode **54**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36-linux：
+
+- **缺参模型默认值真正生效**：有 ID 但目录/接口没给参数时，不再因名字像 GPT/Claude 而跳过。缺项补 256k 上下文、128k 输出、开启思考（最高 max）、文本模态。目录和手改覆盖仍优先。
+- **步进器点数字输入**：并发上限、重试次数、Shell 超时、file_read 字符/行数、子代理最大轮次，点 − / + 中间的数字可输入，确定时按 min/max 夹紧。
+
+---
+
 # OpenMinis-Linux 1.36-linux
 
 - versionCode **53**

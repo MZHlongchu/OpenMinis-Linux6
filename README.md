@@ -6,22 +6,26 @@
 
 **端侧私人 AI Agent。** 把 Claude、GPT、Gemini 等模型接到手机里的一台真 Linux：Ubuntu 24.04 沙箱、浏览器自动化、技能与记忆、多智能体调度。
 
-本仓库是 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 **Linux 沙箱 Android 分支**。启动器名称 **Minis Ultra**，包名 `com.openminis.linux`，可与官方 OpenMinis **并排安装**。当前 **1.36-linux**（versionCode 53）。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。
+本仓库是 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 **Linux 沙箱 Android 分支**。启动器名称 **Minis Ultra**，包名 `com.openminis.linux`，可与官方 OpenMinis **并排安装**。当前 **1.36.1-linux**（versionCode 54）。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。
 
 ## 仓库介绍
 
 - **沙箱即电脑**：客户机 Ubuntu 24.04（PRoot），可装包、跑脚本；主机 `su`、工具链 `minis-dev-setup`、POSIX `/sdcard` 挂载见 [LINUX.md](LINUX.md)。
-- **模型参数自动补全（1.36）**：先查 models.dev（去厂商前缀、统一大小写和 `./_` → `-`，再按精确 ID → 归一化 ID → 全库多数票），没有的洞用 DataLearner 补，中转站脏名（如 `GPT-6免费` / `免费GPT-6 Astra`）按命中最多的字匹配。目录和家族都认不出的 id 默认 **256k 上下文 / 128k 输出 / 开启思考（最高 max）/ 文本模态**。
+- **模型参数自动补全（1.36.1）**：先查 models.dev（去厂商前缀、统一大小写和 `./_` → `-`，再按精确 ID → 归一化 ID → 全库多数票），没有的洞用 DataLearner 补，中转站脏名（如 `GPT-6免费` / `免费GPT-6 Astra`）按命中最多的字匹配。目录和家族都认不出的 id 默认 **256k 上下文 / 128k 输出 / 开启思考（最高 max）/ 文本模态**。
 - **多智能体**：主会话当协调者，设置 → 多智能体（`minis://settings/multi-agent`）。
 - **签名与国内编译**：[docs/SIGNING.md](docs/SIGNING.md)、[docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)（切勿覆盖 aarch64 aapt2）。
 - **中文发行说明**：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ## 下载
 
-- **本版发行包（1.36-linux / versionCode 53）**：[Releases `1.36-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36-linux) → `minis-ultra-com.openminis.linux.apk`
+- **本版发行包（1.36.1-linux / versionCode 54）**：[Releases `1.36.1-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.1-linux) → `minis-ultra-com.openminis.linux.apk`
 - **滚动构建**：[Releases `android-latest`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest)（main 每次成功构建都会覆盖）
 
 侧载前允许「安装未知应用」。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本，见 [docs/SIGNING.md](docs/SIGNING.md)。
+
+### 1.36.1 要点
+
+缺参模型（有 ID 没参数）真正套上 256k 上下文 / 128k 输出 / 思考 max / 文本；设置里 − / 数字 / + 点中间数字可输入，确定时按 min/max 夹紧。完整说明：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ### 1.36 要点
 
@@ -105,7 +109,7 @@ Official website: **[openminis.app](https://openminis.app)**
   <img alt="Download on the App Store" height="48" src="assets/badge-appstore.svg" />
 </a>
 &nbsp;
-<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36-linux">
+<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.1-linux">
   <img alt="Get the APK on GitHub" height="48" src="assets/badge-android.svg" />
 </a>
 
