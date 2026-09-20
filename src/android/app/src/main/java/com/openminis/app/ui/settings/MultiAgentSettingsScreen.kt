@@ -106,6 +106,8 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                // [stepper-no-typing] 只有 +/- 两个按钮；当前值显示在左侧副标题
+                // （即行的底部），不再提供点击数字手动输入。
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
                         onClick = { repo.setMaxConcurrent(maxConcurrent - 1) },
@@ -113,13 +115,6 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                     ) {
                         Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.settings_multi_agent_decrease))
                     }
-                    EditableStepperValue(
-                        value = maxConcurrent,
-                        min = MultiAgentSettings.MIN_CONCURRENT,
-                        max = MultiAgentSettings.MAX_CONCURRENT,
-                        enabled = enabled,
-                        onValueChange = { repo.setMaxConcurrent(it) },
-                    )
                     IconButton(
                         onClick = { repo.setMaxConcurrent(maxConcurrent + 1) },
                         enabled = enabled && maxConcurrent < MultiAgentSettings.MAX_CONCURRENT,
@@ -147,6 +142,7 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                // [stepper-no-typing] 同并发上限：只留 +/-，值在底部副标题。
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
                         onClick = { repo.setSubagentMaxAttempts(subagentMaxAttempts - 1) },
@@ -154,13 +150,6 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                     ) {
                         Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.settings_multi_agent_decrease))
                     }
-                    EditableStepperValue(
-                        value = subagentMaxAttempts,
-                        min = MultiAgentSettings.MIN_SUBAGENT_ATTEMPTS,
-                        max = MultiAgentSettings.MAX_SUBAGENT_ATTEMPTS,
-                        enabled = enabled,
-                        onValueChange = { repo.setSubagentMaxAttempts(it) },
-                    )
                     IconButton(
                         onClick = { repo.setSubagentMaxAttempts(subagentMaxAttempts + 1) },
                         enabled = enabled && subagentMaxAttempts < MultiAgentSettings.MAX_SUBAGENT_ATTEMPTS,
@@ -420,64 +409,6 @@ private fun slotModelLabel(
     append(entry.model.displayName)
     instancesById[entry.providerInstanceId]?.label?.takeIf { it.isNotBlank() }?.let {
         append(" · ").append(it)
-    }
-}
-
-/**
- * A numeric stepper value that is ALSO directly editable: tapping the number
- * opens a small dialog with a numeric field. Fixes the "only +/- works, cannot
- * type a value" complaint. Out-of-range / non-numeric input disables Confirm.
- */
-@Composable
-private fun EditableStepperValue(
-    value: Int,
-    min: Int,
-    max: Int,
-    enabled: Boolean,
-    onValueChange: (Int) -> Unit,
-) {
-    var editing by remember { mutableStateOf(false) }
-    Text(
-        value.toString(),
-        style = MaterialTheme.typography.titleMedium,
-        color = if (enabled) MaterialTheme.colorScheme.primary
-        else MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier
-            .padding(horizontal = 4.dp)
-            .clickable(enabled = enabled) { editing = true },
-    )
-    if (editing) {
-        var text by remember { mutableStateOf(value.toString()) }
-        val parsed = text.trim().toIntOrNull()
-        val valid = parsed != null && parsed in min..max
-        AlertDialog(
-            onDismissRequest = { editing = false },
-            title = { Text(stringResource(R.string.settings_multi_agent_enter_value)) },
-            text = {
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = { input -> text = input.filter { it.isDigit() }.take(3) },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    label = { Text(stringResource(R.string.settings_multi_agent_value_range, min, max)) },
-                    isError = text.isNotEmpty() && !valid,
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        parsed?.let { onValueChange(it) }
-                        editing = false
-                    },
-                    enabled = valid,
-                ) { Text(stringResource(R.string.settings_multi_agent_confirm)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { editing = false }) {
-                    Text(stringResource(R.string.settings_multi_agent_cancel))
-                }
-            },
-        )
     }
 }
 

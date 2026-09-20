@@ -46,7 +46,10 @@ class SkillRepository(private val context: Context) {
         private const val LEARNED_SKILL_END = "<!-- LEARNED-SKILL-END -->"
         private const val DB_NAME = "skills.db"
         private const val DB_VERSION = 3
-        private const val MAX_SKILLS_IN_PROMPT = 20
+        // [skill-startup-refresh] Raised from 20: with the default-enable
+        // policy the library can hold 100+ skills, and the model must see
+        // them all to use them. Descriptions are still capped at 200 chars.
+        private const val MAX_SKILLS_IN_PROMPT = 300
         private const val MAX_SKILL_DESC_LENGTH = 200
         private const val RECENT_WINDOW_MS = 7L * 24 * 3600 * 1000
         private const val RECENT_SLOTS = 10
@@ -213,7 +216,58 @@ class SkillRepository(private val context: Context) {
         Log.i(TAG, "Deleted skill: $id")
     }
 
+    // [skill-default-enabled] The user's EXPLICIT disables, persisted outside
+    // the DB so a startup refresh can re-assert "enabled unless the user said
+    // otherwise" even if a DB row carries a stale disabled flag.
+    private val disabledPrefs by lazy {
+        context.getSharedPreferences("skill_user_disabled", Context.MODE_PRIVATE)
+    }
+
+    private fun userDisabledIds(): MutableSet<String> =
+        (disabledPrefs.getStringSet("ids", emptySet()) ?: emptySet()).toMutableSet()
+
+    private fun markUserDisabled(id: String, disabled: Boolean) {
+        val set = userDisabledIds()
+        val changed = if (disabled) set.add(id) else set.remove(id)
+        if (changed) {
+            disabledPrefs.edit().putStringSet("ids", set).apply()
+        }
+    }
+
+    /**
+     * [skill-startup-refresh] Run on every app start: re-scan the skills
+     * directory, register anything new, and enforce the enable policy —
+     * every skill under minis-global/skills/ is ENABLED by default; only
+     * ids the user explicitly switched off (recorded in prefs) stay off.
+     */
+    fun refreshOnStartup() {
+        runCatching { loadAll() }.onFailure {
+            Log.e(TAG, "startup refresh loadAll failed: ${it.message}", it)
+        }
+        runCatching { installBundledSkills() }.onFailure {
+            Log.e(TAG, "startup refresh bundled install failed: ${it.message}", it)
+        }
+        val disabled = userDisabledIds()
+        val changes = mutableListOf<Pair<String, Boolean>>()
+        _skills.value.forEach { skill ->
+            val shouldEnable = skill.id !in disabled
+            if (skill.isEnabled != shouldEnable) {
+                changes += skill.id to shouldEnable
+            }
+        }
+        changes.forEach { (id, enable) ->
+            db.execSQL(
+                "UPDATE skills SET is_enabled=? WHERE id=?",
+                arrayOf<Any>(if (enable) 1 else 0, id),
+            )
+            Log.i(TAG, "startup refresh: ${if (enable) "enabled" else "disabled"} $id")
+        }
+        if (changes.isNotEmpty()) loadAll()
+    }
+
     fun setEnabled(id: String, enabled: Boolean) {
+        // Record the explicit user choice; refreshOnStartup() re-asserts it.
+        markUserDisabled(id, !enabled)
         db.execSQL("UPDATE skills SET is_enabled=? WHERE id=?", arrayOf<Any>(if (enabled) 1 else 0, id))
         _skills.value = _skills.value.map {
             if (it.id == id) it.copy(isEnabled = enabled) else it
@@ -1378,19 +1432,33 @@ class SkillRepository(private val context: Context) {
         for (dir in onDisk) {
             val skillMd = File(dir, "SKILL.md")
             if (skillMd.exists() && dbSkills.none { it.id == dir.name }) {
-                val parsed = parseSkillMd(skillMd.readText())
-                if (parsed != null) {
-                    val skill = Skill(
+                // [skill-startup-refresh] A SKILL.md with missing/malformed
+                // frontmatter must still register — the directory is the unit
+                // of discovery, and skipping it silently hides a real skill.
+                // Fall back to the directory name so "all skills on disk get
+                // loaded" holds even for hand-written files.
+                val raw = runCatching { skillMd.readText() }.getOrNull() ?: ""
+                val parsed = parseSkillMd(raw)
+                val skill = if (parsed != null) {
+                    Skill(
                         id = dir.name,
                         name = parsed.name,
                         description = parsed.description,
                         importSource = ImportSource.SESSION,
                         body = parsed.body,
                     )
-                    insertDb(skill)
-                    dbSkills.add(skill)
-                    Log.i(TAG, "Auto-discovered skill: ${dir.name}")
+                } else {
+                    Skill(
+                        id = dir.name,
+                        name = dir.name,
+                        description = "",
+                        importSource = ImportSource.SESSION,
+                        body = raw,
+                    )
                 }
+                insertDb(skill)
+                dbSkills.add(skill)
+                Log.i(TAG, "Auto-discovered skill: ${dir.name}")
             }
         }
 

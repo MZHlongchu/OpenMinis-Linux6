@@ -508,6 +508,16 @@ class MinisApp : Application(), ImageLoaderFactory {
         com.openminis.app.data.repository.MemoryRepository.loadGlobalDefaultFromAssets(this)
         com.openminis.app.data.repository.MemoryRepository.ensureGlobalExists(this)
 
+        // [skill-startup-refresh] Every launch: re-scan minis-global/skills/,
+        // register anything new, and default-enable the whole library except
+        // ids the user explicitly switched off. Runs on IO so a large library
+        // (100+ dirs) never blocks the first frame.
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            runCatching { skillRepository.refreshOnStartup() }.onFailure {
+                android.util.Log.e("MinisApp", "skill startup refresh failed", it)
+            }
+        }
+
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             kotlinx.coroutines.delay(5_000)
             runCatching {

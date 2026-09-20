@@ -194,10 +194,12 @@ class SecurityGateImpl : SecurityGate {
             return Decision.Denied(describeFatalViolation(command))
         }
         if (mode == PermissionMode.ALLOW_ALL) {
-            if (risk == RiskLevel.DANGEROUS || cmd.reversibility == Reversibility.IRREVERSIBLE) {
-                return Decision.NeedConfirm("危险或不可逆，仍需确认一次", preview(cmd))
-            }
-            return Decision.Allow("允许全部模式下的常规操作")
+            // [allow-all-no-prompt] ALLOW_ALL 的语义就是「不询问」：致命命令
+            // 已在上面 Denied，权威围栏/规则拒绝也已在前面返回，其余一律放行。
+            // 旧实现在这里对「危险 / 不可逆」再弹一次确认，而未知工具默认被判
+            // 为 IRREVERSIBLE（见 classify 的 else 分支），于是 file_write 之类
+            // 的常规操作在 ALLOW_ALL 下依然弹窗——这正是「设了自动放行还问」的根因。
+            return Decision.Allow("允许全部模式：直接放行")
         }
         // ASK
         if (cmd.toolName in SHELL_TOOLS && isSafeReadOnlyCommand(command)) {

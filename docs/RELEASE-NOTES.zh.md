@@ -1,3 +1,22 @@
+# OpenMinis-Linux 1.35.1-linux
+
+- versionCode **52**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.35-linux：
+
+- **人格字数上限真正移除**：1.35 只改了注释、计数逻辑仍在，编辑器依旧显示「已超出上限」。现在 `isOverLimit()` 恒为通过，设置页的红色告警与上限文案一并删除。
+- **技能启动刷新**：每次启动重新扫描 `minis-global/skills/`，全部技能默认启用；只有用户手动关闭过的保持关闭。SKILL.md frontmatter 不完整也按目录名注册；系统提示可列出的技能数 20 → 300。
+- **多智能体上限/重试次数**：去掉点击数字手动输入，只保留 +/-，当前值显示在行底部副标题。
+- **权限模式 ALLOW_ALL 不再弹窗**：根因是未知工具默认判定为「不可逆」，旧逻辑在 ALLOW_ALL 下仍对危险/不可逆操作弹确认。
+
+---
+
 # OpenMinis-Linux 1.35-linux
 
 - versionCode **51**

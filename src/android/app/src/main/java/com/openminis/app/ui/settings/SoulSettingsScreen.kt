@@ -36,7 +36,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -63,7 +62,6 @@ import com.openminis.app.R
 import com.openminis.app.ui.components.MinisButton
 import com.openminis.app.ui.components.MinisOutlinedButton
 import com.openminis.app.ui.components.MinisTextButton
-import com.openminis.app.agent.SoulBodyLimitCheck
 import com.openminis.app.agent.SoulIcon
 import com.openminis.app.agent.SoulFile
 import com.openminis.app.agent.SoulMDParser
@@ -191,9 +189,7 @@ fun SoulSettingsScreen(onBack: () -> Unit) {
         loaded = true
     }
 
-    // Language-aware length check used by both the editor counter and the
-    // Save button's enabled state. See [SoulStore.isOverLimit] for the rule.
-    val bodyLimitCheck by remember(body) { derivedStateOf { SoulStore.isOverLimit(body) } }
+    // [persona-unlimited] No length state to track — the editor shows a plain count.
 
     val currentFile = SoulFile(
         metadata = SoulMetadata(
@@ -364,26 +360,12 @@ fun SoulSettingsScreen(onBack: () -> Unit) {
                     placeholder = { Text(stringResource(R.string.soul_body_placeholder)) },
                 )
                 Spacer(Modifier.height(6.dp))
-                val isOverLimit = bodyLimitCheck.isOverLimit
-                val warnColor: Color =
-                    if (isOverLimit) Color(0xFFFF3B30)
-                    else MaterialTheme.colorScheme.onSurfaceVariant
-                val indicatorText: String = when (val c = bodyLimitCheck) {
-                    is SoulBodyLimitCheck.Ok -> {
-                        // [persona-unlimited] Count-only display, no cap to hit.
-                        soulBodyCountTextAndroid(body)
-                    }
-                    is SoulBodyLimitCheck.OverLimitChinese -> stringResource(
-                        R.string.soul_over_limit_chinese, c.chars, c.cap, SoulStore.ENGLISH_WORD_LIMIT,
-                    )
-                    is SoulBodyLimitCheck.OverLimitEnglish -> stringResource(
-                        R.string.soul_over_limit_english, c.words, c.cap, SoulStore.CHINESE_CHAR_LIMIT,
-                    )
-                }
+                // [persona-unlimited] Pure count display — no cap, no warning
+                // color, no over-limit copy anywhere on this screen.
                 Text(
-                    text = indicatorText,
+                    text = soulBodyCountTextAndroid(body),
                     fontSize = 12.sp,
-                    color = warnColor,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

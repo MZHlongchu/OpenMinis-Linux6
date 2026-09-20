@@ -245,38 +245,14 @@ object SoulStore {
     fun isOverLimit(body: String): SoulBodyLimitCheck {
         // [persona-unlimited] Personality length is no longer capped — the
         // body is user-authored content and the model's context window is
-        // the only real budget. Kept as Ok so every write surface (Settings,
+        // the only real budget. Always Ok so every write surface (Settings,
         // minis-config, prompt builder) and the truncation fallback degrade
         // to pass-through without touching their call sites.
-        val trimmed = body.trim()
-        if (trimmed.isEmpty()) return SoulBodyLimitCheck.Ok
-
-        var cjk = 0
-        var total = 0
-        var i = 0
-        while (i < trimmed.length) {
-            val cp = trimmed.codePointAt(i)
-            total += 1
-            if (isCJKCodePoint(cp)) cjk += 1
-            i += Character.charCount(cp)
-        }
-        val ratio = if (total > 0) cjk.toDouble() / total else 0.0
-        return if (ratio > CJK_RATIO_THRESHOLD) {
-            // Code-point count — closest analogue to iOS grapheme cluster
-            // count for the CJK ranges we care about (no combining marks
-            // / no flag emojis in Han/Kana/Hangul). Bytes / UTF-16 code
-            // units would over-count surrogate-pair CJK extensions.
-            val chars = trimmed.codePointCount(0, trimmed.length)
-            if (chars > CHINESE_CHAR_LIMIT) SoulBodyLimitCheck.OverLimitChinese(chars, CHINESE_CHAR_LIMIT)
-            else SoulBodyLimitCheck.Ok
-        } else {
-            // Whitespace-delimited word count. `split(Regex("\\s+"))` on
-            // a trimmed string collapses consecutive whitespace into a
-            // single delimiter.
-            val words = trimmed.split(Regex("\\s+")).count { it.isNotEmpty() }
-            if (words > ENGLISH_WORD_LIMIT) SoulBodyLimitCheck.OverLimitEnglish(words, ENGLISH_WORD_LIMIT)
-            else SoulBodyLimitCheck.Ok
-        }
+        //
+        // The counting helpers below (isCJKCodePoint / countCjkRatio) are
+        // still used by the editor's character counter for display; they no
+        // longer feed any decision here.
+        return SoulBodyLimitCheck.Ok
     }
 
     /**
