@@ -1,3 +1,19 @@
+# OpenMinis-Linux 1.36.3-linux
+
+- versionCode **56**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.2-linux：
+
+- **热修崩溃**：`streamMessage` 套限流闸门时 `flow { emit }` 不能从 `withContext` 后的协程发射，发消息会抛 `Flow invariant is violated`。改为 `channelFlow { send }`。429 分桶与模型组回退行为不变。
+
+---
+
 # OpenMinis-Linux 1.36.2-linux
 
 - versionCode **55**

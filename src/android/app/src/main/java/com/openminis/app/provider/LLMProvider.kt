@@ -9,6 +9,7 @@ import com.openminis.app.data.model.LLMResponse
 import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.ThinkingLevel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flow
 
 interface LLMProvider {
@@ -95,9 +96,12 @@ interface LLMProvider {
         )
         val key = callGateKey
         if (key.isBlank()) return inner
-        return flow {
+        // channelFlow: [ProviderKeyGate.withPermit] uses withContext(HeldKeys),
+        // which is a different coroutine than the collector. Regular `flow { emit }`
+        // forbids that (IllegalStateException: Flow invariant is violated).
+        return channelFlow {
             ProviderKeyGate.withPermit(key) {
-                inner.collect { emit(it) }
+                inner.collect { send(it) }
             }
         }
     }
