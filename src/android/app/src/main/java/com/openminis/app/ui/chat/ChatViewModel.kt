@@ -9500,10 +9500,7 @@ class ChatViewModel(
                 }
             com.openminis.app.tools.ProductMediaTools.DESCRIBE_IMAGE -> executeReadImageTool(argsJson)
             com.openminis.app.tools.ProductMediaTools.GENERATE_IMAGE ->
-                com.openminis.app.tools.ProductMediaTools.notConfigured(
-                    com.openminis.app.tools.ProductMediaTools.GENERATE_IMAGE,
-                    "Use an image-capable model in chat, or configure image generation in provider settings.",
-                )
+                executeGenerateImageTool(argsJson, currentProvider, activeSessionId)
             com.openminis.app.tools.ProductMediaTools.GENERATE_VIDEO ->
                 executeGenerateVideoTool(argsJson, currentProvider, activeSessionId)
             com.openminis.app.tools.ProductMediaTools.TRANSCRIBE_AUDIO ->

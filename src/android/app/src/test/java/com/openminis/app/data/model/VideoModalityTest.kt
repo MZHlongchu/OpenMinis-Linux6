@@ -28,6 +28,22 @@ class VideoModalityTest {
     }
 
     @Test
+    fun `seedance and doubao-video infer video output`() {
+        assertTrue(
+            LLMModel("doubao-seedance-1-0-pro", "Seedance", "Ark")
+                .withInferredVideoModality().isPureVideoGenerator,
+        )
+        assertTrue(
+            LLMModel("doubao-video-gen-01", "豆包文生视频", "Ark")
+                .withInferredVideoModality().isPureVideoGenerator,
+        )
+        assertTrue(
+            LLMModel("hunyuan-video", "混元视频", "Hunyuan")
+                .withInferredVideoModality().isVideoOutput,
+        )
+    }
+
+    @Test
     fun `explicit catalog video is not overwritten`() {
         val m = LLMModel(
             "custom",

@@ -114,6 +114,21 @@ interface LLMProvider {
         throw LLMError.ProviderError("This provider does not support video generation")
     }
 
+    /** Generate an image from a text prompt when the provider supports it. */
+    suspend fun generateImage(
+        prompt: String,
+        n: Int = 1,
+        size: String? = null,
+        quality: String? = null,
+    ): LLMResponse {
+        if (prompt.isBlank()) throw LLMError.ProviderError("Image prompt is empty")
+        return sendMessage(
+            messages = listOf(LLMMessage(LLMMessage.Role.USER, prompt.trim())),
+            systemPrompt = null,
+            maxTokens = 1024,
+        )
+    }
+
     /**
      * [T-android-thinking-level-arch] Provider implementations override THIS
      * (not [sendMessage]). The `thinkingLevel` received here has already been

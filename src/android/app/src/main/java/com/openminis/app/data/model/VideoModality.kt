@@ -24,6 +24,13 @@ object VideoModality {
         "video_gen",
         "video-generation",
         "cogvideox",
+        "cogvideo",
+        "seedance",
+        "doubao-video",
+        "hunyuan-video",
+        "wan2.1-t2v",
+        "wan2.2-t2v",
+        "wanx2.1-t2v",
     )
 
     fun looksLikeVideoGenerator(id: String, displayName: String = ""): Boolean {

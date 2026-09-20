@@ -1,3 +1,30 @@
+# OpenMinis-Linux 1.36.6-linux
+
+- versionCode **59**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.5-linux：
+
+- **聊天生成图片**：Agent 工具 `generate_image` 接到真正的生图接口。会选用已配置且带图像输出的模型；PNG/JPEG 落到气泡 `minis://attachments/generated/`，以 Markdown 图片显示。
+- **厂商专用协议**：自定义 Base URL 的 Host 决定走哪套接口，中继（OpenRouter 等）即使挂了 Seedance/CogView 也不会误打到官方原生路径。
+  - **豆包 / 火山方舟**：生图 `POST /api/v3/images/generations`；生视频 `POST /api/v3/contents/generations/tasks` 后轮询，成功立即下载临时 `video_url`。`doubao-video-gen-01` 固定 5 秒 / 720p；Seedance 用官方 `content[]`。生产轮询间隔不少于 8 秒。
+  - **智谱 / BigModel**：生图 `/api/paas/v4/images/generations`；生视频 `/videos/generations` + `GET /async-result/{id}`。
+  - **通义 DashScope**：`qwen-image` 走 compatible-mode 生图；Wanx 走原生异步 `text2image` / `video-synthesis`，再查 `/api/v1/tasks/{id}`。
+  - **MiniMax**：`/v1/image_generation`；视频 `/v1/video_generation` → query → files/retrieve。
+  - **GPT / OpenAI / Gemini / Codex**：原 Images / Videos / 对话内联图 / Codex `gpt-image-2` 路径未改。
+  - **Agnes**：按 OpenAI 兼容 `/images/generations`、`/videos*` 走，未编造原生协议。
+  - **深度求索**：官方无生图/生视频 API，直接报错，不探测 OpenAI 媒体端点。
+  - **混元**：`api.hunyuan.cloud.tencent.com` 走 OpenAI 兼容；`hunyuan.tencentcloudapi.com` 需要 TC3 SecretId/SecretKey，明确报不支持。
+  - **可灵**：原生需要 AK/SK JWT，明确报不支持。
+- **模型识别**：`seedream` / `cogview` / `hunyuan-image` / `glm-image` / `qwen-image` 等可被 `generate_image` 选中；`seedance` / `doubao-video` / `hunyuan-video` 等可被 `generate_video` 选中。视频模型不会被误当成生图模型。
+
+---
+
 # OpenMinis-Linux 1.36.5-linux
 
 - versionCode **58**

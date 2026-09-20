@@ -394,7 +394,9 @@ data class ModelEntry(
                 inputModalities = overrides.inputModalities ?: baseModel.inputModalities,
                 outputModalities = overrides.outputModalities ?: baseModel.outputModalities,
             )
-            return applyUnrecognizedModelDefaults(resolved).withInferredVideoModality()
+            return applyUnrecognizedModelDefaults(resolved)
+                .withInferredVideoModality()
+                .withInferredImageModality()
         }
 
     /** True when this entry carries user intent beyond API-reported defaults. */

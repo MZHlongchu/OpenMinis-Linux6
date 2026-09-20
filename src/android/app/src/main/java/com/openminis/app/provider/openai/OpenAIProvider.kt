@@ -17,6 +17,8 @@ import com.openminis.app.data.model.hasImageInput
 import com.openminis.app.provider.thinking.ThinkingResolveContext
 import com.openminis.app.provider.thinking.ThinkingRuleResolver
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.VendorMedia
+import com.openminis.app.provider.VendorMediaKind
 import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.CancellationException
@@ -262,6 +264,15 @@ class OpenAIProvider private constructor(
     /** Test hook: Videos API poll cadence (create → first GET → later GETs). */
     internal var videoFirstPollMillis: Long = 1_500L
     internal var videoPollMillis: Long = 5_000L
+
+    /**
+     * Test hook: force a vendor media protocol on MockWebServer (localhost
+     * hosts never match volces/bigmodel/dashscope). Null → [VendorMedia.detect].
+     */
+    internal var vendorMediaOverride: VendorMediaKind? = null
+
+    internal fun resolvedVendorMedia(): VendorMediaKind =
+        vendorMediaOverride ?: VendorMedia.detect(basePath, model.id)
 
     /**
      * Extra HTTP headers merged into the /images/generations request (added, not
@@ -1633,13 +1644,29 @@ class OpenAIProvider private constructor(
      * LLMError.ProviderError whose message the handler matches with
      * looksLikeEndpointMissing() to drive the auto-mode fallback.
      */
-    suspend fun generateImage(
+    override suspend fun generateImage(
         prompt: String,
-        n: Int = 1,
-        size: String? = null,
-        quality: String? = null,
+        n: Int,
+        size: String?,
+        quality: String?,
     ): LLMResponse = withContext(Dispatchers.IO) {
+        // Codex OAuth image models use the existing Responses SSE image_generation tool.
+        if (isCodexImageModel) {
+            return@withContext sendMessage(
+                messages = listOf(LLMMessage(LLMMessage.Role.USER, prompt.trim())),
+                systemPrompt = null,
+                maxTokens = 1024,
+            )
+        }
+        val vendor = resolvedVendorMedia()
+        VendorMedia.unsupportedMessage(vendor, "image")?.let { throw LLMError.ProviderError(it) }
         val token = getToken()
+        if (vendor == VendorMediaKind.DASHSCOPE && VendorMedia.looksLikeWanxNativeImage(model.id)) {
+            return@withContext generateDashScopeImage(prompt, n, size, token)
+        }
+        if (vendor == VendorMediaKind.MINIMAX) {
+            return@withContext generateMinimaxImage(prompt, n, token)
+        }
         // [T-android-model-use-image-passthrough GH#62] Honor an explicit
         // endpoint-path override (non-standard providers); default otherwise.
         val imagePath = imagePathOverride?.takeIf { it.isNotBlank() } ?: "/images/generations"
@@ -1652,6 +1679,14 @@ class OpenAIProvider private constructor(
         val url = when {
             abs != null && abs.startsWith("/") -> hostRootURL(abs) ?: "$basePath$imagePath"
             isAzure -> azureUrl(imagePath) ?: "$basePath$imagePath"
+            // Ark Seedream and Zhipu CogView speak OpenAI Images JSON but live
+            // at a host-root path that /v1 suffixing would miss.
+            imagePathOverride.isNullOrBlank() && vendor == VendorMediaKind.ARK ->
+                hostRootURL("/api/v3/images/generations") ?: "$basePath$imagePath"
+            imagePathOverride.isNullOrBlank() && vendor == VendorMediaKind.ZHIPU ->
+                hostRootURL("/api/paas/v4/images/generations") ?: "$basePath$imagePath"
+            imagePathOverride.isNullOrBlank() && vendor == VendorMediaKind.DASHSCOPE ->
+                hostRootURL("/compatible-mode/v1/images/generations") ?: "$basePath$imagePath"
             else -> "$basePath$imagePath"
         }
 
@@ -1945,6 +1980,15 @@ class OpenAIProvider private constructor(
     private suspend fun generateVideoLocked(prompt: String): LLMResponse {
         if (prompt.isEmpty()) throw LLMError.ProviderError("Video prompt is empty")
         val token = getToken()
+        val vendor = resolvedVendorMedia()
+        VendorMedia.unsupportedMessage(vendor, "video")?.let { throw LLMError.ProviderError(it) }
+        when (vendor) {
+            VendorMediaKind.ARK -> return generateArkVideo(prompt, token)
+            VendorMediaKind.ZHIPU -> return generateZhipuVideo(prompt, token)
+            VendorMediaKind.DASHSCOPE -> return generateDashScopeVideo(prompt, token)
+            VendorMediaKind.MINIMAX -> return generateMinimaxVideo(prompt, token)
+            else -> Unit
+        }
         val paths = listOf("/videos", "/video/generations", "/videos/generations")
         var lastError: LLMError? = null
         for (path in paths) {
@@ -2138,6 +2182,286 @@ class OpenAIProvider private constructor(
             bytes[5] == 't'.code.toByte() &&
             bytes[6] == 'y'.code.toByte() &&
             bytes[7] == 'p'.code.toByte()
+    }
+
+    private suspend fun generateArkVideo(prompt: String, token: String): LLMResponse {
+        val url = requireHostPath("/api/v3/contents/generations/tasks", "Ark video")
+        val body = JSONObject().put("model", model.id)
+        if (VendorMedia.looksLikeSeedance(model.id)) {
+            body.put(
+                "content",
+                JSONArray().put(JSONObject().put("type", "text").put("text", prompt)),
+            )
+        } else {
+            body.put("prompt", prompt)
+            body.put("duration", 5)
+            body.put("resolution", "720p")
+        }
+        val created = postMediaJson(url, token, body)
+        if (created.first !in 200..299) throw mapHttpError(created.first, created.second)
+        return pollVendorVideo(
+            JSONObject(created.second),
+            token,
+            pollUrl = { id -> requireHostPath("/api/v3/contents/generations/tasks/$id", "Ark video poll") },
+            minPollMillis = 8_000L,
+            label = "Ark video",
+        )
+    }
+
+    private suspend fun generateZhipuVideo(prompt: String, token: String): LLMResponse {
+        val url = requireHostPath("/api/paas/v4/videos/generations", "Zhipu video")
+        val body = JSONObject().put("model", model.id).put("prompt", prompt)
+        val created = postMediaJson(url, token, body)
+        if (created.first !in 200..299) throw mapHttpError(created.first, created.second)
+        return pollVendorVideo(
+            JSONObject(created.second),
+            token,
+            pollUrl = { id -> requireHostPath("/api/paas/v4/async-result/$id", "Zhipu video poll") },
+            minPollMillis = 0L,
+            label = "Zhipu video",
+        )
+    }
+
+    private suspend fun generateDashScopeVideo(prompt: String, token: String): LLMResponse {
+        val url = requireHostPath(
+            "/api/v1/services/aigc/video-generation/video-synthesis",
+            "DashScope video",
+        )
+        val body = JSONObject()
+            .put("model", model.id)
+            .put("input", JSONObject().put("prompt", prompt))
+            .put("parameters", JSONObject())
+        val created = postMediaJson(url, token, body, mapOf("X-DashScope-Async" to "enable"))
+        if (created.first !in 200..299) throw mapHttpError(created.first, created.second)
+        return pollVendorVideo(
+            JSONObject(created.second),
+            token,
+            pollUrl = { id -> requireHostPath("/api/v1/tasks/$id", "DashScope video poll") },
+            minPollMillis = 0L,
+            label = "DashScope video",
+        )
+    }
+
+    private suspend fun generateMinimaxVideo(prompt: String, token: String): LLMResponse {
+        val url = requireHostPath("/v1/video_generation", "MiniMax video")
+        val body = JSONObject().put("model", model.id).put("prompt", prompt)
+        val created = postMediaJson(url, token, body)
+        if (created.first !in 200..299) throw mapHttpError(created.first, created.second)
+        val createdJson = JSONObject(created.second)
+        val taskId = VendorMedia.taskId(createdJson)
+        if (taskId.isEmpty()) throw LLMError.ProviderError("MiniMax video create returned no task_id")
+        repeat(120) { attempt ->
+            kotlinx.coroutines.delay(vendorPollDelay(attempt, 0L))
+            val pollUrl = requireHostPath(
+                "/v1/query/video_generation?task_id=$taskId",
+                "MiniMax video poll",
+            )
+            val poll = getMedia(pollUrl, token)
+            if (poll.first !in 200..299) throw mapHttpError(poll.first, poll.second)
+            val json = JSONObject(poll.second)
+            val st = VendorMedia.taskStatus(json)
+            if (VendorMedia.isFailedStatus(st)) {
+                throw LLMError.ProviderError(VendorMedia.errorMessage(json).ifBlank { "MiniMax video failed" })
+            }
+            VendorMedia.extractHttpVideoUrl(json)?.let { return videoFromUrl(it) }
+            val fileId = VendorMedia.minimaxFileId(json)
+            if (fileId.isNotEmpty() && (VendorMedia.isSuccessStatus(st) || st.isEmpty())) {
+                val fileUrl = requireHostPath("/v1/files/retrieve?file_id=$fileId", "MiniMax file")
+                val fileResp = getMedia(fileUrl, token)
+                if (fileResp.first !in 200..299) throw mapHttpError(fileResp.first, fileResp.second)
+                val fileJson = JSONObject(fileResp.second)
+                VendorMedia.extractHttpVideoUrl(fileJson)?.let { return videoFromUrl(it) }
+                throw LLMError.ProviderError("MiniMax video completed but no download_url")
+            }
+        }
+        throw LLMError.ProviderError("MiniMax video generation timed out")
+    }
+
+    private suspend fun generateDashScopeImage(
+        prompt: String,
+        n: Int,
+        size: String?,
+        token: String,
+    ): LLMResponse {
+        val url = requireHostPath(
+            "/api/v1/services/aigc/text2image/image-synthesis",
+            "DashScope image",
+        )
+        val parameters = JSONObject().put("n", n)
+        val sizeValue = size?.replace('x', '*')?.replace('X', '*') ?: "1024*1024"
+        parameters.put("size", sizeValue)
+        val body = JSONObject()
+            .put("model", model.id)
+            .put("input", JSONObject().put("prompt", prompt))
+            .put("parameters", parameters)
+        val created = postMediaJson(url, token, body, mapOf("X-DashScope-Async" to "enable"))
+        if (created.first !in 200..299) throw mapHttpError(created.first, created.second)
+        var json = JSONObject(created.second)
+        val immediate = imageResponseFromVendorJson(json)
+        if (immediate.mediaAttachments.isNotEmpty()) return immediate
+        val id = VendorMedia.taskId(json)
+        if (id.isEmpty()) {
+            val err = VendorMedia.errorMessage(json)
+            throw LLMError.ProviderError(err.ifBlank { "DashScope image create returned no task_id" })
+        }
+        repeat(120) { attempt ->
+            kotlinx.coroutines.delay(vendorPollDelay(attempt, 0L))
+            val poll = getMedia(requireHostPath("/api/v1/tasks/$id", "DashScope image poll"), token)
+            if (poll.first !in 200..299) throw mapHttpError(poll.first, poll.second)
+            json = JSONObject(poll.second)
+            val st = VendorMedia.taskStatus(json)
+            if (VendorMedia.isFailedStatus(st)) {
+                throw LLMError.ProviderError(VendorMedia.errorMessage(json).ifBlank { "DashScope image failed" })
+            }
+            val parsed = imageResponseFromVendorJson(json)
+            if (parsed.mediaAttachments.isNotEmpty()) return parsed
+            if (VendorMedia.isSuccessStatus(st)) {
+                throw LLMError.ProviderError("DashScope image completed but no url")
+            }
+        }
+        throw LLMError.ProviderError("DashScope image generation timed out")
+    }
+
+    private suspend fun generateMinimaxImage(prompt: String, n: Int, token: String): LLMResponse {
+        val url = requireHostPath("/v1/image_generation", "MiniMax image")
+        val body = JSONObject()
+            .put("model", model.id)
+            .put("prompt", prompt)
+            .put("n", n)
+            .put("response_format", "base64")
+        val created = postMediaJson(url, token, body)
+        if (created.first !in 200..299) throw mapHttpError(created.first, created.second)
+        return imageResponseFromVendorJson(JSONObject(created.second))
+    }
+
+    private suspend fun pollVendorVideo(
+        created: JSONObject,
+        token: String,
+        pollUrl: (String) -> String,
+        minPollMillis: Long,
+        label: String,
+    ): LLMResponse {
+        val err0 = VendorMedia.errorMessage(created)
+        val st0 = VendorMedia.taskStatus(created)
+        if (VendorMedia.isFailedStatus(st0)) {
+            throw LLMError.ProviderError(err0.ifBlank { "$label failed" })
+        }
+        VendorMedia.extractHttpVideoUrl(created)?.let { return videoFromUrl(it) }
+        val id = VendorMedia.taskId(created)
+        if (id.isEmpty()) {
+            throw LLMError.ProviderError(err0.ifBlank { "$label create returned no task id and no file" })
+        }
+        repeat(120) { attempt ->
+            kotlinx.coroutines.delay(vendorPollDelay(attempt, minPollMillis))
+            val poll = getMedia(pollUrl(id), token)
+            if (poll.first !in 200..299) throw mapHttpError(poll.first, poll.second)
+            val json = try {
+                JSONObject(poll.second)
+            } catch (_: Exception) {
+                throw LLMError.ProviderError("$label poll: not JSON")
+            }
+            val st = VendorMedia.taskStatus(json)
+            if (VendorMedia.isFailedStatus(st)) {
+                throw LLMError.ProviderError(VendorMedia.errorMessage(json).ifBlank { "$label failed" })
+            }
+            VendorMedia.extractHttpVideoUrl(json)?.let { return videoFromUrl(it) }
+            if (VendorMedia.isSuccessStatus(st)) {
+                throw LLMError.ProviderError("$label completed but no video_url")
+            }
+        }
+        throw LLMError.ProviderError("$label generation timed out")
+    }
+
+    private fun imageResponseFromVendorJson(json: JSONObject): LLMResponse {
+        val b64s = VendorMedia.minimaxImageBase64(json)
+        if (b64s.isNotEmpty()) {
+            val attachments = b64s.mapNotNull { b64 ->
+                val bytes = try {
+                    Base64.decode(b64, Base64.DEFAULT)
+                } catch (_: Exception) {
+                    null
+                }
+                if (bytes == null || bytes.isEmpty()) null
+                else LLMMediaAttachment(LLMMediaAttachment.MediaType.IMAGE, detectImageMime(bytes), bytes)
+            }
+            if (attachments.isNotEmpty()) return LLMResponse("", "end_turn", null, attachments)
+        }
+        val urls = VendorMedia.extractHttpImageUrls(json)
+        if (urls.isEmpty()) return LLMResponse("", "end_turn", null, emptyList())
+        val attachments = urls.mapNotNull { url ->
+            try {
+                val resp = client.newCall(Request.Builder().url(url).get().build()).execute()
+                val mime = resp.header("Content-Type")
+                val raw = resp.body?.bytes()
+                resp.close()
+                if (raw == null || raw.isEmpty()) null
+                else LLMMediaAttachment(
+                    LLMMediaAttachment.MediaType.IMAGE,
+                    mime?.substringBefore(';') ?: detectImageMime(raw),
+                    raw,
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+        return LLMResponse("", "end_turn", null, attachments)
+    }
+
+    private fun videoFromUrl(url: String): LLMResponse {
+        val att = downloadUrl(url)
+            ?: throw LLMError.ProviderError("Failed to download video from temporary URL")
+        return LLMResponse("", "end_turn", null, listOf(att))
+    }
+
+    private fun vendorPollDelay(attempt: Int, minMillis: Long): Long {
+        val configured = if (attempt == 0) videoFirstPollMillis else videoPollMillis
+        // Tests set poll to 1ms; never inflate those. Production Ark asks ≥8s.
+        if (configured < 100L) return configured
+        return maxOf(configured, minMillis)
+    }
+
+    private fun requireHostPath(path: String, label: String): String =
+        hostRootURL(path) ?: throw LLMError.ProviderError("Cannot resolve $label endpoint from $basePath")
+
+    private fun postMediaJson(
+        url: String,
+        token: String,
+        body: JSONObject,
+        extra: Map<String, String> = emptyMap(),
+    ): Pair<Int, String> {
+        val req = Request.Builder()
+            .url(url)
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .applyKeyAuth(token)
+            .header("Content-Type", "application/json")
+            .apply {
+                for ((k, v) in extraHeaders) header(k, v)
+                for ((k, v) in extra) header(k, v)
+            }
+            .applyUserAgentOverride(customUserAgent)
+            .build()
+        val resp = client.newCall(req).execute()
+        val code = resp.code
+        val text = resp.body?.string() ?: ""
+        resp.close()
+        return code to text
+    }
+
+    private fun getMedia(url: String, token: String): Pair<Int, String> {
+        val req = Request.Builder()
+            .url(url)
+            .get()
+            .applyKeyAuth(token)
+            .apply {
+                for ((k, v) in extraHeaders) header(k, v)
+            }
+            .applyUserAgentOverride(customUserAgent)
+            .build()
+        val resp = client.newCall(req).execute()
+        val code = resp.code
+        val text = resp.body?.string() ?: ""
+        resp.close()
+        return code to text
     }
 
     // `internal` rather than private so the serialization can be asserted

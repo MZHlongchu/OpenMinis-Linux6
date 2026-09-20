@@ -20,7 +20,7 @@ object ProductMediaTools {
 
     fun generateImageDefinition(): AgentToolDefinition = AgentToolDefinition(
         name = GENERATE_IMAGE,
-        description = "Generate an image from a text prompt using the configured image model.",
+        description = "Generate an image from a text prompt using the configured image-output model. Returns markdown that displays in chat.",
         parameters = mapOf(
             "tool_title" to AgentToolParam("string", "A concise 5-10 word summary shown to the user."),
             "prompt" to AgentToolParam("string", "Image prompt."),
