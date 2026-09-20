@@ -3175,6 +3175,7 @@ fun ChatScreen(
                 approvals = pendingApprovals,
                 intercepts = interceptEvents,
                 onApprove = { viewModel.approvePendingTool(it) },
+                onApproveAll = { viewModel.approveAllForSession(it) },
                 onDeny = { viewModel.denyPendingTool(it) },
                 onDismissIntercept = { InterceptFeedback.dismiss(it) },
             )
@@ -6791,6 +6792,10 @@ fun ChatScreen(
                     onConfirm = { viewModel.approvePendingTool(approval.id) },
                     dismissText = "拒绝",
                     onDismiss = { viewModel.denyPendingTool(approval.id) },
+                    // [T-session-allow-all] Third action: approve this request
+                    // and auto-approve every remaining request this session.
+                    neutralText = "本会话全部允许",
+                    onNeutral = { viewModel.approveAllForSession(approval.id) },
                 )
             }
 

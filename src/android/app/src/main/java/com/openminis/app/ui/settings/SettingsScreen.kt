@@ -122,8 +122,6 @@ fun SettingsScreen(
     onWebSearchClick: () -> Unit = {},
     onAboutClick: () -> Unit = {},
     onPromptTemplatesClick: () -> Unit = {},
-    onWorkspaceRulesClick: () -> Unit = {},
-    onToolLimitsClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var evolutionEnabled by remember { mutableStateOf(false) }
@@ -210,13 +208,6 @@ fun SettingsScreen(
                     onClick = onMultiAgentClick,
                 )
                 SettingsItem(
-                    icon = Icons.Outlined.Timer,
-                    iconColor = Color(0xFFAF52DE),
-                    title = stringResource(R.string.settings_tool_limits),
-                    subtitle = stringResource(R.string.settings_tool_limits_subtitle),
-                    onClick = onToolLimitsClick,
-                )
-                SettingsItem(
                     icon = Icons.Outlined.Extension,
                     iconColor = Color(0xFF007AFF),
                     title = stringResource(R.string.settings_skills),
@@ -238,19 +229,15 @@ fun SettingsScreen(
                     subtitle = stringResource(R.string.settings_soul_subtitle),
                     onClick = onSoulClick,
                 )
+                // [T-persona-extension] Prompt templates + workspace rules
+                // merged into one persona-extension entry (both are extensions
+                // of the SOUL persona).
                 SettingsItem(
                     icon = Icons.AutoMirrored.Outlined.Article,
                     iconColor = Color(0xFF007AFF),
-                    title = stringResource(R.string.settings_prompt_templates),
-                    subtitle = stringResource(R.string.settings_prompt_templates_subtitle),
+                    title = stringResource(R.string.settings_persona_extension),
+                    subtitle = stringResource(R.string.settings_persona_extension_subtitle),
                     onClick = onPromptTemplatesClick,
-                )
-                SettingsItem(
-                    icon = Icons.AutoMirrored.Outlined.Assignment,
-                    iconColor = Color(0xFF8E8E93),
-                    title = stringResource(R.string.settings_workspace_rules),
-                    subtitle = stringResource(R.string.settings_workspace_rules_subtitle),
-                    onClick = onWorkspaceRulesClick,
                 )
                 SettingsItem(
                     icon = Icons.Outlined.Psychology,

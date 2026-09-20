@@ -35,22 +35,36 @@ import com.openminis.app.ui.components.DialogTextField
 
 @Composable
 fun WorkspaceRulesSettingsScreen(onBack: () -> Unit) {
+    val createRequest = remember { mutableStateOf(false) }
+    SettingsScaffold(
+        title = stringResource(R.string.workspace_rules_title),
+        onBack = onBack,
+        floatingActionButton = { WorkspaceRulesFab { createRequest.value = true } },
+    ) {
+        WorkspaceRulesSection(createRequest = createRequest)
+    }
+}
+
+/**
+ * [T-persona-extension] Content-only variant used by the merged
+ * PersonaExtensionScreen; keeps the old full-screen wrapper for deep links.
+ */
+@Composable
+fun WorkspaceRulesSection(createRequest: androidx.compose.runtime.MutableState<Boolean>? = null) {
     val context = LocalContext.current
     val revision by WorkspaceRulesStore.revision.collectAsState()
     val rules = remember(revision) { WorkspaceRulesStore.list() }
     val active = remember(revision) { WorkspaceRulesStore.activeIds() }
     var creating by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<WorkspaceRule?>(null) }
-
-    SettingsScaffold(
-        title = stringResource(R.string.workspace_rules_title),
-        onBack = onBack,
-        floatingActionButton = {
-            FloatingActionButton(onClick = { creating = true }) {
-                Icon(Icons.Default.Add, contentDescription = stringResource(R.string.workspace_rules_add))
-            }
-        },
-    ) {
+    // [T-persona-extension] The merged persona page raises this flag from its
+    // own FAB; consume-and-clear it here. Null on the standalone screen.
+    androidx.compose.runtime.LaunchedEffect(createRequest?.value) {
+        if (createRequest?.value == true) {
+            creating = true
+            createRequest.value = false
+        }
+    }
         SettingsSection(
             header = stringResource(R.string.workspace_rules_header),
             footer = stringResource(R.string.workspace_rules_footer),
@@ -90,7 +104,6 @@ fun WorkspaceRulesSettingsScreen(onBack: () -> Unit) {
                 }
             }
         }
-    }
 
     if (creating) {
         RuleEditorDialog(
@@ -170,4 +183,11 @@ private fun RuleEditorDialog(
             TextButton(onClick = onDismiss) { Text(stringResource(android.R.string.cancel)) }
         },
     )
+}
+
+@Composable
+private fun WorkspaceRulesFab(onClick: () -> Unit) {
+    FloatingActionButton(onClick = onClick) {
+        Icon(Icons.Default.Add, contentDescription = stringResource(R.string.workspace_rules_add))
+    }
 }

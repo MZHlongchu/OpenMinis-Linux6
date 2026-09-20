@@ -202,8 +202,10 @@ object DeepLinkHandler {
             "appearance" -> DeepLinkAction.OpenSettingsScreen(Routes.APPEARANCE)
             "background" -> DeepLinkAction.OpenSettingsScreen(Routes.BACKGROUND)
             "search", "web-search", "web_search" -> DeepLinkAction.OpenSettingsScreen(Routes.WEB_SEARCH)
-            "prompt-templates", "prompt_templates" -> DeepLinkAction.OpenSettingsScreen(Routes.PROMPT_TEMPLATES)
-            "workspace-rules", "workspace_rules" -> DeepLinkAction.OpenSettingsScreen(Routes.WORKSPACE_RULES)
+            // [T-persona-extension] Both prompt-templates and workspace-rules
+            // deep links land on the merged persona-extension page.
+            "prompt-templates", "prompt_templates" -> DeepLinkAction.OpenSettingsScreen(Routes.PERSONA_EXTENSION)
+            "workspace-rules", "workspace_rules" -> DeepLinkAction.OpenSettingsScreen(Routes.PERSONA_EXTENSION)
             "tool-limits", "tool_limits" -> DeepLinkAction.OpenSettingsScreen(Routes.TOOL_LIMITS)
             "about" -> DeepLinkAction.OpenSettingsScreen(Routes.ABOUT)
             "permissions" -> DeepLinkAction.OpenPermissionSettings

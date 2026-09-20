@@ -18,6 +18,23 @@ object ApprovalGate {
     private val pending = ConcurrentHashMap<String, MutableStateFlow<Boolean?>>()
     private val approvalDetails = ConcurrentHashMap<String, ApprovalRequest>()
 
+    // Session-scoped "allow everything" switch. Set from the in-app approval
+    // card's third action ("允许本会话全部操作"); every subsequent request is
+    // auto-approved until the session ends ([resetSessionAllowAll]).
+    @Volatile private var sessionAllowAll = false
+
+    fun enableSessionAllowAll() {
+        sessionAllowAll = true
+        Log.i(TAG, "session allow-all enabled")
+    }
+
+    fun isSessionAllowAll(): Boolean = sessionAllowAll
+
+    fun resetSessionAllowAll() {
+        if (sessionAllowAll) Log.i(TAG, "session allow-all reset")
+        sessionAllowAll = false
+    }
+
     private val _pendingApprovals = MutableStateFlow<Map<String, ApprovalRequest>>(emptyMap())
     val pendingApprovals: StateFlow<Map<String, ApprovalRequest>> = _pendingApprovals.asStateFlow()
 
@@ -37,7 +54,17 @@ object ApprovalGate {
         return id
     }
 
+    /**
+     * Returns a pending-approval id, or "" when the request was auto-approved
+     * by the session allow-all switch. An empty id never enters [pending] or
+     * the broadcast map, so no card / notification is surfaced; [waitFor]
+     * treats it as approved.
+     */
     fun requestApproval(toolName: String, preview: String): String {
+        if (sessionAllowAll) {
+            Log.d(TAG, "approval auto-allowed (session allow-all) tool=$toolName")
+            return ""
+        }
         val id = UUID.randomUUID().toString()
         pending[id] = MutableStateFlow(null as Boolean?)
         approvalDetails[id] = ApprovalRequest(id, toolName, preview)
@@ -47,6 +74,7 @@ object ApprovalGate {
     }
 
     suspend fun waitFor(id: String): Boolean {
+        if (id.isEmpty()) return true
         val flow = pending[id] ?: return false
         return try {
             withTimeout(TIMEOUT_MS) {
@@ -119,6 +147,9 @@ object ApprovalGate {
         // broadcast map was not refreshed would otherwise stay visible.
         approvalDetails.keys.toList().forEach { approvalDetails.remove(it) }
         refreshPendingBroadcast()
+        // A torn-down session must not leak the allow-all switch into the next
+        // conversation — reset it together with the queue.
+        resetSessionAllowAll()
     }
 
     fun pendingCount(): Int = pending.size

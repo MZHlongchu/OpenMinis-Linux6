@@ -140,6 +140,9 @@ object Routes {
     const val WORKSPACE_RULES = "workspace_rules"
     const val TOOL_LIMITS = "tool_limits"
 
+    /** [T-persona-extension] Merged prompt-templates + workspace-rules page. */
+    const val PERSONA_EXTENSION = "persona_extension"
+
     fun skillDetail(skillId: String) = "skill/$skillId"
     fun skillFile(skillId: String, relativePath: String = "SKILL.md"): String {
         // Path may contain `/`, which the nav library treats as a route
@@ -615,9 +618,7 @@ fun AppNavigation(
                 onAppearanceClick = { navController.safeNavigate(Routes.APPEARANCE) },
                 onBackgroundClick = { navController.safeNavigate(Routes.BACKGROUND) },
                 onWebSearchClick = { navController.safeNavigate(Routes.WEB_SEARCH) },
-                onPromptTemplatesClick = { navController.safeNavigate(Routes.PROMPT_TEMPLATES) },
-                onWorkspaceRulesClick = { navController.safeNavigate(Routes.WORKSPACE_RULES) },
-                onToolLimitsClick = { navController.safeNavigate(Routes.TOOL_LIMITS) },
+                onPromptTemplatesClick = { navController.safeNavigate(Routes.PERSONA_EXTENSION) },
                 onLogsClick = { navController.safeNavigate(Routes.LOGS) },
                 onAboutClick = { navController.safeNavigate(Routes.ABOUT) },
                 onMountedFoldersClick = { navController.safeNavigate(Routes.MOUNTED_FOLDERS) },
@@ -1211,6 +1212,12 @@ fun AppNavigation(
 
         composable(Routes.PROMPT_TEMPLATES) {
             com.openminis.app.ui.settings.PromptTemplatesSettingsScreen(
+                onBack = { navController.safePopBackStack() },
+            )
+        }
+
+        composable(Routes.PERSONA_EXTENSION) {
+            com.openminis.app.ui.settings.PersonaExtensionScreen(
                 onBack = { navController.safePopBackStack() },
             )
         }

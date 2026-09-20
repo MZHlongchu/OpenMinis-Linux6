@@ -325,6 +325,8 @@
     <!-- T-soul-md — SOUL.md personality / identity settings -->
     <string name="settings_soul">Soul</string>
     <string name="settings_soul_subtitle">Persistent personality and identity (SOUL.md)</string>
+    <string name="settings_persona_extension">Persona extension</string>
+    <string name="settings_persona_extension_subtitle">Session prompt templates &amp; workspace rules</string>
     <string name="settings_prompt_templates">Prompt templates</string>
     <string name="settings_prompt_templates_subtitle">Per-session system prompt; hot-swap next turn</string>
     <string name="prompt_templates_title">Prompt templates</string>
@@ -368,6 +370,7 @@
     <string name="gate_approval_title">Tool needs approval</string>
     <string name="gate_approval_approve">Allow</string>
     <string name="gate_approval_deny">Deny</string>
+    <string name="gate_approval_allow_all">Allow all this session</string>
     <string name="gate_intercept_denied">Blocked by SecurityGate</string>
     <string name="gate_intercept_rejected">Tool rejected</string>
     <string name="gate_intercept_dismiss">Dismiss</string>

@@ -42,21 +42,35 @@ import com.openminis.app.ui.components.DialogTextField
 
 @Composable
 fun PromptTemplatesSettingsScreen(onBack: () -> Unit) {
+    val createRequest = remember { mutableStateOf(false) }
+    SettingsScaffold(
+        title = stringResource(R.string.prompt_templates_title),
+        onBack = onBack,
+        floatingActionButton = { PromptTemplatesFab { createRequest.value = true } },
+    ) {
+        PromptTemplatesSection(createRequest = createRequest)
+    }
+}
+
+/**
+ * [T-persona-extension] Content-only variant used by the merged
+ * PersonaExtensionScreen; keeps the old full-screen wrapper for deep links.
+ */
+@Composable
+fun PromptTemplatesSection(createRequest: androidx.compose.runtime.MutableState<Boolean>? = null) {
     val context = LocalContext.current
     val revision by PromptTemplateStore.revision.collectAsState()
     val state = remember(revision) { PromptTemplateStore.state() }
     var editing by remember { mutableStateOf<PromptTemplate?>(null) }
     var creating by remember { mutableStateOf(false) }
-
-    SettingsScaffold(
-        title = stringResource(R.string.prompt_templates_title),
-        onBack = onBack,
-        floatingActionButton = {
-            FloatingActionButton(onClick = { creating = true }) {
-                Icon(Icons.Default.Add, contentDescription = stringResource(R.string.prompt_templates_add))
-            }
-        },
-    ) {
+    // [T-persona-extension] The merged persona page raises this flag from its
+    // own FAB; consume-and-clear it here. Null on the standalone screen.
+    androidx.compose.runtime.LaunchedEffect(createRequest?.value) {
+        if (createRequest?.value == true) {
+            creating = true
+            createRequest.value = false
+        }
+    }
         SettingsSection(
             header = stringResource(R.string.prompt_templates_header),
             footer = stringResource(R.string.prompt_templates_footer),
@@ -106,7 +120,6 @@ fun PromptTemplatesSettingsScreen(onBack: () -> Unit) {
                 }
             }
         }
-    }
 
     if (creating) {
         TemplateEditorDialog(
@@ -257,4 +270,11 @@ private fun TemplateEditorDialog(
             TextButton(onClick = onDismiss) { Text(stringResource(android.R.string.cancel)) }
         },
     )
+}
+
+@Composable
+private fun PromptTemplatesFab(onClick: () -> Unit) {
+    FloatingActionButton(onClick = onClick) {
+        Icon(Icons.Default.Add, contentDescription = stringResource(R.string.prompt_templates_add))
+    }
 }

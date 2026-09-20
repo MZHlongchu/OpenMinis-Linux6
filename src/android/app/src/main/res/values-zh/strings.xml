@@ -287,6 +287,8 @@
     <string name="mcp_delete_message">这将从 servers.json 中移除该服务器。此操作无法撤销。</string>
     <string name="settings_soul">人格</string>
     <string name="settings_soul_subtitle">持久化人格与身份（SOUL.md）</string>
+    <string name="settings_persona_extension">人格扩展</string>
+    <string name="settings_persona_extension_subtitle">会话提示词模板与工作区规则</string>
     <string name="settings_prompt_templates">提示词模板</string>
     <string name="settings_prompt_templates_subtitle">按会话选择系统提示词，下一轮热切换</string>
     <string name="prompt_templates_title">提示词模板</string>
@@ -330,6 +332,7 @@
     <string name="gate_approval_title">工具需要批准</string>
     <string name="gate_approval_approve">允许</string>
     <string name="gate_approval_deny">拒绝</string>
+    <string name="gate_approval_allow_all">本会话全部允许</string>
     <string name="gate_intercept_denied">已被 SecurityGate 拦截</string>
     <string name="gate_intercept_rejected">工具已被拒绝</string>
     <string name="gate_intercept_dismiss">关闭</string>

@@ -1520,6 +1520,17 @@ class ChatViewModel(
         ApprovalNotifier.cancelApproval(context, id)
     }
 
+    /**
+     * Third action on the approval card: approve this request AND flip the
+     * session-scoped allow-all switch, so later sensitive operations in this
+     * conversation execute without asking again. The switch lives in
+     * ApprovalGate and resets on session teardown (cleanupAll).
+     */
+    fun approveAllForSession(id: String) {
+        ApprovalGate.enableSessionAllowAll()
+        approvePendingTool(id)
+    }
+
     private fun activeOverrides(): com.openminis.app.data.model.ModelOverrides? {
         val id = _activeEntryId.value ?: return null
         return providerRepository.config.value.modelEntries.find { it.id == id }?.overrides

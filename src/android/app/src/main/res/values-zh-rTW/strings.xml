@@ -1799,4 +1799,7 @@
     <string name="settings_evolution_subtitle">從糾正中學習偏好（%1$s）</string>
     <string name="settings_evolution_state_on">目前開啟</string>
     <string name="settings_evolution_state_off">目前關閉</string>
+    <string name="gate_approval_allow_all">本工作階段全部允許</string>
+    <string name="settings_persona_extension">人格擴充</string>
+    <string name="settings_persona_extension_subtitle">會話提示詞範本與工作區規則</string>
 </resources>

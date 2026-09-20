@@ -36,6 +36,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.openminis.app.MinisApp
 import com.openminis.app.R
+import com.openminis.app.data.ToolLimitPrefs
 import com.openminis.app.data.PlanDiscussionPrefs
 import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.data.model.ProviderInstance
@@ -240,6 +241,65 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
             }
         }
 
+        // [T-tool-limits-merge] Tool limits moved here from the removed
+        // standalone settings entry (shell timeout / file_read caps /
+        // sub-agent turns). ToolLimitPrefs is SharedPreferences-backed;
+        // revision drives recomposition after +/- taps.
+        val toolLimitRevision by ToolLimitPrefs.revision.collectAsState()
+        SettingsSection(
+            header = stringResource(R.string.tool_limits_header),
+            footer = stringResource(R.string.tool_limits_footer),
+        ) {
+            val shell = remember(toolLimitRevision) { ToolLimitPrefs.shellTimeoutSec() }
+            val chars = remember(toolLimitRevision) { ToolLimitPrefs.fileReadMaxChars() }
+            val lines = remember(toolLimitRevision) { ToolLimitPrefs.fileReadMaxLines() }
+            val turns = remember(toolLimitRevision) { ToolLimitPrefs.subagentMaxTurns() }
+            LimitStepper(
+                title = stringResource(R.string.tool_limits_shell),
+                valueLabel = stringResource(R.string.tool_limits_shell_value, shell),
+                value = shell,
+                min = ToolLimitPrefs.MIN_SHELL_TIMEOUT_SEC,
+                max = ToolLimitPrefs.MAX_SHELL_TIMEOUT_SEC,
+                step = ToolLimitPrefs.SHELL_STEP_SEC,
+                onChange = { ToolLimitPrefs.setShellTimeoutSec(it) },
+                showDivider = true,
+            )
+            LimitStepper(
+                title = stringResource(R.string.tool_limits_file_chars),
+                valueLabel = chars.toString(),
+                value = chars,
+                min = ToolLimitPrefs.MIN_FILE_READ_MAX_CHARS,
+                max = ToolLimitPrefs.MAX_FILE_READ_MAX_CHARS,
+                step = ToolLimitPrefs.FILE_CHARS_STEP,
+                onChange = { ToolLimitPrefs.setFileReadMaxChars(it) },
+                showDivider = true,
+            )
+            LimitStepper(
+                title = stringResource(R.string.tool_limits_file_lines),
+                valueLabel = if (lines == 0) {
+                    stringResource(R.string.tool_limits_file_lines_unlimited)
+                } else {
+                    lines.toString()
+                },
+                value = lines,
+                min = 0,
+                max = ToolLimitPrefs.MAX_FILE_READ_MAX_LINES,
+                step = ToolLimitPrefs.FILE_LINES_STEP,
+                onChange = { ToolLimitPrefs.setFileReadMaxLines(it) },
+                showDivider = true,
+            )
+            LimitStepper(
+                title = stringResource(R.string.tool_limits_subagent),
+                valueLabel = turns.toString(),
+                value = turns,
+                min = ToolLimitPrefs.MIN_SUBAGENT_MAX_TURNS,
+                max = ToolLimitPrefs.MAX_SUBAGENT_MAX_TURNS,
+                step = ToolLimitPrefs.TURNS_STEP,
+                onChange = { ToolLimitPrefs.setSubagentMaxTurns(it) },
+                showDivider = false,
+            )
+        }
+
         val gate = com.openminis.app.security.SecurityGateHolder.gate
         var permMode by remember { mutableStateOf(gate.getPermissionMode()) }
         SettingsSection(
@@ -388,4 +448,43 @@ private fun EditableStepperValue(
             },
         )
     }
+}
+
+/**
+ * [T-tool-limits-merge] +/- stepper for a numeric tool limit. Moved from the
+ * removed ToolLimitsSettingsScreen.
+ */
+@Composable
+private fun LimitStepper(
+    title: String,
+    valueLabel: String,
+    value: Int,
+    min: Int,
+    max: Int,
+    step: Int,
+    onChange: (Int) -> Unit,
+    showDivider: Boolean,
+) {
+    SettingsRow(
+        title = title,
+        subtitle = valueLabel,
+        showChevron = false,
+        showDivider = showDivider,
+        trailing = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = { onChange((value - step).coerceAtLeast(min)) },
+                    enabled = value > min,
+                ) {
+                    Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.tool_limits_decrease))
+                }
+                IconButton(
+                    onClick = { onChange((value + step).coerceAtMost(max)) },
+                    enabled = value < max,
+                ) {
+                    Icon(Icons.Outlined.Add, contentDescription = stringResource(R.string.tool_limits_increase))
+                }
+            }
+        },
+    )
 }
