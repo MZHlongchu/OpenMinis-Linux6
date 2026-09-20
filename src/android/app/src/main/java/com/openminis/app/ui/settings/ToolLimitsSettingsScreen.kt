@@ -100,6 +100,12 @@ private fun LimitStepper(
                 ) {
                     Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.tool_limits_decrease))
                 }
+                EditableStepperValue(
+                    value = value,
+                    min = min,
+                    max = max,
+                    onValueChange = onChange,
+                )
                 IconButton(
                     onClick = { onChange((value + step).coerceAtMost(max)) },
                     enabled = value < max,

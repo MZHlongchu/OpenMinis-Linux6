@@ -16,37 +16,50 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.openminis.app.R
 import com.openminis.app.i18n.uppercaseForDisplay
 
 /**
@@ -502,4 +515,66 @@ fun SettingsCardBlock(
             .fillMaxWidth(),
         content = content,
     )
+}
+
+/**
+ * Numeric value between a − / + stepper. Tapping the number opens a dialog
+ * so the user can type any in-range integer (not just step by step).
+ */
+@Composable
+fun EditableStepperValue(
+    value: Int,
+    min: Int,
+    max: Int,
+    enabled: Boolean = true,
+    onValueChange: (Int) -> Unit,
+) {
+    var editing by remember { mutableStateOf(false) }
+    val maxDigits = maxOf(min.toString().length, max.toString().length, 1)
+    Text(
+        value.toString(),
+        style = MaterialTheme.typography.titleMedium,
+        color = if (enabled) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .padding(horizontal = 4.dp)
+            .widthIn(min = 28.dp)
+            .clickable(enabled = enabled) { editing = true },
+    )
+    if (editing) {
+        var text by remember { mutableStateOf(value.toString()) }
+        val parsed = text.trim().toIntOrNull()
+        val valid = parsed != null && parsed in min..max
+        AlertDialog(
+            onDismissRequest = { editing = false },
+            title = { Text(stringResource(R.string.settings_multi_agent_enter_value)) },
+            text = {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { input ->
+                        text = input.filter { it.isDigit() }.take(maxDigits)
+                    },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    label = { Text(stringResource(R.string.settings_multi_agent_value_range, min, max)) },
+                    isError = text.isNotEmpty() && !valid,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        parsed?.let { onValueChange(it) }
+                        editing = false
+                    },
+                    enabled = valid,
+                ) { Text(stringResource(R.string.settings_multi_agent_confirm)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { editing = false }) {
+                    Text(stringResource(R.string.settings_multi_agent_cancel))
+                }
+            },
+        )
+    }
 }

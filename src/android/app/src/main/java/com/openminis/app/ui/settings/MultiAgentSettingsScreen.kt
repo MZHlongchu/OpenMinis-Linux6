@@ -1,13 +1,11 @@
 package com.openminis.app.ui.settings
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Groups
@@ -32,7 +30,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.openminis.app.MinisApp
 import com.openminis.app.R
@@ -106,8 +103,6 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                // [stepper-no-typing] 只有 +/- 两个按钮；当前值显示在左侧副标题
-                // （即行的底部），不再提供点击数字手动输入。
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
                         onClick = { repo.setMaxConcurrent(maxConcurrent - 1) },
@@ -115,6 +110,13 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                     ) {
                         Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.settings_multi_agent_decrease))
                     }
+                    EditableStepperValue(
+                        value = maxConcurrent,
+                        min = MultiAgentSettings.MIN_CONCURRENT,
+                        max = MultiAgentSettings.MAX_CONCURRENT,
+                        enabled = enabled,
+                        onValueChange = { repo.setMaxConcurrent(it) },
+                    )
                     IconButton(
                         onClick = { repo.setMaxConcurrent(maxConcurrent + 1) },
                         enabled = enabled && maxConcurrent < MultiAgentSettings.MAX_CONCURRENT,
@@ -142,7 +144,6 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                // [stepper-no-typing] 同并发上限：只留 +/-，值在底部副标题。
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
                         onClick = { repo.setSubagentMaxAttempts(subagentMaxAttempts - 1) },
@@ -150,6 +151,13 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
                     ) {
                         Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.settings_multi_agent_decrease))
                     }
+                    EditableStepperValue(
+                        value = subagentMaxAttempts,
+                        min = MultiAgentSettings.MIN_SUBAGENT_ATTEMPTS,
+                        max = MultiAgentSettings.MAX_SUBAGENT_ATTEMPTS,
+                        enabled = enabled,
+                        onValueChange = { repo.setSubagentMaxAttempts(it) },
+                    )
                     IconButton(
                         onClick = { repo.setSubagentMaxAttempts(subagentMaxAttempts + 1) },
                         enabled = enabled && subagentMaxAttempts < MultiAgentSettings.MAX_SUBAGENT_ATTEMPTS,
@@ -440,6 +448,12 @@ private fun LimitStepper(
                 ) {
                     Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.tool_limits_decrease))
                 }
+                EditableStepperValue(
+                    value = value,
+                    min = min,
+                    max = max,
+                    onValueChange = onChange,
+                )
                 IconButton(
                     onClick = { onChange((value + step).coerceAtMost(max)) },
                     enabled = value < max,
