@@ -1,8 +1,12 @@
 package com.openminis.app.diagnostics
 
+import android.app.ActivityManager
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import com.openminis.app.util.IsoTime
 import java.io.File
@@ -122,7 +126,7 @@ object HangDetector {
     fun start(context: Context) {
         if (!started.compareAndSet(false, true)) return
         appContext = context.applicationContext
-        lastHeartbeatAt.set(System.currentTimeMillis())
+        lastHeartbeatAt.set(nowElapsed())
         // [T-android-render-breaker] Seed the render breaker from the
         // PERSISTED hang count: in the ANR-kill loop the process never lives
         // long enough to accumulate 2 in-process hangs, but the count
@@ -138,6 +142,7 @@ object HangDetector {
         // when the JVM is winding down, which can suppress the very stalls
         // we want to capture.
         thread(name = "HangDetector-watch", isDaemon = false) { watchLoop() }
+        registerUnfreezeHeartbeatReset(context.applicationContext)
         // [T-HANG-DIAG] echo via stdout *and* logcat so the start banner
         // shows up regardless of whether the user has Settings → Logging
         // enabled. AppLogger replaces System.out with its file-writing
@@ -200,9 +205,37 @@ object HangDetector {
 
     // -- internals -----------------------------------------------------------
 
+    private fun nowElapsed(): Long = SystemClock.elapsedRealtime()
+
+    /**
+     * API 35+: when the UID is unfrozen, reset the heartbeat so the first
+     * watchdog tick after thaw does not see a multi-minute gap. The 30s
+     * freeze gate remains as a belt-and-suspenders for the race where
+     * [watchLoop] runs before this callback.
+     */
+    private fun registerUnfreezeHeartbeatReset(context: Context) {
+        if (Build.VERSION.SDK_INT < 35) return
+        try {
+            val am = context.getSystemService(ActivityManager::class.java) ?: return
+            val myUid = Process.myUid()
+            am.addOnUidFrozenStateChangedListener(context.mainExecutor) { uids, states ->
+                for (i in uids.indices) {
+                    if (uids[i] == myUid &&
+                        states[i] == ActivityManager.UID_FROZEN_STATE_UNFROZEN
+                    ) {
+                        lastHeartbeatAt.set(nowElapsed())
+                        Log.i(TAG, "UID unfrozen — heartbeat reset")
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "failed to register freeze listener: ${t.message}")
+        }
+    }
+
     private fun scheduleHeartbeat() {
         mainHandler.postDelayed({
-            lastHeartbeatAt.set(System.currentTimeMillis())
+            lastHeartbeatAt.set(nowElapsed())
             scheduleHeartbeat()
         }, HEARTBEAT_INTERVAL_MS)
     }
@@ -228,7 +261,7 @@ object HangDetector {
                 return
             }
             ticks++
-            val now = System.currentTimeMillis()
+            val now = nowElapsed()
             val since = now - lastHeartbeatAt.get()
             // [T-HANG-DIAG] every 30 ticks (~15s) emit a liveness ping so we
             // can confirm the watchdog is alive even when nothing hangs.
@@ -257,7 +290,7 @@ object HangDetector {
                 lastSampleAt = now
                 lastLogAt.set(now)
                 // [T-android-hangdetector-freeze-gate] Freeze/deep-sleep resumes
-                // produce wall-clock gaps of minutes; a live main-thread ANR
+                // produce elapsedRealtime gaps of minutes; a live main-thread ANR
                 // cannot survive that long. Log the episode, but only let it
                 // feed the breakers when the gap is plausibly a real hang.
                 val isFreezeArtifact = since > FREEZE_GAP_CEILING_MS

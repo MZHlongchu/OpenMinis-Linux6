@@ -4,7 +4,8 @@ import android.content.Context
 import androidx.core.content.FileProvider
 import com.openminis.app.MinisApp
 import com.openminis.app.data.model.ThinkingLevel
-import com.openminis.app.ui.chat.InputAttachment
+import com.openminis.app.session.ChatRuntime
+import com.openminis.app.session.InputAttachment
 import org.json.JSONObject
 import java.io.File
 
@@ -38,24 +39,11 @@ internal object ChatMutationMethods {
         val text = params.optString("prompt", "").ifEmpty {
             throw RPCException(-32602, "Missing 'prompt' param")
         }
-        val app = app(context)
-        val store = com.openminis.app.ui.chat.ChatViewModelStore
         val sessionId = params.optString("sessionId", "").ifEmpty { null }
-            ?: store.activeSessionId
+            ?: ChatRuntime.binder?.activeSessionId
             ?: throw RPCException(-32000, "No chat is on screen (activeSessionId is null) and no sessionId was given")
         val vm = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-            androidx.lifecycle.ViewModelProvider(
-                store.ownerFor(sessionId),
-                com.openminis.app.ui.chat.ChatViewModel.factory(
-                    sessionId = sessionId,
-                    chatRepository = app.chatRepository,
-                    providerRepository = app.providerRepository,
-                    appContext = app.applicationContext,
-                    memoryRepository = app.memoryRepository,
-                    skillRepository = app.skillRepository,
-                    mcpRepository = app.mcpRepository,
-                ),
-            )[com.openminis.app.ui.chat.ChatViewModel::class.java].also { it.sendMessage(text) }
+            ChatRuntime.bind(sessionId).also { it.sendMessage(text) }
         }
         return JSONObject().apply {
             put("ok", true)

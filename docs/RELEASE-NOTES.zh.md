@@ -1,3 +1,26 @@
+# OpenMinis-Linux 1.36.8-linux
+
+- versionCode **61**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.7-linux，工程与运行时收口（产品行为不变）：
+
+- **看门狗单调时钟 + API 35 解冻重置**：心跳改 `elapsedRealtime`；UID unfreeze 立即重置。gap > 30s 冻结伪影仍落 stall 日志但不计入断路器。
+- **无障碍 offload 等待**：滚动/稳定/抽取轮询改为事件 condition wait；双击 80ms sleep 保留。
+- **流式刷新抽出 `StreamSessionController`**，附节流阶梯单测；5xx 用 companion Regex 识别。
+- **`ChatSessionPort` / `ChatRuntime`**：headless RPC 与 UI 共用同一套会话端口，debug 层不再依赖 `ui.chat`。
+- **`:core:model`**：18 个 `data.model` 类型独立 JVM 模块；ThinkingRule Room 映射迁到 `data.db`。
+- **models.dev 目录 gzip**（Android 约 4.2MB → 424KB），失败回退明文；iOS 仍用明文。
+- **Release 开 `shrinkResources`**，NDK 符号表，CI 跑单测并归档 mapping / native symbols；Gradle configuration/build cache。
+- **RAW SSE** 仅 VERBOSE 日志级打印。429 分级与 1.36.7 相同。
+
+---
+
 # OpenMinis-Linux 1.36.7-linux
 
 - versionCode **60**

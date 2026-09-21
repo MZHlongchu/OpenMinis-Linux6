@@ -64,6 +64,8 @@ dependencyResolutionManagement {
 
 rootProject.name = "MinisUltra"
 include(":app")
+include(":core:model")
+include(":benchmark")
 
 /**
  * Prepend China-reachable Maven mirrors when MINIS_BUILD_MIRRORS=cn, or when

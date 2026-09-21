@@ -8,8 +8,9 @@ import com.openminis.app.data.db.ProviderConfigDao
 import com.openminis.app.data.db.ProviderConfigMetaKeys
 import com.openminis.app.data.db.ProviderConfigSnapshot
 import com.openminis.app.data.db.ProviderThinkingRuleEntity
+import com.openminis.app.data.db.toEntity
+import com.openminis.app.data.db.toRule
 import com.openminis.app.provider.thinking.ThinkingRule
-import com.openminis.app.provider.thinking.ThinkingRuleCoding
 import com.openminis.app.provider.thinking.ThinkingRuleResolver
 import com.openminis.app.data.db.ProviderDatabase
 import com.openminis.app.data.db.compositeEntryKey
@@ -1632,7 +1633,7 @@ class ProviderRepository(private val context: Context) {
 
     /** Load one instance's custom rules from Room, in stored order. */
     fun thinkingRules(instanceId: String): List<ThinkingRule> = runBlocking {
-        runCatching { providerDao.loadThinkingRules(instanceId).map { ThinkingRuleCoding.toRule(it) } }
+        runCatching { providerDao.loadThinkingRules(instanceId).map { it.toRule() } }
             .getOrDefault(emptyList())
     }
 
@@ -1652,7 +1653,7 @@ class ProviderRepository(private val context: Context) {
         runCatching {
             val rows = runBlocking { providerDao.loadAllThinkingRules() }
             val byInstance = rows.groupBy { it.providerInstanceId }
-                .mapValues { (_, rs) -> rs.sortedBy { it.sortOrder }.map { ThinkingRuleCoding.toRule(it) } }
+                .mapValues { (_, rs) -> rs.sortedBy { it.sortOrder }.map { it.toRule() } }
             ThinkingRuleResolver.setAllCustomRules(byInstance)
         }
     }
@@ -1673,10 +1674,10 @@ class ProviderRepository(private val context: Context) {
         val idx = existing.indexOfFirst { it.id == ruleId }
         if (idx >= 0) {
             // Update in place at its current sort_order.
-            existing[idx] = ThinkingRuleCoding.toEntity(rule, ruleId, instanceId, existing[idx].sortOrder)
+            existing[idx] = rule.toEntity(ruleId, instanceId, existing[idx].sortOrder)
         } else {
             // New rule at the top; everything else shifts down.
-            existing.add(0, ThinkingRuleCoding.toEntity(rule, ruleId, instanceId, 0))
+            existing.add(0, rule.toEntity(ruleId, instanceId, 0))
         }
         val renumbered = existing.mapIndexed { i, e -> e.copy(sortOrder = i) }
         providerDao.replaceThinkingRules(instanceId, renumbered)

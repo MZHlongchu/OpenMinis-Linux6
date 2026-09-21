@@ -140,7 +140,7 @@ jobs:
         run: |
           sed -i 's|org.gradle.jvmargs=.*|org.gradle.jvmargs=-Xmx6g -Dfile.encoding=UTF-8|' gradle.properties
           chmod +x gradlew
-          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+          ./gradlew :app:testDebugUnitTest :app:assembleRelease --no-daemon --stacktrace
 
       - name: Stage APK
         run: |
@@ -165,12 +165,32 @@ jobs:
           fi
           ls -lh dist/
 
+      - name: Stage mapping.txt and native symbols
+        run: |
+          mkdir -p dist/symbols
+          MAP=src/android/app/build/outputs/mapping/release/mapping.txt
+          if [ -f "$MAP" ]; then cp "$MAP" dist/symbols/mapping.txt; fi
+          find src/android/app/build -name 'native-debug-symbols.zip' -print -exec cp {} dist/symbols/ \; || true
+          MERGED=$(find src/android/app/build/intermediates -path '*merged_native_libs*release*' -name '*.so' | head -n 20)
+          if [ -n "$MERGED" ]; then
+            mkdir -p dist/symbols/so
+            for f in $MERGED; do cp "$f" dist/symbols/so/; done
+          fi
+          ls -lhR dist/symbols || true
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: minis-ultra-apk
           path: dist/minis-ultra-com.openminis.linux.apk
           if-no-files-found: error
+
+      - name: Upload mapping and native symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: minis-ultra-symbols
+          path: dist/symbols
+          if-no-files-found: warn
 
       - name: Read app version
         id: appver

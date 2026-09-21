@@ -1,13 +1,11 @@
 package com.openminis.app.debug
 
 import android.content.Context
-import androidx.lifecycle.ViewModelProvider
 import com.openminis.app.MinisApp
 import com.openminis.app.data.model.ThinkingLevel
-import com.openminis.app.ui.chat.ChatViewModel
-import com.openminis.app.ui.chat.ChatViewModelStore
-import com.openminis.app.ui.chat.InputAttachment
-import com.openminis.app.ui.chat.addAttachment
+import com.openminis.app.session.ChatRuntime
+import com.openminis.app.session.ChatSessionPort
+import com.openminis.app.session.InputAttachment
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -30,43 +28,21 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 internal object HeadlessChatRunner {
 
-    /** sessionId → ViewModelProvider that owns its single ChatViewModel. */
-    private val providers = mutableMapOf<String, ViewModelProvider>()
+    /** sessionId → ChatSessionPort bound via ChatRuntime (same store as UI). */
+    private val sessions = mutableMapOf<String, ChatSessionPort>()
 
     private fun app(context: Context): MinisApp =
         context.applicationContext as? MinisApp
             ?: throw RPCException(-32000, "MinisApp not initialized")
 
     @Synchronized
-    private fun providerFor(context: Context, sessionId: String): ViewModelProvider {
-        val cached = providers[sessionId]
-        if (cached != null) return cached
-        val app = app(context)
-        // Share the process-wide ChatViewModelStore so the in-flight VM (with
-        // its live streamJob + _isStreaming) is the same instance the UI's
-        // ChatScreen will bind to when the user opens this session. Using a
-        // private ViewModelStore here split headless and UI into two VMs, so
-        // "run now" started streaming on the headless VM while the UI's VM
-        // saw only a static snapshot — no thinking indicator, no live text.
-        val owner = ChatViewModelStore.ownerFor(sessionId)
-        val provider = ViewModelProvider(
-            owner,
-            ChatViewModel.factory(
-                sessionId = sessionId,
-                chatRepository = app.chatRepository,
-                providerRepository = app.providerRepository,
-                appContext = app.applicationContext,
-                memoryRepository = app.memoryRepository,
-                skillRepository = app.skillRepository,
-                mcpRepository = app.mcpRepository,
-            ),
-        )
-        providers[sessionId] = provider
-        return provider
+    private fun viewModel(context: Context, sessionId: String): ChatSessionPort {
+        sessions[sessionId]?.let { return it }
+        app(context) // ensure MinisApp is up (ChatRuntime.binder set in onCreate)
+        val port = ChatRuntime.bind(sessionId)
+        sessions[sessionId] = port
+        return port
     }
-
-    private fun viewModel(context: Context, sessionId: String): ChatViewModel =
-        providerFor(context, sessionId)[ChatViewModel::class.java]
 
     /**
      * Ensure a session exists in the DB before binding a ViewModel. Mirrors
@@ -506,8 +482,7 @@ internal object HeadlessChatRunner {
     }
 
     suspend fun cancel(context: Context, sessionId: String): Boolean = withContext(Dispatchers.Main) {
-        val cached = providers[sessionId] ?: return@withContext false
-        val vm = cached[ChatViewModel::class.java]
+        val vm = sessions[sessionId] ?: return@withContext false
         val wasRunning = vm.isStreaming.value
         if (wasRunning) vm.cancelStream()
         wasRunning
@@ -535,7 +510,7 @@ internal object HeadlessChatRunner {
     /** Drop the cached ViewModel for [sessionId] (used after delete). */
     @Synchronized
     fun forget(sessionId: String) {
-        providers.remove(sessionId)
+        sessions.remove(sessionId)
     }
 
     private fun extractText(partsJson: String): String? {

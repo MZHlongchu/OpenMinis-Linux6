@@ -706,7 +706,7 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
                 any
             }
             if (!scrolled) return ok(args, JSONObject().put("found", false).put("reason", "scroll_action_rejected"))
-            Thread.sleep(400)
+            if (!awaitA11yEvent(svc, 400L)) return err(args, "INTERRUPTED", "scroll cancelled")
         }
         return ok(args, JSONObject().put("found", false))
     }
@@ -807,7 +807,11 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
                     else ok(args, JSONObject().put("disappeared", true))
                 }
             }
-            Thread.sleep(200)
+            val remaining = deadline - System.currentTimeMillis()
+            if (remaining <= 0L) break
+            if (!awaitA11yEvent(svc, remaining.coerceAtMost(1_000L))) {
+                return err(args, "INTERRUPTED", "wait cancelled")
+            }
         }
         return ok(args, JSONObject().put("found", false).put("timedOut", true))
     }
@@ -828,7 +832,12 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         var lastSig = treeSignature(svc)
         var stableSince = System.currentTimeMillis()
         while (System.currentTimeMillis() < deadline) {
-            Thread.sleep(interval)
+            val now = System.currentTimeMillis()
+            val remainingStable = (stableDuration - (now - stableSince)).coerceAtLeast(1L)
+            val remainingTimeout = deadline - now
+            if (remainingTimeout <= 0L) break
+            val wait = minOf(interval, remainingStable, remainingTimeout)
+            if (!awaitA11yEvent(svc, wait)) return err(args, "INTERRUPTED", "wait stable cancelled")
             val sig = treeSignature(svc)
             if (sig != lastSig) { lastSig = sig; stableSince = System.currentTimeMillis() }
             else if (System.currentTimeMillis() - stableSince >= stableDuration) {
@@ -862,7 +871,11 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             val pkgOk = pkg == null || p == pkg
             val actOk = act == null || c == act || (act.startsWith(".") && (c?.endsWith(act) == true))
             if (pkgOk && actOk) return ok(args, JSONObject().put("packageName", p ?: "").put("activityName", c ?: ""))
-            Thread.sleep(200)
+            val remaining = deadline - System.currentTimeMillis()
+            if (remaining <= 0L) break
+            if (!awaitA11yEvent(svc, remaining.coerceAtMost(1_000L))) {
+                return err(args, "INTERRUPTED", "wait activity cancelled")
+            }
         }
         return ok(args, JSONObject().put("timedOut", true))
     }
@@ -888,7 +901,11 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         val sb = StringBuilder()
         val deadline = System.currentTimeMillis() + duration.coerceAtMost(120_000L)
         val collected = java.util.concurrent.ConcurrentLinkedQueue<MinisAccessibilityService.RecordedEvent>()
-        val listener: (MinisAccessibilityService.RecordedEvent) -> Unit = { collected.offer(it) }
+        val lock = Object()
+        val listener: (MinisAccessibilityService.RecordedEvent) -> Unit = {
+            collected.offer(it)
+            synchronized(lock) { lock.notifyAll() }
+        }
         svc.addEventListener(listener)
         try {
             while (System.currentTimeMillis() < deadline) {
@@ -907,7 +924,14 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
                     sb.append(obj.toString()).append('\n')
                     if (once) return NativeOffloadResult(0, sb.toString())
                 }
-                Thread.sleep(50)
+                val remaining = deadline - System.currentTimeMillis()
+                if (remaining <= 0L) break
+                try {
+                    synchronized(lock) { lock.wait(remaining) }
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return err(args, "INTERRUPTED", "event watch cancelled")
+                }
             }
         } finally {
             svc.removeEventListener(listener)
@@ -981,13 +1005,29 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         return NativeOffloadResult(0, sb.toString())
     }
 
-    private fun sleepPoll(): Boolean {
+    private fun sleepPoll(): Boolean = awaitA11yEvent(svcOrThrow(), 150L)
+
+    /**
+     * Wait until the accessibility service delivers an event, or [timeoutMs]
+     * elapses. Replaces Thread.sleep polling so the offload worker is not
+     * pinned for the whole wait.
+     */
+    private fun awaitA11yEvent(svc: MinisAccessibilityService, timeoutMs: Long): Boolean {
+        if (timeoutMs <= 0L) return !Thread.currentThread().isInterrupted
+        if (Thread.currentThread().isInterrupted) return false
+        val lock = Object()
+        val listener: (MinisAccessibilityService.RecordedEvent) -> Unit = {
+            synchronized(lock) { lock.notifyAll() }
+        }
+        svc.addEventListener(listener)
         return try {
-            Thread.sleep(150)
+            synchronized(lock) { lock.wait(timeoutMs) }
             !Thread.currentThread().isInterrupted
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
             false
+        } finally {
+            svc.removeEventListener(listener)
         }
     }
 
@@ -1136,7 +1176,7 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             if (!autoScroll || items.size >= maxItems) break
             val scrolled = container.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
             if (!scrolled) break
-            Thread.sleep(400)
+            if (!awaitA11yEvent(svc, 400L)) return err(args, "INTERRUPTED", "extract cancelled")
             iter++
         } while (iter < 30)
         val arr = JSONArray()

@@ -121,10 +121,6 @@ internal fun ChatViewModel.dismissMemorySheet() {
     _showMemorySheet.value = false
 }
 
-internal fun ChatViewModel.addAttachment(attachment: InputAttachment) {
-    _attachments.value = _attachments.value + attachment
-}
-
 internal fun ChatViewModel.removeAttachment(id: String) {
     _attachments.value = _attachments.value.filter { it.id != id }
 }

@@ -7,6 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IOS_DEST="$SCRIPT_DIR/../src/ios/Resources/models-dev-api.json"
 ANDROID_DEST="$SCRIPT_DIR/../src/android/app/src/main/assets/models-dev-api.json"
+ANDROID_GZ="${ANDROID_DEST}.gz"
 URL="https://models.dev/api.json"
 
 echo "Downloading $URL ..."
@@ -32,10 +33,17 @@ echo "Updated $IOS_DEST"
 echo "Verifying stage-2 resolution against the new catalog ..."
 python3 "$SCRIPT_DIR/verify_models_dev_resolution.py"
 
-# Copy to Android assets
-cp "$IOS_DEST" "$ANDROID_DEST"
-echo "Updated $ANDROID_DEST"
+# Android ships a gzipped catalog to keep APK size down; iOS keeps the raw JSON.
+python3 - "$IOS_DEST" "$ANDROID_GZ" <<'PY'
+import gzip, shutil, sys
+src, dst = sys.argv[1], sys.argv[2]
+with open(src, "rb") as inf, gzip.open(dst, "wb", compresslevel=9) as out:
+    shutil.copyfileobj(inf, out)
+PY
+rm -f "$ANDROID_DEST"
+echo "Updated $ANDROID_GZ"
 
 # Show size
 SIZE=$(wc -c < "$IOS_DEST" | tr -d ' ')
-echo "File size: ${SIZE} bytes"
+GZ_SIZE=$(wc -c < "$ANDROID_GZ" | tr -d ' ')
+echo "File size: ${SIZE} bytes (android gzip: ${GZ_SIZE} bytes)"

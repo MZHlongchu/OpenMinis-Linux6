@@ -278,6 +278,8 @@ class MinisApp : Application(), ImageLoaderFactory {
         // log/crash list still find filesDir/logs on a safe-mode launch —
         // the exact launch where the user is trying to read the crash files.
         AppLogger.primeContext(this)
+        com.openminis.app.session.ChatRuntime.binder =
+            com.openminis.app.ui.chat.ChatViewModelBinder(this)
 
         // [T-codex-fast-mode] Capture the app context + warm the Fast Mode
         // flag cache so the provider layer (no Context) can read it at

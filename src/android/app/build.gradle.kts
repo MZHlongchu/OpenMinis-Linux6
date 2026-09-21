@@ -40,8 +40,8 @@ android {
         applicationId = "com.openminis.linux"
         minSdk = 26
         targetSdk = 35
-        versionCode = 60
-        versionName = "1.36.7-linux"
+        versionCode = 61
+        versionName = "1.36.8-linux"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -55,6 +55,7 @@ android {
 
         ndk {
             abiFilters += listOf("arm64-v8a")
+            debugSymbolLevel = "SYMBOL_TABLE"
         }
 
         externalNativeBuild {
@@ -114,6 +115,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -144,7 +146,7 @@ android {
     }
 
     androidResources {
-        noCompress += listOf("tar.gz", "proot-aarch64")
+        noCompress += listOf("tar.gz", "proot-aarch64", "gz")
     }
 
     testOptions {
@@ -233,6 +235,7 @@ tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") && it
     .configureEach { dependsOn(stageDebugSkillAssets) }
 
 dependencies {
+    implementation(project(":core:model"))
     // Compose BOM
     val composeBom = platform("androidx.compose:compose-bom:2025.09.00")
     implementation(composeBom)
@@ -267,6 +270,7 @@ dependencies {
     // ProcessLifecycleOwner — used by XAIOAuthManager to detect Custom
     // Tab dismissal (T-xai-oauth-stop-resume port iOS d1dbdd5d).
     implementation("androidx.lifecycle:lifecycle-process:2.8.7")
+    implementation("androidx.profileinstaller:profileinstaller:1.4.1")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 

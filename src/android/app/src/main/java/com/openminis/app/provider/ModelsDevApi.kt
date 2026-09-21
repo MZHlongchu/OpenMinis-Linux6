@@ -557,12 +557,18 @@ object ModelsDevApi {
     private fun loadBundledRegistry(): Map<String, ProviderEntry>? {
         val ctx = appContext ?: return null
         return try {
-            val jsonStr = ctx.assets.open("models-dev-api.json").bufferedReader().readText()
+            val jsonStr = runCatching {
+                ctx.assets.open("models-dev-api.json.gz").use { raw ->
+                    java.util.zip.GZIPInputStream(raw).bufferedReader().readText()
+                }
+            }.getOrElse {
+                ctx.assets.open("models-dev-api.json").bufferedReader().use { it.readText() }
+            }
             val parsed = parseRegistry(jsonStr)
             Log.d(TAG, "Loaded bundled models.dev registry: ${parsed?.size ?: 0} providers")
             parsed
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load bundled models-dev-api.json: ${e.message}")
+            Log.e(TAG, "Failed to load bundled models-dev-api.json.gz: ${e.message}")
             null
         }
     }
