@@ -37,7 +37,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -59,7 +58,6 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.FolderOff
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PushPin
@@ -67,6 +65,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.outlined.AddComment
+import androidx.compose.material.icons.outlined.Chat
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.FolderOff
@@ -105,6 +104,8 @@ import com.openminis.app.ui.components.MinisAlertDialog
 import com.openminis.app.ui.components.MinisOutlinedButton
 import com.openminis.app.ui.components.MinisMenu
 import com.openminis.app.ui.components.MinisMenuDivider
+import com.openminis.app.ui.components.MinisButton
+import com.openminis.app.ui.components.MinisTextButton
 import com.openminis.app.ui.components.SectionDesign
 import com.openminis.app.ui.components.SectionTextField
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -121,6 +122,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -186,7 +188,6 @@ import kotlinx.coroutines.launch
 import java.util.Calendar
 import java.util.Date
 import java.util.concurrent.TimeUnit
-import com.openminis.app.ui.components.MinisTextButton
 
 // FAB color — use shared theme values
 
@@ -1265,6 +1266,11 @@ fun SessionListScreen(
                             if (sessionId != null) onNewChatGuarded(sessionId)
                         }
                     },
+                    onCreateFolder = { name, description ->
+                        scope.launch {
+                            viewModel.createWorkspaceFolder(name, description)
+                        }
+                    },
                     onNewChatWithGroup = { groupId ->
                         scope.launch {
                             val sessionId = viewModel.createNewWorkspaceSession(groupId = groupId)
@@ -1501,6 +1507,7 @@ private fun DualFabRow(
     isSearching: Boolean,
     hasSessions: Boolean,
     onNewChat: () -> Unit,
+    onCreateFolder: (String, String?) -> Unit,
     onNewChatWithGroup: (String) -> Unit,
     modelGroups: List<com.openminis.app.data.model.ModelGroup>,
     onSearchToggle: () -> Unit,
@@ -1541,6 +1548,7 @@ private fun DualFabRow(
     val swapThreshold = with(density) { 100.dp.toPx() }
 
     var showGroupMenu by remember { mutableStateOf(false) }
+    var showNewFolderDialog by remember { mutableStateOf(false) }
     val topGroups = remember(modelGroups) { modelGroups.take(10) }
 
     val chatFab: @Composable () -> Unit = {
@@ -1561,8 +1569,32 @@ private fun DualFabRow(
                     )
                 },
         ) {
+            // Secondary FAB: new chat. Sits ABOVE the main FAB so the primary
+            // thumb target stays the bottom-right button.
+            //
+            // The main FAB used to be the new-chat button, and that is what
+            // made this addition necessary: turning it into "new folder" would
+            // otherwise have removed the only way to start a conversation.
+            // Long-press on the main FAB keeps its group menu, so the two
+            // gestures never collide.
             FloatingActionButton(
                 onClick = onNewChat,
+                shape = CircleShape,
+                containerColor = ChatColors.secondaryBg,
+                modifier = Modifier
+                    .size(40.dp)
+                    .padding(bottom = 12.dp),
+                elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 4.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.Chat,
+                    contentDescription = stringResource(R.string.sessionlist_fab_new_session),
+                    tint = if (isDark) Color.White else Color.Black,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            FloatingActionButton(
+                onClick = { showNewFolderDialog = true },
                 shape = CircleShape,
                 containerColor = minisFabColor(),
                 modifier = Modifier
@@ -1577,7 +1609,7 @@ private fun DualFabRow(
                     // circular voice button in ChatComposerWidgets.
                     .clip(CircleShape)
                     .combinedClickable(
-                        onClick = onNewChat,
+                        onClick = { showNewFolderDialog = true },
                         onLongClick = {
                             if (topGroups.isNotEmpty()) showGroupMenu = true
                         },
@@ -1585,9 +1617,11 @@ private fun DualFabRow(
                     .shadow(8.dp, CircleShape, ambientColor = Color.Black.copy(alpha = 0.2f)),
                 elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp),
             ) {
+                // The icon was ALREADY CreateNewFolder while the action was
+                // "new chat". Making the action match the icon is the fix.
                 Icon(
                     Icons.Outlined.CreateNewFolder,
-                    contentDescription = stringResource(R.string.sessionlist_new_workspace_session),
+                    contentDescription = stringResource(R.string.sessionlist_fab_new_folder),
                     tint = Color.White,
                     modifier = Modifier.size(24.dp),
                 )
@@ -1607,6 +1641,17 @@ private fun DualFabRow(
                     )
                 }
             }
+        }
+
+        if (showNewFolderDialog) {
+            NewFolderDialog(
+                isDark = isDark,
+                onDismiss = { showNewFolderDialog = false },
+                onCreate = { name, description ->
+                    showNewFolderDialog = false
+                    onCreateFolder(name, description)
+                },
+            )
         }
     }
 
@@ -3448,3 +3493,59 @@ private fun shareZip(context: Context, uri: android.net.Uri, subject: String) {
     context.startActivity(chooser)
 }
 
+
+/**
+ * Name + optional description for a new workspace folder.
+ *
+ * A folder is not just a label — [ChatRepository.createFolder] creates the
+ * project directory on disk and every session filed into it mounts that
+ * directory, so the name is the only thing the user gets to choose here and
+ * the dialog keeps it to exactly that.
+ */
+@Composable
+private fun NewFolderDialog(
+    isDark: Boolean,
+    onDismiss: () -> Unit,
+    onCreate: (String, String?) -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    val trimmed = name.trim()
+    val canCreate = trimmed.isNotEmpty() &&
+        trimmed.length <= com.openminis.app.data.db.FolderEntity.DESC_MAX_CHARS * 4
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.sessionlist_new_folder_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text(stringResource(R.string.sessionlist_new_folder_hint)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text(stringResource(R.string.sessionlist_new_folder_desc_hint)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            MinisButton(
+                onClick = { onCreate(trimmed, description.trim().ifEmpty { null }) },
+                enabled = canCreate,
+            ) {
+                Text(stringResource(R.string.sessionlist_new_folder_create))
+            }
+        },
+        dismissButton = {
+            MinisTextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.cancel))
+            }
+        },
+    )
+}

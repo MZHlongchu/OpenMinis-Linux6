@@ -569,6 +569,12 @@
     <string name="group_section_header">工作区</string>
     <string name="group_default_workspace">工作区</string>
     <string name="sessionlist_new_workspace_session">新建工作区会话</string>
+    <string name="sessionlist_fab_new_folder">新建工作区文件夹</string>
+    <string name="sessionlist_fab_new_session">新建会话</string>
+    <string name="sessionlist_new_folder_title">新建工作区文件夹</string>
+    <string name="sessionlist_new_folder_hint">文件夹名称</string>
+    <string name="sessionlist_new_folder_desc_hint">描述（可选）</string>
+    <string name="sessionlist_new_folder_create">创建</string>
     <string name="group_none">暂不分组</string>
     <string name="group_none_subtitle">将会话移出当前分组</string>
     <string name="group_n_chats">%1$d 个会话</string>

@@ -78,33 +78,29 @@ object FileWriteTool {
                 parent.mkdirs()
             }
 
-            if (append) {
-                file.appendText(content)
-            } else {
-                file.writeText(content)
-            }
-
-            val bytes = file.length()
-            // Diagnose "write reported success but nothing on disk" (Android 10
-            // legacy-storage FUSE shadow writes): confirm the file is actually
-            // there with the expected size right after writing. A mounted-folder
-            // write that silently no-ops shows exists=false / size mismatch here.
-            if (path.startsWith("/var/minis/mounts/")) {
-                val landed = file.exists() && file.length() == bytes
-                com.openminis.app.logging.AppLogger.info(
-                    "FileWrite",
-                    "mount write path=$path host=${file.absolutePath} bytes=$bytes " +
-                        "exists=${file.exists()} landedOk=$landed",
+            // AtomicFileWrite: per-path lock so a concurrent file_edit cannot
+            // interleave with this write, an atomic temp+rename so a crash
+            // mid-write cannot leave a half-written file, and a read-back
+            // verification so a write that did not really land is an ERROR
+            // rather than a success the caller acts on.
+            //
+            // The old code only verified anything for /var/minis/mounts/ paths
+            // and merely logged a warning when the check failed — everywhere
+            // else `writeText` returning without throwing was reported as
+            // success, which is how "wrote it but nothing is on disk" stayed
+            // invisible.
+            val bytes = AtomicFileWrite.write(file, content, append)
+                ?: return ToolExecutionResult(
+                    "Error: write to $path reported success but did not persist to disk. " +
+                        "The file may be on a full or read-only volume — check free space " +
+                        "and Settings → Mount External Folders.",
+                    false, toolTitle = toolTitle,
                 )
-                if (!landed) {
-                    com.openminis.app.logging.AppLogger.warning(
-                        "FileWrite",
-                        "mount write to $path reported success but did NOT persist to " +
-                            "${file.absolutePath} — likely missing WRITE_EXTERNAL_STORAGE / " +
-                            "shadowed FUSE view on this device",
-                    )
-                }
-            }
+
+            com.openminis.app.logging.AppLogger.info(
+                "FileWrite",
+                "wrote path=$path host=${file.absolutePath} bytes=$bytes append=$append",
+            )
             ToolExecutionResult("Wrote to $path ($bytes bytes)", true, toolTitle = toolTitle)
         } catch (e: Exception) {
             ToolExecutionResult("Error writing file: ${e.message}", false)

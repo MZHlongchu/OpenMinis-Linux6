@@ -1,5 +1,6 @@
 package com.openminis.app.sandbox
 
+import com.openminis.app.logging.AppLogger
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -83,14 +84,31 @@ object SessionWorkspace {
     /**
      * Host directory mounted at `/var/minis/[subdir]`. Shared project dirs when
      * the session is filed in a folder; otherwise per-session.
+     *
+     * A filed session whose project directory is MISSING falls back to its own
+     * private dir. Without this, the mount resolves to a path that does not
+     * exist and the sandbox comes up with an empty `/var/minis` — which reads
+     * to the user as "my files vanished", when in fact nothing was ever moved
+     * (an interrupted [WorkspaceMover] run, or a project dir deleted behind
+     * our back). The private copy is still the authoritative one in that case,
+     * so preferring it is also the non-destructive choice. The fallback is
+     * logged at warning level because it means the recorded layout and the
+     * on-disk layout disagree.
      */
     fun hostDir(filesDir: File, sessionId: String, subdir: String): File {
         val folderId = folderIdFor(sessionId)
-        return if (folderId != null && subdir in SHARED_SUBDIRS) {
-            File(projectBase(filesDir, folderId), subdir)
-        } else {
-            File(base(filesDir, sessionId), subdir)
+        if (folderId != null && subdir in SHARED_SUBDIRS) {
+            val shared = File(projectBase(filesDir, folderId), subdir)
+            if (shared.isDirectory) return shared
+            if (File(projectBase(filesDir, folderId)).isDirectory) {
+                AppLogger.warning(
+                    "SessionWorkspace",
+                    "project dir missing subdir '$subdir' for folder=$folderId " +
+                        "session=$sessionId — falling back to the private copy",
+                )
+            }
         }
+        return File(base(filesDir, sessionId), subdir)
     }
 
     fun ensureProjectDirs(filesDir: File, folderId: String) {

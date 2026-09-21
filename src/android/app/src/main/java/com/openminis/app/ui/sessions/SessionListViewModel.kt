@@ -1134,6 +1134,27 @@ class SessionListViewModel(
         return createNewSession(groupId = groupId, folderId = folderId)
     }
 
+    /**
+     * Create a workspace folder from the main FAB's dialog.
+     *
+     * Starts expanded so the user sees the folder they just made — with no
+     * sessions in it yet, an accordion that opened collapsed would look like
+     * the tap did nothing.
+     */
+    fun createWorkspaceFolder(name: String, description: String?) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            // createFolder already provisions the project dirs on disk. The
+            // owner map is keyed by SESSION id and this folder has no sessions
+            // yet, so there is nothing to remember here — it fills in as
+            // sessions are filed, via warmupWorkspaceOwners on next launch.
+            val folder = chatRepository.createFolder(trimmed, description)
+            expandOnly(folder.id)
+            AppLogger.info(TAG, "[Group] created folder=${folder.id} name=$trimmed")
+        }
+    }
+
     private suspend fun resolveWorkspaceFolderId(): String {
         val all = folders.value
         val collapsed = collapsedFolderIds.value

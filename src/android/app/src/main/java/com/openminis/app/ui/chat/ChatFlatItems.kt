@@ -407,19 +407,6 @@ internal fun buildFlatChatItems(
             }
         }
         val showProcessSummary = foldAiProcess && !isSystem && hasFoldableProcess
-        if (showProcessSummary) {
-            out.add(dedupe(FlatChatItem.AssistantProcessSummary(
-                messageId = message.id,
-                thinkingCount = thinkingCount,
-                toolCount = toolCount,
-                expanded = processExpanded,
-                hasFailure = blocks.any {
-                    it.kind == "tool_use" && it.toolStatus == ToolBlockStatus.FAILED
-                },
-                processTools = processToolRefs(blocks),
-            )))
-        }
-
         blocks.forEachIndexed { index, block ->
             when (block.kind) {
                 "text" -> {
@@ -537,6 +524,27 @@ internal fun buildFlatChatItems(
                     )))
                 }
             }
+        }
+
+        // [T-android-fold-bar-order] The process summary (fold bar) is added
+        // AFTER the content blocks, not before them. The chat LazyColumn is
+        // `reverseLayout=true` — index 0 is the NEWEST item and rows render
+        // bottom-up — so list order and visual order are INVERTED. Adding the
+        // summary first put it at the visual TOP of the turn, above the reply
+        // text; a long reply then scrolled it straight out of the viewport with
+        // no way to reach the fold bar. Appending it here puts it visually
+        // BELOW the reply, next to the content it summarises.
+        if (showProcessSummary) {
+            out.add(dedupe(FlatChatItem.AssistantProcessSummary(
+                messageId = message.id,
+                thinkingCount = thinkingCount,
+                toolCount = toolCount,
+                expanded = processExpanded,
+                hasFailure = blocks.any {
+                    it.kind == "tool_use" && it.toolStatus == ToolBlockStatus.FAILED
+                },
+                processTools = processToolRefs(blocks),
+            )))
         }
 
         // Typing indicator: show while streaming and either (a) no visible

@@ -11,9 +11,10 @@ class SubAgentActivityTrackerTest {
         SubAgentActivityTracker.clearSession("s1")
         val id = SubAgentActivityTracker.start("s1", "Research", "worker", "gpt")
         assertEquals(1, SubAgentActivityTracker.membersFor("s1").size)
-        assertEquals(SubAgentActivityTracker.Status.RUNNING, SubAgentActivityTracker.membersFor("s1").first().status)
+        // finish() removes the entry rather than parking it in a terminal
+        // state — a stuck-on chip is exactly what this replaced.
         SubAgentActivityTracker.finish(id, true)
-        assertEquals(SubAgentActivityTracker.Status.SUCCESS, SubAgentActivityTracker.membersFor("s1").first().status)
+        assertTrue(SubAgentActivityTracker.membersFor("s1").isEmpty())
         SubAgentActivityTracker.clearSession("s1")
         assertTrue(SubAgentActivityTracker.membersFor("s1").isEmpty())
     }
@@ -49,8 +50,10 @@ class SubAgentActivityTrackerTest {
         assertEquals(40, m.turnCap)
         assertEquals("file_read", m.currentTool)
         assertEquals("turn 4/40 · file_read", m.lastStep)
+        // The error is not retained on the roster either: it goes out on the
+        // tool result. finish() takes it for call-site readability only.
         SubAgentActivityTracker.finish(id, false, "boom")
-        assertEquals("boom", SubAgentActivityTracker.membersFor("s3").first().error)
+        assertTrue(SubAgentActivityTracker.membersFor("s3").isEmpty())
         SubAgentActivityTracker.clearSession("s3")
     }
 

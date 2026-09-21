@@ -8,10 +8,14 @@ import java.util.UUID
 /**
  * Live roster of concurrent spawn_agent members for the chat status bar.
  * UI shows 子代理 i/N plus turn and the in-flight tool.
+ *
+ * A member exists only for as long as it is RUNNING: [finish] removes the
+ * entry outright. There is deliberately no terminal state — the transcript
+ * that mattered is already on the tool result and folded into the process
+ * summary before the entry goes away, so a sticky SUCCESS/FAILED chip carried
+ * no information and read as "still going".
  */
 object SubAgentActivityTracker {
-
-    enum class Status { RUNNING, SUCCESS, FAILED }
 
     data class Member(
         val id: String,
@@ -19,7 +23,6 @@ object SubAgentActivityTracker {
         val title: String,
         val role: String?,
         val model: String?,
-        val status: Status,
         val lastStep: String = "",
         val error: String? = null,
         val index: Int = 0,
@@ -51,7 +54,6 @@ object SubAgentActivityTracker {
             title = title,
             role = role,
             model = model,
-            status = Status.RUNNING,
             index = index,
             total = total,
             kind = kind,
@@ -86,11 +88,29 @@ object SubAgentActivityTracker {
         }
     }
 
+    /**
+     * Mark [id] finished and REMOVE it from the roster.
+     *
+     * The member used to be kept around with a SUCCESS/FAILED status, so
+     * `members` never emptied and the live bar stayed on screen after the whole
+     * run was over — including after every sub-agent had failed. The bar is a
+     * LIVE indicator: a stuck-on chip reads as "still running" and there is
+     * nothing left to tap into.
+     *
+     * The transcript is what survives, and it is already carried on the tool
+     * result and folded into the process summary via [combinedTranscript]
+     * before this point, so dropping the roster entry loses nothing.
+     */
+    /**
+     * Drop [id] from the roster.
+     *
+     * [success] and [error] are accepted for call-site readability and carry no
+     * state: the outcome is recorded on the tool result by the caller, and this
+     * object is a live view only. Keeping them would leave two parameters that
+     * look meaningful and change nothing.
+     */
     fun finish(id: String, success: Boolean, error: String? = null) {
-        val status = if (success) Status.SUCCESS else Status.FAILED
-        _members.value = _members.value.map { m ->
-            if (m.id == id) m.copy(status = status, error = error) else m
-        }
+        _members.value = _members.value.filterNot { it.id == id }
     }
 
     fun appendLog(id: String, line: String) {
@@ -120,7 +140,7 @@ object SubAgentActivityTracker {
                 if (m.index > 0 && m.total > 0) append("子代理 ${m.index}/${m.total}")
                 else append(m.title)
                 m.kind?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
-                append(" · ").append(m.status.name.lowercase())
+                append(" · running")
                 append('\n')
                 val body = m.transcript.ifBlank { m.lastStep }
                 if (body.isNotBlank()) append(body.trimEnd())

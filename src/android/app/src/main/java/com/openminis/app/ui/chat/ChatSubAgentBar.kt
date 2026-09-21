@@ -55,11 +55,12 @@ fun SubAgentLiveBar(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         mine.forEach { m ->
-            val (bg, fg) = when (m.status) {
-                SubAgentActivityTracker.Status.RUNNING -> Color(0xFF007AFF) to Color.White
-                SubAgentActivityTracker.Status.SUCCESS -> Color(0xFF34C759) to Color.White
-                SubAgentActivityTracker.Status.FAILED -> Color(0xFFFF3B30) to Color.White
-            }
+            // A member is only ever on screen while RUNNING — finish() removes
+            // it from the roster. The colour is therefore a constant; the two
+            // terminal states used to be matched here before the bar learned to
+            // drop finished members.
+            val bg = Color(0xFF007AFF)
+            val fg = Color.White
             val label = buildString {
                 if (m.index > 0 && m.total > 0) {
                     append("子代理 ${m.index}/${m.total}")
@@ -68,14 +69,8 @@ fun SubAgentLiveBar(
                 }
                 m.kind?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
                     ?: m.role?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
-                append(
-                    when (m.status) {
-                        SubAgentActivityTracker.Status.RUNNING -> " · run"
-                        SubAgentActivityTracker.Status.SUCCESS -> " · done"
-                        SubAgentActivityTracker.Status.FAILED -> " · fail"
-                    },
-                )
-                if (m.status == SubAgentActivityTracker.Status.RUNNING) {
+                append(" · run")
+                run {
                     val cap = m.turnCap
                     if (cap > 0) {
                         append(" · turn ${m.turnIndex.coerceAtLeast(1)}/$cap")
@@ -117,16 +112,10 @@ private fun SubAgentDetailSheet(
     member: SubAgentActivityTracker.Member,
     onDismiss: () -> Unit,
 ) {
-    val statusLabel = when (member.status) {
-        SubAgentActivityTracker.Status.RUNNING -> "运行中"
-        SubAgentActivityTracker.Status.SUCCESS -> "已完成"
-        SubAgentActivityTracker.Status.FAILED -> "失败"
-    }
-    val statusColor = when (member.status) {
-        SubAgentActivityTracker.Status.RUNNING -> Color(0xFF007AFF)
-        SubAgentActivityTracker.Status.SUCCESS -> Color(0xFF34C759)
-        SubAgentActivityTracker.Status.FAILED -> Color(0xFFFF3B30)
-    }
+    // finish() removes the member, so anything reachable from this sheet is
+    // still running. Both were `when (member.status)` over three states.
+    val statusLabel = "运行中"
+    val statusColor = Color(0xFF007AFF)
     val body = buildString {
         append(member.title)
         member.kind?.takeIf { it.isNotBlank() }?.let { append(" · $it") }

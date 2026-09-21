@@ -509,6 +509,11 @@ class MinisApp : Application(), ImageLoaderFactory {
                 android.util.Log.e("MinisApp", "workspace owner warmup failed", it)
             }
             runCatching {
+                com.openminis.app.sandbox.WorkspaceMover.recoverInterrupted(filesDir)
+            }.onFailure {
+                android.util.Log.e("MinisApp", "workspace staging recovery failed", it)
+            }
+            runCatching {
                 com.openminis.app.sandbox.LegacyWorkspaceMigrator.run(this@MinisApp, chatRepository)
             }.onFailure {
                 android.util.Log.e("MinisApp", "legacy workspace migrate failed", it)
