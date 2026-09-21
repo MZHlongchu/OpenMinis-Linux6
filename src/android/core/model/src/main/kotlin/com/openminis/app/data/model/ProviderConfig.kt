@@ -216,7 +216,7 @@ data class ProviderInstance(
      * report `Unreadable: 1` for the Providers category. Reads both forms, so
      * the existing local JSON mirror and older Android backups still load.
      */
-    @Serializable(with = com.openminis.app.backup.Iso8601MillisSerializer::class)
+    @Serializable(with = Iso8601MillisSerializer::class)
     val createdAt: Long = System.currentTimeMillis(),
     var customBaseURL: String? = null,
     var appendV1Suffix: Boolean = true,
@@ -378,7 +378,7 @@ data class ModelEntry(
     val uuid: String = UUID.randomUUID().toString(),
     /** [T-android-provider-iso8601-wire] See ProviderInstance.createdAt — iOS
      *  `ModelEntry.userModifiedAt` is a `Date?` decoded with `.iso8601`. */
-    @Serializable(with = com.openminis.app.backup.Iso8601MillisNullableSerializer::class)
+    @Serializable(with = Iso8601MillisNullableSerializer::class)
     val userModifiedAt: Long? = null,
 ) {
     val id: String get() = uuid
