@@ -76,14 +76,14 @@ object WorkspaceMover {
 
         for (sub in SessionWorkspace.SHARED_SUBDIRS) {
             val src = File(sessionRoot, sub)
-            if (!src.isDirectory || src.listFiles().isNullOrEmpty()) {
+            if (!src.isDirectory() || src.listFiles().isNullOrEmpty()) {
                 // Nothing to move. Also covers the already-filed case, where
                 // the session never had its own copy to begin with.
                 skipped.add(sub)
                 continue
             }
             val dst = File(projectRoot, sub)
-            if (dst.isDirectory && !dst.listFiles().isNullOrEmpty()) {
+            if (dst.isDirectory() && !dst.listFiles().isNullOrEmpty()) {
                 // Destination already holds files. Merging two non-empty trees
                 // needs a conflict policy this does not have, so leave the
                 // session's copy alone rather than silently interleaving them.
@@ -150,7 +150,7 @@ object WorkspaceMover {
         src.walkTopDown().forEach { f ->
             val rel = f.relativeTo(src)
             val target = File(dst, rel.path)
-            if (f.isDirectory) {
+            if (f.isDirectory()) {
                 target.mkdirs()
             } else {
                 target.parentFile?.mkdirs()
@@ -171,7 +171,7 @@ object WorkspaceMover {
     }
 
     private fun treeSize(root: File): Long =
-        root.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        root.walkTopDown().filter { it.isFile() }.sumOf { it.length() }
 
     /**
      * Find `.staging` trees left behind by an interrupted move.
@@ -188,7 +188,7 @@ object WorkspaceMover {
             File(filesDir, SessionWorkspace.WORKSPACES_DIR),
             File(filesDir, SessionWorkspace.SESSIONS_DIR),
         )) {
-            if (!root.isDirectory) continue
+            if (!root.isDirectory()) continue
             root.walkTopDown()
                 .filter { it.name.endsWith(STAGING_SUFFIX) }
                 .forEach { staging ->

@@ -5,7 +5,6 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 
 /**
  * Serialises and verifies the two filesystem-mutating tools.
@@ -74,8 +73,11 @@ object AtomicFileWrite {
      */
     fun write(file: File, content: String, append: Boolean = false): Long? {
         val lock = lockFor(file)
-        return kotlin.concurrent.withLock(lock) {
-            writeLocked(file, content, append)
+        lock.lock()
+        try {
+            return writeLocked(file, content, append)
+        } finally {
+            lock.unlock()
         }
     }
 
@@ -144,13 +146,16 @@ object AtomicFileWrite {
      */
     fun read(file: File): String? {
         val lock = lockFor(file)
-        return kotlin.concurrent.withLock(lock) {
-            try {
+        lock.lock()
+        try {
+            return try {
                 if (file.exists()) file.readText() else ""
             } catch (e: IOException) {
                 AppLogger.error(TAG, "read failed for ${file.name}: ${e.message}")
                 null
             }
+        } finally {
+            lock.unlock()
         }
     }
 
@@ -169,20 +174,25 @@ object AtomicFileWrite {
      */
     fun <T> readModifyWrite(file: File, transform: (String) -> T): T? {
         val lock = lockFor(file)
-        return kotlin.concurrent.withLock(lock) {
+        lock.lock()
+        try {
             val current = try {
                 if (file.exists()) file.readText() else ""
             } catch (e: IOException) {
                 AppLogger.error(TAG, "read failed for ${file.name}: ${e.message}")
-                return@withLock null
+                return null
             }
+
             val result = transform(current)
-            @Suppress("UNCHECKED_CAST")
-            when (result) {
+
+            return when (result) {
+                // A String payload is the plain "new content" shape; a Pair is
+                // what file_edit returns so it can report the replacement count
+                // alongside the text. Both are written; anything else is passed
+                // through untouched (the caller ran the transform for its own
+                // reasons and there is nothing to persist).
                 is String -> writeLocked(file, result, append = false)?.let { result }
                 is Pair<*, *> -> {
-                    // (newContent, anything) — the shape file_edit uses so it can
-                    // report the replacement count alongside the text.
                     val text = result.first as? String
                     if (text == null) {
                         AppLogger.error(TAG, "readModifyWrite: pair without a String payload")
@@ -192,12 +202,12 @@ object AtomicFileWrite {
                     }
                 }
                 else -> {
-                    // Non-string payload: nothing to write, so just run the
-                    // transform for its side effects and pass the value through.
                     AppLogger.info(TAG, "readModifyWrite: non-string result, nothing written")
                     result
                 }
             }
+        } finally {
+            lock.unlock()
         }
     }
 

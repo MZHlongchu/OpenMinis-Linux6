@@ -37,7 +37,7 @@ object LegacyWorkspaceMigrator {
     fun sessionHasIsolatedFiles(filesDir: File, sessionId: String): Boolean {
         val root = SessionWorkspace.base(filesDir, sessionId)
         return SessionWorkspace.SHARED_SUBDIRS.any { sub ->
-            File(root, sub).walkTopDown().any { it.isFile }
+            File(root, sub).walkTopDown().any { it.isFile() }
         }
     }
 
@@ -46,7 +46,7 @@ object LegacyWorkspaceMigrator {
         for (sub in SessionWorkspace.SHARED_SUBDIRS) {
             val src = File(filesDir, "${SessionWorkspace.GLOBAL_DIR}/$sub")
             val dst = File(SessionWorkspace.projectBase(filesDir, folderId), sub)
-            if (!src.isDirectory) continue
+            if (!src.isDirectory()) continue
             val destEmpty = dst.listFiles().isNullOrEmpty()
             if (!destEmpty) continue
             src.copyRecursively(dst, overwrite = false)

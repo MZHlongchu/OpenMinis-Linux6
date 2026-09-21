@@ -122,7 +122,9 @@ object FileEditTool {
                 )
                 else -> {
                     @Suppress("UNCHECKED_CAST")
-                    val (newContent, replacements) = outcome as Pair<String, Int>
+                    val pair = outcome as Pair<String, Int>
+                    val newContent = pair.first
+                    val replacements = pair.second
                     ToolExecutionResult(
                         "Edited $path ($replacements replacement(s), ${newContent.length} bytes)",
                         true, toolTitle = toolTitle,
