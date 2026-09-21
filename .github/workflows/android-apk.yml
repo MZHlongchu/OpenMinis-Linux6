@@ -140,10 +140,9 @@ jobs:
         run: |
           sed -i 's|org.gradle.jvmargs=.*|org.gradle.jvmargs=-Xmx6g -Dfile.encoding=UTF-8|' gradle.properties
           chmod +x gradlew
-          # Sequential: kspDebug + kspRelease both export the same Room
-          # schema JSON; running them in one parallel Gradle invocation
-          # can leave that file empty ("Empty schema file").
-          ./gradlew :app:testDebugUnitTest --no-daemon --no-parallel --stacktrace
+          # 1.36.7 shipped with assembleRelease only. testDebugUnitTest pulls in
+          # kspDebug which races kspRelease on the same Room schema JSON, and
+          # also gates the APK on JVM tests that were never a release blocker.
           ./gradlew :app:assembleRelease --no-daemon --no-parallel --stacktrace
 
       - name: Stage APK
