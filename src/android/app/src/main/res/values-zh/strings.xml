@@ -804,6 +804,13 @@
     <string name="env_var_privacy_header">隐私</string>
     <string name="env_var_privacy_toggle">隐私模式</string>
     <string name="env_var_privacy_footer">开启后，shell-execute 输出中检测到的环境变量值在送达模型前会被打码（例如 `sk-1********ajhks`）。少于 8 个字符的值会被全部替换为 `*`。聊天中用户可见的输出保持不变。</string>
+    <string name="env_var_platform_header">平台集成</string>
+    <string name="env_var_platform_tier_2">完整</string>
+    <string name="env_var_platform_tier_1">只读</string>
+    <string name="env_var_platform_tier_0">需配置</string>
+    <string name="env_var_platform_var_configured">已配置</string>
+    <string name="env_var_platform_var_missing">点按添加 %1$s</string>
+    <string name="env_var_platform_var_add_title">添加 %1$s</string>
     <string name="env_var_section_header">变量</string>
     <string name="env_var_section_footer">环境变量在会话开始时被注入到沙箱 shell。名称将被转为大写，并且必须符合 POSIX shell 变量规则。</string>
     <string name="env_var_empty_title">无环境变量</string>
@@ -1126,6 +1133,13 @@
     <string name="share_open_app_failed">内容已保存。无法自动打开 Minis，请手动打开应用继续。</string>
     <string name="provider_list_api_key">API Key</string>
     <string name="provider_list_disabled">已停用</string>
+    <string name="provider_list_favorites">常用</string>
+    <string name="provider_list_sync_all">一键更新所有服务商</string>
+    <string name="provider_list_sync_all_success">已更新全部 %1$d 个服务商。</string>
+    <string name="provider_list_sync_partial">同步完成 — %1$d 个已更新，%2$d 个无密钥，%3$d 个失败。</string>
+    <string name="provider_list_sync_failed_generic">同步失败，请检查网络后重试。</string>
+    <string name="provider_set_favorite">设为常用</string>
+    <string name="provider_unset_favorite">取消常用</string>
     <string name="provider_detail_export">导出</string>
     <string name="provider_detail_label">标签</string>
     <string name="provider_detail_manual_bearer_token">手动 Bearer Token</string>

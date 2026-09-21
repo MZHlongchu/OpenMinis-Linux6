@@ -1,5 +1,10 @@
 # Building Minis
 
+> **This fork (OpenMinis-Linux / Minis Ultra) is Android-only.** The `src/ios/`
+> tree has been removed. Skip the iOS section below; it is leftover documentation
+> from upstream OpenMinis. Use the Android Gradle path and
+> `src/android/app/provider-customization.properties` only.
+
 Minis ships a full Linux sandbox inside the app, so a first build is not just
 "open the project and press Run": the native dependencies (iSH on iOS, PRoot on
 Android, FFmpeg, LAME) and the Alpine rootfs are **built from source by the

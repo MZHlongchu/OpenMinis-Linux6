@@ -24,7 +24,6 @@ import sh.calvin.reorderable.ReorderableLazyListState
 import sh.calvin.reorderable.rememberReorderableLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -161,11 +160,6 @@ fun ModelGroupsScreen(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.model_groups_model_groups)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.model_group_detail_back))
-                    }
-                },
                 actions = {
                     IconButton(onClick = { showNewGroupDialog = true }) {
                         Icon(Icons.Default.Add, contentDescription = stringResource(R.string.model_groups_new_group))

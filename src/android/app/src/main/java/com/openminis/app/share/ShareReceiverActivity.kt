@@ -9,7 +9,7 @@ import java.io.File
 import java.util.UUID
 
 /**
- * Activity that handles ACTION_SEND / ACTION_SEND_MULTIPLE / ACTION_VIEW
+ * Activity that handles ACTION_SEND / ACTION_SEND_MULTIPLE / ACTION_VIEW / ACTION_PROCESS_TEXT
  * intents. Mirrors iOS ShareExtension/ShareViewModel.swift wire format
  * (`{items: [{kind, value}], timestamp}`) so a future cross-platform
  * sync (if it ever lands) reads the same `PendingShare` JSON.
@@ -50,6 +50,7 @@ class ShareReceiverActivity : ComponentActivity() {
                 Intent.ACTION_SEND -> handleSingleSend(intent, items)
                 Intent.ACTION_SEND_MULTIPLE -> handleMultipleSend(intent, items)
                 Intent.ACTION_VIEW -> handleView(intent, items)
+                Intent.ACTION_PROCESS_TEXT -> handleProcessText(intent, items)
                 else -> AppLogger.warning(TAG, "unhandled action: ${intent?.action}")
             }
         } catch (e: Throwable) {
@@ -88,6 +89,17 @@ class ShareReceiverActivity : ComponentActivity() {
      * them up) and hand off to MainActivity. The default path for every share
      * that isn't a provider-import candidate.
      */
+    /**
+     * Global text-selection toolbar ("Minis Ultra") → inline PendingShare.
+     * EXTRA_PROCESS_TEXT_READONLY is ignored: we never write the selection back.
+     */
+    private fun handleProcessText(intent: Intent, items: MutableList<PendingShare.Item>) {
+        val text = intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString()?.trim().orEmpty()
+        if (text.isEmpty()) return
+        AppLogger.info(TAG, "PROCESS_TEXT length=${text.length}")
+        items += PendingShare.Item(PendingShare.Item.Kind.INLINE_TEXT, text)
+    }
+
     private fun finishWithAttachmentFlow(items: List<PendingShare.Item>) {
         try {
             if (items.isNotEmpty()) {

@@ -1,7 +1,7 @@
 // T283 — native crash → file (NDK signal handler).
 //
 // Registered at app startup from MinisApp.onCreate via JNI. Catches
-// fatal signals raised inside JNI / proot / pty_bridge / any other
+// fatal signals raised inside JNI / proot / any other
 // native code, writes a one-shot text report to the configured logs
 // dir, then hands the signal to the handler that was installed before
 // us — debuggerd — so the system tombstone is also generated and the

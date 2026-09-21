@@ -32,6 +32,7 @@ data class ProviderInstanceEntity(
     @ColumnInfo(name = "image_endpoint_resolved") val imageEndpointResolved: String? = null,
     @ColumnInfo(name = "custom_user_agent") val customUserAgent: String? = null,
     @ColumnInfo(name = "is_enabled") val isEnabled: Int = 1,
+    @ColumnInfo(name = "pinned") val pinned: Int = 0,
     @ColumnInfo(name = "sort_order") val sortOrder: Int = 0,
     @ColumnInfo(name = "created_at") val createdAt: Long,
 )

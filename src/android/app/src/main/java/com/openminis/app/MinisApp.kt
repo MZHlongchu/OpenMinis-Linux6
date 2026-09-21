@@ -299,7 +299,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         // SIGABRT/SIGBUS/SIGFPE/SIGILL/SIGSYS). Writes a one-shot text
         // report to filesDir/logs/native-crash-<stamp>.log before re-raising
         // the signal so the system tombstone is also generated. Runs
-        // before any other native lib (proot, pty_bridge, …) is dlopen'd
+        // before any other native lib (proot, jieba, …) is dlopen'd
         // by the rest of onCreate so the handler is in place when those
         // libs first execute.
         try {

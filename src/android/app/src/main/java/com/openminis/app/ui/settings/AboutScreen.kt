@@ -40,7 +40,7 @@ fun AboutScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val tileBlue = Color(0xFF007AFF)
 
-    SettingsScaffold(title = stringResource(R.string.about_title), onBack = onBack) {
+    SettingsScaffold(title = stringResource(R.string.about_title), onBack = null) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()

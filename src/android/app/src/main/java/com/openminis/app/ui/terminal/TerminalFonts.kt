@@ -22,10 +22,9 @@ import com.openminis.app.R
  * Two equivalent surfaces:
  *  • `JetBrainsMonoFontFamily` — Compose Text, the keyboard-accessory
  *    bar and topbar inside `TerminalScreen`.
- *  • `rememberJetBrainsMonoTypeface()` — `android.graphics.Typeface`
- *    for `TerminalCanvasView`'s low-level Paint, which doesn't go
- *    through Compose. Loaded once via `ResourcesCompat.getFont` and
- *    cached.
+ *  • `jetBrainsMonoTypeface()` — `android.graphics.Typeface` for the
+ *    Termux `TerminalView` Paint. Loaded once via `ResourcesCompat.getFont`
+ *    and cached.
  */
 val JetBrainsMonoFontFamily: FontFamily = FontFamily(
     Font(R.font.jetbrains_mono_regular, FontWeight.Normal),

@@ -91,6 +91,7 @@ fun ProviderConfig.toSnapshot(
             imageEndpointResolved = inst.imageEndpointResolved?.name,
             customUserAgent = inst.customUserAgent,
             isEnabled = if (inst.isEnabled) 1 else 0,
+            pinned = if (inst.pinned) 1 else 0,
             sortOrder = idx,
             createdAt = inst.createdAt,
         )
@@ -201,6 +202,7 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
             providerType = ProviderType.valueOf(row.providerType),
             credentialType = ProviderCredential.valueOf(row.credentialType),
             isEnabled = row.isEnabled != 0,
+            pinned = row.pinned != 0,
             createdAt = row.createdAt,
             customBaseURL = row.customBaseURL,
             appendV1Suffix = row.appendV1Suffix != 0,

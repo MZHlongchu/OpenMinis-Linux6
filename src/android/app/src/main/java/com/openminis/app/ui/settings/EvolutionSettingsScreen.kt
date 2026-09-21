@@ -36,7 +36,7 @@ fun EvolutionSettingsScreen(onBack: () -> Unit) {
     }
     val proposals by (engine?.store?.proposals ?: emptyProposals).collectAsState()
 
-    SettingsScaffold(title = stringResource(R.string.evolution_title), onBack = onBack) {
+    SettingsScaffold(title = stringResource(R.string.evolution_title), onBack = null) {
         SettingsSection(
             header = stringResource(R.string.evolution_section_master),
             footer = stringResource(R.string.evolution_enable_footer),

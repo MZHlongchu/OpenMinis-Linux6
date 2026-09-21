@@ -40,8 +40,8 @@ android {
         applicationId = "com.openminis.linux"
         minSdk = 26
         targetSdk = 35
-        versionCode = 68
-        versionName = "1.36.15-linux"
+        versionCode = 69
+        versionName = "1.36.16-linux"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -148,6 +148,13 @@ android {
     androidResources {
         noCompress += listOf("tar.gz", "proot-aarch64", "gz")
     }
+
+    packaging {
+        jniLibs {
+            pickFirsts += "lib/*/libtermux.so"
+        }
+    }
+
 
     testOptions {
         unitTests.isReturnDefaultValues = true
@@ -336,6 +343,9 @@ dependencies {
 
     // Drag-to-reorder for LazyColumn
     implementation("sh.calvin.reorderable:reorderable:2.4.0")
+
+    // Termux VT emulator (replaces the hand-rolled ANSI parser for the PTY UI)
+    implementation("com.termux.termux-app:terminal-view:0.118.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")

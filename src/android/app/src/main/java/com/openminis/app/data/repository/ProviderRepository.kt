@@ -45,6 +45,9 @@ import com.openminis.app.provider.openai.OpenAIModelsApi
 import com.openminis.app.provider.openrouter.OpenRouterModelsApi
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -810,6 +813,14 @@ class ProviderRepository(private val context: Context) {
                 invalidateModelCache(instance.id)
             }
         }
+    }
+
+    fun setInstancePinned(id: String, pinned: Boolean): Unit = synchronized(configLock) {
+        ensureConfigLoaded()
+        val config = workingCopy()
+        val inst = config.instances.find { it.id == id } ?: return
+        inst.pinned = pinned
+        saveConfig(config)
     }
 
     fun removeInstance(instanceId: String): Unit = synchronized(configLock) {
@@ -2159,7 +2170,10 @@ class ProviderRepository(private val context: Context) {
     }
 
 
-    suspend fun refreshModels(instance: ProviderInstance) {
+    suspend fun refreshModels(
+        instance: ProviderInstance,
+        forceRefresh: Boolean = false,
+    ): ModelRefreshResult {
         // [T-android-refresh-models-empty-key] usableApiKey, NOT loadApiKey.
         //
         // A self-hosted OpenAI/Anthropic-compatible endpoint (ollama, LM
@@ -2198,7 +2212,7 @@ class ProviderRepository(private val context: Context) {
             }
         }
 
-        android.util.Log.i("ProviderRepo", "refreshModels: id=${instance.id} type=${instance.providerType} credential=${instance.credentialType} hasKey=${apiKey != null} keyLen=${apiKey?.length ?: 0} baseURL=${instance.effectiveBaseURL}")
+        android.util.Log.i("ProviderRepo", "refreshModels: id=${instance.id} type=${instance.providerType} credential=${instance.credentialType} hasKey=${apiKey != null} keyLen=${apiKey?.length ?: 0} baseURL=${instance.effectiveBaseURL} forceRefresh=$forceRefresh")
 
         // OpenAI Codex OAuth: use static model list (OAuth tokens can't call /v1/models)
         if (instance.providerType == ProviderType.openAI
@@ -2207,7 +2221,7 @@ class ProviderRepository(private val context: Context) {
             val models = OpenAIModelsApi.fetchModelsOAuth()
             if (models.isNotEmpty()) {
                 replaceEntries(instance.id, models)
-                return
+                return ModelRefreshResult.SUCCESS_API
             }
         }
 
@@ -2225,17 +2239,24 @@ class ProviderRepository(private val context: Context) {
                     ProviderType.anthropic -> AnthropicModelsApi.fetchModels(
                         apiKey, baseURL,
                         isOAuth = instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth,
+                        context = context,
+                        forceRefresh = forceRefresh,
                         // [T-provider-custom-user-agent] models-list UA override.
                         customUserAgent = instance.customUserAgent,
                     )
-                    ProviderType.gemini -> GeminiModelsApi.fetchModels(apiKey)
+                    ProviderType.gemini -> GeminiModelsApi.fetchModels(
+                        apiKey,
+                        isOAuth = instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth,
+                        context = context,
+                        forceRefresh = forceRefresh,
+                    )
                     // [T-provider-custom-user-agent] models-list UA override.
                     // [T-android-provider-type-parity] openAIResponses lists
                     // models from the same /v1/models endpoint — only the
                     // completion endpoint differs.
                     ProviderType.openAI, ProviderType.openAIResponses ->
-                        OpenAIModelsApi.fetchModels(apiKey, baseURL, customUserAgent = instance.customUserAgent)
-                    ProviderType.openRouter -> OpenRouterModelsApi.fetchModels(apiKey)
+                        OpenAIModelsApi.fetchModels(apiKey, baseURL, context = context, forceRefresh = forceRefresh, customUserAgent = instance.customUserAgent)
+                    ProviderType.openRouter -> OpenRouterModelsApi.fetchModels(apiKey, context = context, forceRefresh = forceRefresh)
                     // [T-provider-dynamic-catalog-reconcile] xAI: fetch the live
                     // catalog, fall back to the built-in list.
                     //
@@ -2271,6 +2292,8 @@ class ProviderRepository(private val context: Context) {
                     ProviderType.xAI -> OpenAIModelsApi.fetchModels(
                         apiKey,
                         baseURL ?: "https://api.x.ai/v1",
+                        context = context,
+                        forceRefresh = forceRefresh,
                         customUserAgent = instance.customUserAgent,
                     ).ifEmpty { com.openminis.app.provider.xai.XAIModelsApi.fetchModelsOAuth() }
                     // [T-kimi-oauth] Kimi Code: unlike Codex OAuth, the Kimi
@@ -2281,6 +2304,8 @@ class ProviderRepository(private val context: Context) {
                     ProviderType.kimiCode -> OpenAIModelsApi.fetchModels(
                         apiKey,
                         baseURL ?: "${com.openminis.app.auth.KimiDeviceFlow.CODING_API_BASE}/v1",
+                        context = context,
+                        forceRefresh = forceRefresh,
                         customUserAgent = instance.customUserAgent,
                     )
                     // [T-android-provider-type-parity] No models endpoint to
@@ -2297,7 +2322,7 @@ class ProviderRepository(private val context: Context) {
             // Step 2: If API returned results, use them
             if (models.isNotEmpty()) {
                 replaceEntries(instance.id, models)
-                return
+                return ModelRefreshResult.SUCCESS_API
             }
         }
 
@@ -2311,9 +2336,12 @@ class ProviderRepository(private val context: Context) {
         if (fallbackModels.isNotEmpty()) {
             android.util.Log.i("ProviderRepo", "models.dev fallback returned ${fallbackModels.size} models for ${instance.label}")
             replaceEntries(instance.id, fallbackModels)
+            return ModelRefreshResult.SUCCESS_API
         } else if (isThirdParty) {
             android.util.Log.i("ProviderRepo", "Third-party endpoint, no models.dev match — preserving existing models for ${instance.label}")
+            return ModelRefreshResult.PRESERVED
         }
+        return if (apiKey == null) ModelRefreshResult.NO_KEY else ModelRefreshResult.FAILURE
     }
 
     /**
@@ -2329,6 +2357,25 @@ class ProviderRepository(private val context: Context) {
             return
         }
         refreshModels(instance)
+    }
+
+    /**
+     * Parallel force-refresh of every enabled provider. Used by the provider-list
+     * toolbar Sync button. models.dev fallback is still used inside [refreshModels].
+     */
+    suspend fun refreshAllModelsForce(): List<Pair<String, ModelRefreshResult>> {
+        awaitConfigLoaded()
+        val enabled = _config.value.instances.filter { it.isEnabled }
+        if (enabled.isEmpty()) return emptyList()
+        return coroutineScope {
+            enabled.map { inst ->
+                async {
+                    inst.id to runCatching {
+                        refreshModels(inst, forceRefresh = true)
+                    }.getOrElse { ModelRefreshResult.FAILURE }
+                }
+            }.awaitAll()
+        }
     }
 
     /**
@@ -3081,4 +3128,11 @@ class ProviderRepository(private val context: Context) {
         val bits = obj.optInt("modalityOverride", 0)
         return modalityListsFromBitfield(bits)
     }
+}
+
+enum class ModelRefreshResult {
+    SUCCESS_API,
+    NO_KEY,
+    PRESERVED,
+    FAILURE,
 }

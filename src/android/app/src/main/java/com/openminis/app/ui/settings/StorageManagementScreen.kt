@@ -125,7 +125,7 @@ fun StorageManagementScreen(
 
     val totalSessionSize = sessions.sumOf { it.totalSize }
 
-    SettingsScaffold(title = stringResource(R.string.storage_title), onBack = onBack) {
+    SettingsScaffold(title = stringResource(R.string.storage_title), onBack = null) {
         SettingsSection(header = stringResource(R.string.storage_section_overview)) {
             StorageOverviewRow(
                 color = Color(0xFF8E8E93),

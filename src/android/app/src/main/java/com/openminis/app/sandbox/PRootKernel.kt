@@ -13,6 +13,7 @@ import com.openminis.app.data.MountedFoldersStore
 import java.io.File
 import java.util.TimeZone
 import kotlin.math.abs
+import kotlinx.coroutines.launch
 
 /**
  * PRoot configuration holder and command builder.
@@ -64,6 +65,7 @@ object PRootKernel {
         // updated profile scripts and URL-interception wrappers ship with
         // each app update. Mirrors iOS RootfsManager.applyDefaultMountOverlay.
         rootfsManager.applyDefaultMountOverlay()
+        rootfsManager.applyHostTimezone()
 
         // Re-apply user mirror selections — the overlay above ships stock
         // config files (pip.conf, .npmrc, repositories) and would otherwise
@@ -71,6 +73,18 @@ object PRootKernel {
         // ISHTerminalView.startShell().
         com.openminis.app.ui.sandbox.MirrorSpeedTestViewModel.applyAllActiveMirrors(context)
         com.openminis.app.ui.sandbox.MirrorSpeedTestViewModel.autoDetectOnceIfNeeded(context)
+
+        // Off the critical boot path: heal mirrors first so a dead apt
+        // source cannot burn dpkg/pip retry strikes, then retry failed
+        // restores, then snapshot. One IO job so these never interleave
+        // (they also serialize on RootfsManager.aptMutex).
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            runCatching { rootfsManager.runMinisMirrorAuto() }
+            runCatching { rootfsManager.retryFailedDpkgWorld() }
+            runCatching { rootfsManager.retryFailedPipWorld() }
+            runCatching { rootfsManager.dumpDpkgWorld() }
+            runCatching { rootfsManager.dumpPipWorld() }
+        }
 
         // Refresh DNS from system (mirrors iOS ISHKernel.configureDns)
         rootfsManager.refreshDns()

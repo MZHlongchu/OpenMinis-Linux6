@@ -157,7 +157,7 @@ fun BackupAndRestoreScreen(
     var backupConfirm by remember { mutableStateOf("") }
     var restorePassphrase by remember { mutableStateOf("") }
 
-    SettingsScaffold(title = stringResource(R.string.backup_title), onBack = onBack) {
+    SettingsScaffold(title = stringResource(R.string.backup_title), onBack = null) {
         SingleChoiceSegmentedButtonRow(
             modifier = Modifier
                 .fillMaxWidth()

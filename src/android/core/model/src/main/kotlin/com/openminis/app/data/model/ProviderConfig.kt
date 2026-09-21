@@ -252,6 +252,9 @@ data class ProviderInstance(
     // so existing OpenAI instances are completely unaffected. Field name
     // matches iOS for cross-platform export/import interop.
     var azureMode: Boolean = false,
+    // Favorites: pinned instances render in a dedicated section at the top of
+    // the provider list. Default false so older JSON still deserializes.
+    var pinned: Boolean = false,
 
 ) {
     /** Returns the effective API base URL, applying v1 suffix if configured. */

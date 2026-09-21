@@ -68,7 +68,7 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
 
     SettingsScaffold(
         title = stringResource(R.string.settings_multi_agent),
-        onBack = onBack,
+        onBack = null,
     ) {
         SettingsSection(
             header = stringResource(R.string.settings_multi_agent_section_dispatch),

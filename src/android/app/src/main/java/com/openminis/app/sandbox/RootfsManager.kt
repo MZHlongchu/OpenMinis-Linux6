@@ -8,11 +8,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FilterInputStream
 import java.io.InputStream
 import java.nio.charset.Charset
+import java.nio.file.Files
+import java.nio.file.Paths
 import java.util.zip.GZIPInputStream
 import java.util.zip.ZipInputStream
 
@@ -191,24 +194,34 @@ class RootfsManager private constructor(private val context: Context) {
     suspend fun reset(keepUserData: Boolean = false): File? = withContext(Dispatchers.IO) {
         var backupDir: File? = null
 
-        if (keepUserData) {
-            val rootHome = File(rootfsDir, "root")
-            if (rootHome.exists()) {
-                backupDir = File(context.cacheDir, "rootfs-backup-root")
-                backupDir.deleteRecursively()
-                rootHome.copyRecursively(backupDir, overwrite = true)
+        // Hold aptMutex across dump → wipe → restore so a boot-time retry
+        // cannot race a half-deleted rootfs. Mutex is non-reentrant, so the
+        // locked dump/restore cores are used (not the public wrappers).
+        aptMutex.withLock {
+            runCatching { dumpDpkgWorldLocked() }
+            runCatching { dumpPipWorldLocked() }
+
+            if (keepUserData) {
+                val rootHome = File(rootfsDir, "root")
+                if (rootHome.exists()) {
+                    backupDir = File(context.cacheDir, "rootfs-backup-root")
+                    backupDir.deleteRecursively()
+                    rootHome.copyRecursively(backupDir, overwrite = true)
+                }
             }
-        }
 
-        HostStatusPublisher.stop()
-        rootfsDir.deleteRecursively()
-        installIfNeeded()
+            HostStatusPublisher.stop()
+            rootfsDir.deleteRecursively()
+            installIfNeeded()
 
-        // Restore user data
-        if (backupDir != null && backupDir.exists()) {
-            val rootHome = File(rootfsDir, "root")
-            backupDir.copyRecursively(rootHome, overwrite = true)
-            backupDir.deleteRecursively()
+            if (backupDir != null && backupDir.exists()) {
+                val rootHome = File(rootfsDir, "root")
+                backupDir.copyRecursively(rootHome, overwrite = true)
+                backupDir.deleteRecursively()
+            }
+
+            runCatching { restoreDpkgWorldUnlocked() }
+            runCatching { restorePipWorldUnlocked() }
         }
 
         backupDir
@@ -767,8 +780,426 @@ class RootfsManager private constructor(private val context: Context) {
         }
     }
 
+    private val aptMutex = kotlinx.coroutines.sync.Mutex()
+    private val pipWorldFile: File get() = File(context.filesDir, "pip-world.txt")
+    private val pipWorldFailedFile: File get() = File(context.filesDir, "pip-world-failed.txt")
+    private val dpkgWorldFile: File get() = File(context.filesDir, "dpkg-world.txt")
+    private val dpkgWorldFailedFile: File get() = File(context.filesDir, "dpkg-world-failed.txt")
+
+    /**
+     * Point guest `/etc/localtime` at the host timezone so `date` / Python
+     * datetime match the phone. The symlink target MUST stay a relative
+     * Path (`Paths.get(want)`). `File(want).toPath()` resolves against the
+     * process cwd and becomes an absolute host path, which PRoot cannot
+     * follow inside the guest.
+     */
+    suspend fun applyHostTimezone() = withContext(Dispatchers.IO) {
+        if (!isInstalled) return@withContext
+        val zoneId = java.util.TimeZone.getDefault().toZoneId().id
+        try {
+            val localtime = File(rootfsDir, "etc/localtime")
+            val target = File(rootfsDir, "usr/share/zoneinfo/$zoneId")
+            if (!target.exists()) {
+                Log.w(TAG, "[TzSync] zoneinfo missing for '$zoneId' — keeping UTC")
+                return@withContext
+            }
+            val want = "../usr/share/zoneinfo/$zoneId"
+            val current = runCatching {
+                Files.readSymbolicLink(localtime.toPath()).toString()
+            }.getOrNull()
+            val tzFile = File(rootfsDir, "etc/timezone")
+            val tzCurrent = runCatching { tzFile.readText().trim() }.getOrNull()
+            if (current == want && tzCurrent == zoneId) return@withContext
+            localtime.delete()
+            Files.createSymbolicLink(localtime.toPath(), Paths.get(want))
+            tzFile.writeText("$zoneId\n")
+            Log.i(TAG, "[TzSync] /etc/localtime -> $want (device zone $zoneId)")
+        } catch (t: Throwable) {
+            Log.w(TAG, "[TzSync] failed to align /etc/localtime with $zoneId: ${t.message}")
+        }
+    }
+
+    suspend fun dumpPipWorld() = aptMutex.withLock { dumpPipWorldLocked() }
+
+    suspend fun restorePipWorld() = aptMutex.withLock { restorePipWorldUnlocked() }
+
+    suspend fun retryFailedPipWorld() = aptMutex.withLock { retryFailedPipWorldUnlocked() }
+
+    suspend fun dumpDpkgWorld() = aptMutex.withLock { dumpDpkgWorldLocked() }
+
+    suspend fun restoreDpkgWorld() = aptMutex.withLock { restoreDpkgWorldUnlocked() }
+
+    suspend fun retryFailedDpkgWorld() = aptMutex.withLock { retryFailedDpkgWorldUnlocked() }
+
+    /** Guest-side HTTP probe + rewrite of /etc/apt/sources.list. Fire-and-forget from boot. */
+    suspend fun runMinisMirrorAuto() = withContext(Dispatchers.IO) {
+        aptMutex.withLock { runMinisMirrorAutoLocked() }
+    }
+
+    private fun runMinisMirrorAutoLocked() {
+        val helper = File(rootfsDir, "usr/local/bin/minis-mirror")
+        if (!helper.exists()) return
+        val cmd = listOf(
+            prootBinary.absolutePath, "-0", "--link2symlink", "--kill-on-exit",
+            "-r", rootfsDir.absolutePath,
+            "-b", "/dev", "-b", "/proc", "-w", "/root",
+            "/usr/local/bin/minis-mirror", "auto",
+        )
+        val r = runProotWithDeadline(cmd, prootLoaderEnv(), 180)
+        Log.i(TAG, "[minis-mirror auto] exit=${r.exitCode}")
+    }
+
+    private fun dumpDpkgWorldLocked() {
+        if (!prootBinary.exists()) return
+        val status = File(rootfsDir, "var/lib/dpkg/status")
+        if (!status.exists()) {
+            Log.d(TAG, "[dpkg-world] dpkg db missing — skip dump")
+            return
+        }
+        val manual = runAptMarkShowManualUnlocked()
+        if (manual == null) {
+            Log.w(TAG, "[dpkg-world] apt-mark showmanual failed — keeping previous snapshot")
+            return
+        }
+        val names = manual.sorted()
+        dpkgWorldFile.writeText(formatDpkgWorld(names))
+        Log.i(TAG, "[dpkg-world] dumped ${names.size} manual package(s)")
+    }
+
+    private fun restoreDpkgWorldUnlocked() {
+        if (!dpkgWorldFile.exists()) return
+        val names = parseDpkgWorld(dpkgWorldFile.readText())
+        if (names.isEmpty()) return
+        val already = installedPackageNames()
+        val missing = names.filter { it !in already }
+        if (missing.isEmpty()) {
+            dpkgWorldFailedFile.delete()
+            Log.i(TAG, "[dpkg-world] restore skip — ${names.size} already present")
+            return
+        }
+        val result = runAptInstallInGuest(missing)
+        if (result.exitCode == 0) {
+            dpkgWorldFailedFile.delete()
+            Log.i(TAG, "[dpkg-world] restored ${missing.size} package(s)")
+            return
+        }
+        val failed = extractFailedPackages(result.output, missing)
+        dpkgWorldFailedFile.writeText(failed.joinToString("\n") + "\n")
+        Log.w(TAG, "[dpkg-world] restore partial/fail exit=${result.exitCode}, queued ${failed.size}")
+    }
+
+    private fun installedPackageNames(): Set<String> {
+        val status = File(rootfsDir, "var/lib/dpkg/status")
+        if (!status.exists()) return emptySet()
+        val out = linkedSetOf<String>()
+        var pkg: String? = null
+        var installed = false
+        fun flush() {
+            val p = pkg
+            if (p != null && installed && DPKG_PKG_NAME.matches(p)) out += p
+            pkg = null
+            installed = false
+        }
+        for (raw in status.readText().lineSequence()) {
+            if (raw.isBlank()) {
+                flush()
+                continue
+            }
+            when {
+                raw.startsWith("Package: ") -> pkg = raw.removePrefix("Package: ").trim()
+                raw.startsWith("Status: ") -> {
+                    val parts = raw.removePrefix("Status: ").trim().split(Regex("\\s+"))
+                    installed = parts.getOrNull(2) == "installed"
+                }
+            }
+        }
+        flush()
+        return out
+    }
+
+    private fun retryFailedDpkgWorldUnlocked() {
+        if (!dpkgWorldFailedFile.exists()) return
+        val names = parseDpkgWorld(dpkgWorldFailedFile.readText())
+        if (names.isEmpty()) {
+            dpkgWorldFailedFile.delete()
+            return
+        }
+        val stillMissing = names.filter { it !in installedPackageNames() }
+        if (stillMissing.isEmpty()) {
+            dpkgWorldFailedFile.delete()
+            context.getSharedPreferences("dpkg_world_retry", Context.MODE_PRIVATE)
+                .edit().putInt("strikes", 0).apply()
+            return
+        }
+        // Heal mirrors before spending a retry strike on a dead source.
+        runCatching { runMinisMirrorAutoLocked() }
+            .onFailure { Log.w(TAG, "[dpkg-world] minis-mirror auto failed (non-fatal): ${it.message}") }
+
+        val prefs = context.getSharedPreferences("dpkg_world_retry", Context.MODE_PRIVATE)
+        val strikes = prefs.getInt("strikes", 0)
+        if (strikes >= MAX_DPKG_WORLD_RETRY_STRIKES) {
+            Log.w(TAG, "[dpkg-world] giving up after $strikes strikes")
+            dpkgWorldFailedFile.delete()
+            prefs.edit().remove("strikes").apply()
+            return
+        }
+        val result = runAptInstallInGuest(stillMissing)
+        if (result.exitCode == 0) {
+            dpkgWorldFailedFile.delete()
+            prefs.edit().putInt("strikes", 0).apply()
+            Log.i(TAG, "[dpkg-world] retry restored ${stillMissing.size} package(s)")
+        } else {
+            val failed = extractFailedPackages(result.output, stillMissing)
+            dpkgWorldFailedFile.writeText(failed.joinToString("\n") + "\n")
+            prefs.edit().putInt("strikes", strikes + 1).apply()
+            Log.w(TAG, "[dpkg-world] retry failed strike=${strikes + 1} queued=${failed.size}")
+        }
+    }
+
+    private fun runAptMarkShowManualUnlocked(): List<String>? {
+        val cmd = listOf(
+            prootBinary.absolutePath, "-0", "--link2symlink", "--kill-on-exit",
+            "-r", rootfsDir.absolutePath,
+            "-b", "/dev", "-b", "/proc", "-w", "/root",
+            "/usr/bin/apt-mark", "showmanual",
+        )
+        val r = runProotWithDeadline(cmd, prootLoaderEnv(), 120)
+        if (r.exitCode != 0) {
+            Log.w(TAG, "[dpkg-world] apt-mark showmanual exit=${r.exitCode}")
+            return null
+        }
+        return parseDpkgWorld(r.output)
+    }
+
+    /**
+     * `--no-upgrade` installs missing names without bumping packages that
+     * already exist in the factory rootfs, so a full `apt-mark showmanual`
+     * snapshot is safe to restore (no hardcoded factory package list).
+     */
+    private fun runAptInstallInGuest(pkgNames: Collection<String>): AptResult {
+        if (pkgNames.isEmpty()) return AptResult(0, "")
+        if (!prootBinary.exists()) return AptResult(-1, "")
+        val pkgs = pkgNames.filter { DPKG_PKG_NAME.matches(it) }
+        if (pkgs.isEmpty()) return AptResult(0, "")
+        val script = buildString {
+            append("DEBIAN_FRONTEND=noninteractive apt-get update -qq && ")
+            append("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-upgrade ")
+            append(pkgs.joinToString(" "))
+        }
+        val cmd = listOf(
+            prootBinary.absolutePath, "-0", "--link2symlink", "--kill-on-exit",
+            "-r", rootfsDir.absolutePath,
+            "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/root",
+            "/bin/sh", "-c", script,
+        )
+        val r = runProotWithDeadline(cmd, prootLoaderEnv(), 600)
+        Log.i(TAG, "[dpkg-world] apt install exit=${r.exitCode} pkgs=${pkgs.size}")
+        return r
+    }
+
+    private fun extractFailedPackages(output: String, requested: Collection<String>): List<String> {
+        val requestedSet = requested.toSet()
+        val failed = linkedSetOf<String>()
+        val patterns = listOf(
+            Regex("""Unable to locate package (\S+)"""),
+            Regex("""Package '([^']+)' has no installation candidate"""),
+            Regex("""Version '[^']*' for '([^']*)' was not found"""),
+            Regex("""'?([A-Za-z0-9+.:-]+)'? (?:is not|but it is not) (?:installable|going to be installed)"""),
+            Regex("""Depends: (\S+) but it is not (?:installable|going to be installed)"""),
+        )
+        for (line in output.lineSequence()) {
+            for (re in patterns) {
+                re.find(line)?.groupValues?.getOrNull(1)?.let { pkg ->
+                    if (pkg.isNotEmpty()) failed += pkg
+                }
+            }
+        }
+        val known = failed.filter { it in requestedSet }
+        return if (known.isEmpty()) requested.toList() else known
+    }
+
+    private fun parseDpkgWorld(text: String): List<String> {
+        val out = linkedSetOf<String>()
+        for (raw in text.lineSequence()) {
+            val line = raw.trim()
+            if (line.isEmpty() || line.startsWith("#")) continue
+            val name = line.substringBefore('=').trim()
+            if (DPKG_PKG_NAME.matches(name)) out += name
+        }
+        return out.toList()
+    }
+
+    private fun formatDpkgWorld(names: Collection<String>): String {
+        val body = names.joinToString("\n")
+        return DPKG_WORLD_HEADER + body + if (body.isEmpty()) "" else "\n"
+    }
+
+    private fun dumpPipWorldLocked() {
+        if (!prootBinary.exists()) return
+        if (!File(rootfsDir, "usr/bin/python3").exists()) return
+        val leaves = runPipLeavesUnlocked() ?: return
+        val extras = leaves.filter { it.lowercase() !in FACTORY_PIP_BASELINE }.sorted()
+        pipWorldFile.writeText(PIP_WORLD_HEADER + extras.joinToString("\n") + if (extras.isEmpty()) "" else "\n")
+        Log.i(TAG, "[pip-world] dumped ${extras.size} packages")
+    }
+
+    private fun runPipLeavesUnlocked(): Set<String>? {
+        val loaderEnv = prootLoaderEnv()
+        val cmd = listOf(
+            prootBinary.absolutePath, "-0", "--link2symlink", "--kill-on-exit",
+            "-r", rootfsDir.absolutePath,
+            "-b", "/dev", "-b", "/proc", "-w", "/root",
+            "/usr/bin/python3", "-m", "pip", "list", "--not-required",
+            "--format=freeze", "--disable-pip-version-check",
+        )
+        val r = runProotWithDeadline(cmd, loaderEnv, 120)
+        if (r.exitCode != 0) {
+            Log.w(TAG, "[pip-world] pip list failed exit=${r.exitCode}")
+            return null
+        }
+        return parsePipWorld(r.output)
+    }
+
+    private fun restorePipWorldUnlocked() {
+        if (!pipWorldFile.exists()) return
+        val names = parsePipWorld(pipWorldFile.readText())
+            .filter { it.lowercase() !in FACTORY_PIP_BASELINE }
+        if (names.isEmpty()) return
+        if (!runPipInstallUnlocked(names)) {
+            pipWorldFailedFile.writeText(names.joinToString("\n") + "\n")
+            Log.w(TAG, "[pip-world] restore failed, queued ${names.size} for retry")
+        } else {
+            pipWorldFailedFile.delete()
+            Log.i(TAG, "[pip-world] restored ${names.size} packages")
+        }
+    }
+
+    private fun retryFailedPipWorldUnlocked() {
+        if (!pipWorldFailedFile.exists()) return
+        val names = parsePipWorld(pipWorldFailedFile.readText())
+            .filter { it.lowercase() !in FACTORY_PIP_BASELINE }
+        if (names.isEmpty()) {
+            pipWorldFailedFile.delete()
+            return
+        }
+        val prefs = context.getSharedPreferences("pip_world_retry", android.content.Context.MODE_PRIVATE)
+        val strikes = prefs.getInt("strikes", 0)
+        if (strikes >= MAX_PIP_WORLD_RETRY_STRIKES) {
+            Log.w(TAG, "[pip-world] giving up after $strikes strikes")
+            pipWorldFailedFile.delete()
+            return
+        }
+        if (runPipInstallUnlocked(names)) {
+            pipWorldFailedFile.delete()
+            prefs.edit().putInt("strikes", 0).apply()
+            Log.i(TAG, "[pip-world] retry restored ${names.size} packages")
+        } else {
+            prefs.edit().putInt("strikes", strikes + 1).apply()
+            Log.w(TAG, "[pip-world] retry failed strike=${strikes + 1}")
+        }
+    }
+
+    private fun runPipInstallUnlocked(names: Collection<String>): Boolean {
+        if (names.isEmpty()) return true
+        if (!File(rootfsDir, "usr/bin/python3").exists()) return false
+        val tmp = File(rootfsDir, "tmp")
+        tmp.mkdirs()
+        val req = File(tmp, "pip-world-requirements.txt")
+        req.writeText(names.joinToString("\n") + "\n")
+        val loaderEnv = prootLoaderEnv()
+        val cmd = listOf(
+            prootBinary.absolutePath, "-0", "--link2symlink", "--kill-on-exit",
+            "-r", rootfsDir.absolutePath,
+            "-b", "/dev", "-b", "/proc", "-w", "/root",
+            "/usr/bin/python3", "-m", "pip", "install",
+            "--ignore-installed", "--disable-pip-version-check", "--no-input",
+            "-r", "/tmp/pip-world-requirements.txt",
+        )
+        val r = runProotWithDeadline(cmd, loaderEnv, 900)
+        req.delete()
+        return r.exitCode == 0
+    }
+
+    private fun prootLoaderEnv(): Map<String, String> {
+        val env = mutableMapOf(
+            "PATH" to UBUNTU_GUEST_PATH,
+            "PROOT_TMP_DIR" to PRootKernel.getProotTmpDir(context).absolutePath,
+            "LD_LIBRARY_PATH" to nativeLibDir.absolutePath,
+            "TMPDIR" to "/tmp",
+            "TMP" to "/tmp",
+            "TEMP" to "/tmp",
+            "HOME" to "/root",
+            "LANG" to "C.UTF-8",
+            "DEBIAN_FRONTEND" to "noninteractive",
+        )
+        File(nativeLibDir, "libproot-loader.so").takeIf { it.exists() }?.let {
+            env["PROOT_LOADER"] = it.absolutePath
+        }
+        File(nativeLibDir, "libproot-loader32.so").takeIf { it.exists() }?.let {
+            env["PROOT_LOADER_32"] = it.absolutePath
+        }
+        return env
+    }
+
+    private data class AptResult(val exitCode: Int, val output: String)
+
+    private fun runProotWithDeadline(
+        cmd: List<String>,
+        loaderEnv: Map<String, String>,
+        timeoutSec: Long,
+    ): AptResult {
+        val p = ProcessBuilder(cmd)
+            .redirectErrorStream(true)
+            .apply { environment().putAll(loaderEnv) }
+            .start()
+        val outputFuture = java.util.concurrent.CompletableFuture.supplyAsync {
+            try {
+                p.inputStream.readBytes().toString(Charset.forName("UTF-8"))
+            } catch (_: Exception) {
+                ""
+            }
+        }
+        val finished = p.waitFor(timeoutSec, java.util.concurrent.TimeUnit.SECONDS)
+        val code: Int
+        if (finished) {
+            code = p.exitValue()
+        } else {
+            p.destroyForcibly()
+            code = -1
+            Log.w(TAG, "[Proot] child timed out after ${timeoutSec}s")
+        }
+        val output = try {
+            outputFuture.get(10, java.util.concurrent.TimeUnit.SECONDS)
+        } catch (_: Exception) {
+            outputFuture.cancel(true)
+            ""
+        }
+        return AptResult(code, output)
+    }
+
+    private fun parsePipWorld(text: String): Set<String> {
+        val out = linkedSetOf<String>()
+        for (raw in text.lineSequence()) {
+            val line = raw.trim()
+            if (line.isEmpty() || line.startsWith("#") || line.startsWith("-")) continue
+            val name = line.substringBefore("==").substringBefore("=").trim()
+            if (name.matches(Regex("[A-Za-z0-9._-]+"))) out += name
+        }
+        return out
+    }
+
     companion object {
         private const val TAG = "RootfsManager"
+        private const val UBUNTU_GUEST_PATH =
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/bin:" +
+                "/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:" +
+                "/opt/android-sdk/build-tools/35.0.2:/opt/android-sdk/cmake/3.22.1/bin:/opt/gradle/bin"
+        private val FACTORY_PIP_BASELINE = setOf("pip", "setuptools", "wheel")
+        private const val PIP_WORLD_HEADER = "# pip-world snapshot — extra packages beyond factory\n"
+        private const val DPKG_WORLD_HEADER = "# dpkg-world snapshot — apt-mark showmanual names, one per line\n"
+        private val DPKG_PKG_NAME = Regex("[A-Za-z0-9][A-Za-z0-9+.:_-]*")
+        private const val MAX_PIP_WORLD_RETRY_STRIKES = 3
+        private const val MAX_DPKG_WORLD_RETRY_STRIKES = 3
         private const val ARCH = "aarch64"
         private const val ROOTFS_ASSET = "ubuntu-base.tar.gz"
         private const val ROOTFS_ASSET_TAR = "ubuntu-base.tar"

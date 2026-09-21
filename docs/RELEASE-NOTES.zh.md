@@ -1,3 +1,26 @@
+# OpenMinis-Linux 1.36.16-linux
+
+- versionCode **69**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.14-linux（含已合入 main、未单独打正式 tag 的 1.36.15）：
+
+- **Termux 终端**：PTY 改用 `terminal-view:0.118.0`，去掉自研 emulator / canvas / `pty_bridge`。
+- **提供商置顶 + 并行刷新**：常用分组；一键强制刷新全部服务商。Provider 库 v5（`pinned`）。
+- **镜像自愈与包世界**：启动先 `minis-mirror auto`，再重试失败的 dpkg/pip；重置 Linux 先 dump `apt-mark showmanual` 与 pip extras，再只装缺失包。
+- **时区**：相对 symlink + `/etc/timezone`，避免 PRoot 跟丢绝对路径。
+- **一级设置无返回箭头**；Web 搜索列表无箭头、详情有。系统「选择文字」可分享进会话。
+- **技能 requirements.json**：`env`/`tiers` 为 Map，优先 `apt`；环境变量页有平台集成卡片。
+- **1.36.15**：遗留会话归档进工作区（分阶段拷贝、中断可恢复）；工具写文件原子化并回读校验；主 FAB 建文件夹、小 FAB 开新会话；子代理结束后从直播条移除；过程摘要在反向列表里放到内容后面。
+- **仓库**：不再携带 `src/ios/`。
+
+---
+
 # OpenMinis-Linux 1.36.14-linux
 
 - versionCode **67**

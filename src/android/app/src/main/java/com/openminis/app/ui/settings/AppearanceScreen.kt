@@ -292,7 +292,7 @@ fun AppearanceScreen(
     val tileGreen = Color(0xFF34C759)
     val tileTeal = Color(0xFF5AC8FA)
 
-    SettingsScaffold(title = stringResource(R.string.appearance_title), onBack = onBack) {
+    SettingsScaffold(title = stringResource(R.string.appearance_title), onBack = null) {
 
         // -- Theme --
         // Each row carries its own leading icon + tile colour, mirroring the

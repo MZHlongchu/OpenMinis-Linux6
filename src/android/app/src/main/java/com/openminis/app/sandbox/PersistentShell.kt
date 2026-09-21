@@ -30,6 +30,7 @@ class PersistentShell(
 ) {
 
     companion object {
+        private const val MAX_OUTPUT_CHARS = 128 * 1024
         private const val TAG = "PersistentShell"
 
         /**
@@ -64,7 +65,14 @@ class PersistentShell(
         val output: StringBuilder = StringBuilder(),
         val lineCallback: ((String) -> Unit)?,
         var onComplete: ((String, Int) -> Unit)? = null,
-    )
+    ) {
+        fun appendOutput(text: String) {
+            val room = MAX_OUTPUT_CHARS - output.length
+            if (room <= 0) return
+            if (text.length <= room) output.append(text)
+            else output.append(text, 0, room).append("\n[... output truncated ...]\n")
+        }
+    }
 
     /**
      * Ensure the persistent shell process is running.
@@ -377,7 +385,7 @@ class PersistentShell(
                     if (markerIdx >= 0) {
                         // Extract output before marker
                         val beforeMarker = text.substring(0, markerIdx)
-                        cb.output.append(beforeMarker)
+                        cb.appendOutput(beforeMarker)
                         if (cb.lineCallback != null) {
                             feedLines(beforeMarker, cb.lineCallback)
                         }
@@ -390,7 +398,7 @@ class PersistentShell(
                         cb.onComplete?.invoke(cb.output.toString(), exitCode)
                         pendingCallback = null
                     } else {
-                        cb.output.append(text)
+                        cb.appendOutput(text)
                         if (cb.lineCallback != null) {
                             feedLines(text, cb.lineCallback)
                         }

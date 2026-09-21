@@ -875,6 +875,13 @@
     <string name="env_var_privacy_header">Privacy</string>
     <string name="env_var_privacy_toggle">Privacy Mode</string>
     <string name="env_var_privacy_footer">When enabled, any environment variable value that appears in shell-execute output is replaced with a masked form (e.g. `sk-1********ajhks`) before reaching the model. Values shorter than 8 characters become all `*`. The user-visible output in chat is unchanged.</string>
+    <string name="env_var_platform_header">Platform Integrations</string>
+    <string name="env_var_platform_tier_2">Complete</string>
+    <string name="env_var_platform_tier_1">Read-only</string>
+    <string name="env_var_platform_tier_0">Needs config</string>
+    <string name="env_var_platform_var_configured">Configured</string>
+    <string name="env_var_platform_var_missing">Tap to add %1$s</string>
+    <string name="env_var_platform_var_add_title">Add %1$s</string>
     <string name="env_var_section_header">Variables</string>
     <string name="env_var_section_footer">Environment variables are injected into the sandbox shell at session start. Names are uppercased and must match POSIX shell variable rules.</string>
     <string name="env_var_empty_title">No Environment Variables</string>
@@ -1216,6 +1223,13 @@
     <string name="share_open_app_failed">Content saved. Couldn\'t open Minis automatically — please open the app to continue.</string>
     <string name="provider_list_api_key">API Key</string>
     <string name="provider_list_disabled">Disabled</string>
+    <string name="provider_list_favorites">Favorites</string>
+    <string name="provider_list_sync_all">Sync all providers</string>
+    <string name="provider_list_sync_all_success">All %1$d providers synced.</string>
+    <string name="provider_list_sync_partial">Sync finished — %1$d synced, %2$d no key, %3$d failed.</string>
+    <string name="provider_list_sync_failed_generic">Sync failed. Check your connection and try again.</string>
+    <string name="provider_set_favorite">Set as favorite</string>
+    <string name="provider_unset_favorite">Remove from favorites</string>
     <string name="provider_detail_export">Export</string>
     <string name="provider_detail_label">Label</string>
     <string name="provider_detail_manual_bearer_token">Manual Bearer Token</string>

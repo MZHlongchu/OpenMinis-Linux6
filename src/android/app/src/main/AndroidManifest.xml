@@ -280,6 +280,11 @@
             android:name=".share.ShareReceiverActivity"
             android:exported="true"
             android:theme="@style/Theme.Minis">
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
             <!-- T157: widen mime to */* so Minis appears in the system share
                  sheet for any file type (xml/pdf/zip/audio/video/…). The
                  narrower text/plain + image/* + application/* set hid Minis

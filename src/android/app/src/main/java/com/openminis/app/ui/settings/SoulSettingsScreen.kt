@@ -302,7 +302,7 @@ fun SoulSettingsScreen(
 
     SettingsScaffold(
         title = stringResource(R.string.soul_settings_title),
-        onBack = attemptBack,
+        onBack = null,
     ) {
         SettingsSection(
             header = stringResource(R.string.soul_section_preview),

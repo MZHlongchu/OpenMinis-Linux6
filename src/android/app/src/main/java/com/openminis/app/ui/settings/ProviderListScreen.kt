@@ -21,6 +21,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material.icons.outlined.VpnKey
@@ -37,6 +41,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +57,10 @@ import androidx.compose.runtime.key
 import sh.calvin.reorderable.ReorderableColumn
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.repository.ProviderRepository
+import com.openminis.app.data.repository.ModelRefreshResult
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Delete
 import com.openminis.app.ui.components.MinisAlertDialog
@@ -75,6 +84,16 @@ fun ProviderListScreen(
     val context = LocalContext.current
 
     var showMenu by remember { mutableStateOf(false) }
+    var isSyncing by remember { mutableStateOf(false) }
+    val syncScope = rememberCoroutineScope()
+
+    fun syncSummary(ok: Int, noKey: Int, failed: Int): String =
+        if (ok > 0 && noKey == 0 && failed == 0) {
+            context.getString(R.string.provider_list_sync_all_success, ok)
+        } else {
+            context.getString(R.string.provider_list_sync_partial, ok, noKey, failed)
+        }
+
     // [T-android-swipe-row-actions] Pending swipe-delete target. Held here
     // rather than per-row so the confirmation survives the row being
     // recomposed/reordered underneath it.
@@ -124,8 +143,48 @@ fun ProviderListScreen(
 
     SettingsScaffold(
         title = stringResource(R.string.provider_list_providers),
-        onBack = onBack,
+        onBack = null,
         actions = {
+            IconButton(
+                onClick = {
+                    if (isSyncing) return@IconButton
+                    isSyncing = true
+                    syncScope.launch {
+                        val msg = try {
+                            val results = withContext(Dispatchers.IO) {
+                                providerRepository.refreshAllModelsForce()
+                            }
+                            val ok = results.count { it.second == ModelRefreshResult.SUCCESS_API }
+                            val noKey = results.count { it.second == ModelRefreshResult.NO_KEY }
+                            val failed = results.count {
+                                it.second == ModelRefreshResult.FAILURE ||
+                                    it.second == ModelRefreshResult.PRESERVED
+                            }
+                            syncSummary(ok, noKey, failed)
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            context.getString(R.string.provider_list_sync_failed_generic)
+                        } finally {
+                            isSyncing = false
+                        }
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                    }
+                },
+                enabled = !isSyncing,
+            ) {
+                if (isSyncing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(
+                        Icons.Filled.Sync,
+                        contentDescription = stringResource(R.string.provider_list_sync_all),
+                    )
+                }
+            }
             IconButton(onClick = { showMenu = true }) {
                 Icon(Icons.Default.Add, contentDescription = stringResource(R.string.provider_list_add_provider))
             }
@@ -161,7 +220,33 @@ fun ProviderListScreen(
                 )
             }
         } else {
-            groupedInstances.forEach { (providerType, typeInstances) ->
+            val pinnedInstances = instances.filter { it.pinned }
+            if (pinnedInstances.isNotEmpty()) {
+                SettingsSection(header = stringResource(R.string.provider_list_favorites)) {
+                    pinnedInstances.forEachIndexed { index, instance ->
+                        ProviderSwipeableRow(
+                            instance = instance,
+                            providerRepository = providerRepository,
+                            context = context,
+                            onProviderClick = onProviderClick,
+                            onRequestDelete = { instanceToDelete = instance },
+                        )
+                        if (index < pinnedInstances.size - 1) {
+                            val divider = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 38.dp, end = 14.dp)
+                                    .height(0.5.dp)
+                                    .background(divider),
+                            )
+                        }
+                    }
+                }
+            }
+            groupedInstances.forEach { (providerType, typeInstancesRaw) ->
+                val typeInstances = typeInstancesRaw.filter { !it.pinned }
+                if (typeInstances.isEmpty()) return@forEach
                 SettingsSection(header = providerType.displayName) {
                     // [T-android-provider-reorder] Long-press a row to drag it
                     // within its provider-type section (mirrors iOS
@@ -260,6 +345,10 @@ fun ProviderListScreen(
                                         modelCount = modelCount,
                                         apiKey = apiKey,
                                         isConfigured = isConfigured,
+                                        pinned = instance.pinned,
+                                        onTogglePinned = {
+                                            providerRepository.setInstancePinned(instance.id, !instance.pinned)
+                                        },
                                         onClick = { onProviderClick(instance.id) },
                                     )
                                 }
@@ -386,11 +475,62 @@ fun ProviderListScreen(
 }
 
 @Composable
+private fun ProviderSwipeableRow(
+    instance: ProviderInstance,
+    providerRepository: ProviderRepository,
+    context: android.content.Context,
+    onProviderClick: (String) -> Unit,
+    onRequestDelete: () -> Unit,
+) {
+    val modelCount = providerRepository.visibleEntries(instance.id).size
+    val apiKey = providerRepository.loadApiKey(instance.id)
+    val isConfigured = if (instance.credentialType ==
+        com.openminis.app.data.model.ProviderCredential.oauth) {
+        val mgr = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
+        mgr?.isAuthenticated() == true
+    } else {
+        !apiKey.isNullOrBlank() || instance.allowsEmptyAPIKey
+    }
+    SwipeRowActions(
+        actions = listOf(
+            SwipeRowAction(
+                label = stringResource(R.string.common_edit),
+                icon = Icons.Filled.Edit,
+                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                onClick = { onProviderClick(instance.id) },
+            ),
+            SwipeRowAction(
+                label = stringResource(R.string.common_delete),
+                icon = Icons.Filled.Delete,
+                containerColor = MaterialTheme.colorScheme.errorContainer,
+                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                onClick = onRequestDelete,
+            ),
+        ),
+    ) {
+        ProviderInstanceRow(
+            instance = instance,
+            modelCount = modelCount,
+            apiKey = apiKey,
+            isConfigured = isConfigured,
+            pinned = instance.pinned,
+            onTogglePinned = {
+                providerRepository.setInstancePinned(instance.id, !instance.pinned)
+            },
+            onClick = { onProviderClick(instance.id) },
+        )
+    }
+}
+
+@Composable
 private fun ProviderInstanceRow(
     instance: ProviderInstance,
     modelCount: Int,
     apiKey: String?,
     isConfigured: Boolean,
+    pinned: Boolean,
+    onTogglePinned: () -> Unit,
     onClick: () -> Unit,
 ) {
     val isActive = isConfigured && instance.isEnabled
@@ -470,6 +610,16 @@ private fun ProviderInstanceRow(
                     .padding(horizontal = 6.dp, vertical = 2.dp),
             )
             Spacer(Modifier.width(8.dp))
+        }
+
+        IconButton(onClick = onTogglePinned) {
+            Icon(
+                imageVector = if (pinned) Icons.Filled.Star else Icons.Filled.StarBorder,
+                contentDescription = stringResource(
+                    if (pinned) R.string.provider_unset_favorite else R.string.provider_set_favorite,
+                ),
+                tint = if (pinned) Color(0xFFFFCC00) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+            )
         }
 
         Icon(

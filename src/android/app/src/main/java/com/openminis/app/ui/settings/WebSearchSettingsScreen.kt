@@ -46,7 +46,13 @@ fun WebSearchSettingsScreen(onBack: () -> Unit) {
 
     SettingsScaffold(
         title = title,
-        onBack = { if (detail != null) detail = null else onBack() },
+        // List is a first-level settings page (no back arrow). Engine
+        // detail keeps the arrow to pop back to the list.
+        onBack = if (detail != null) {
+            { detail = null }
+        } else {
+            null
+        },
     ) {
         val current = detail
         if (current == null) {

@@ -62,7 +62,7 @@ fun PluginMarketScreen(
 
     SettingsScaffold(
         title = stringResource(R.string.plugin_market_title),
-        onBack = onBack,
+        onBack = null,
     ) {
         if (status.isNotBlank()) {
             Text(

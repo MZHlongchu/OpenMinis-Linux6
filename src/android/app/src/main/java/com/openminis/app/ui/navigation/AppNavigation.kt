@@ -1193,6 +1193,7 @@ fun AppNavigation(
             if (envVarRepository != null) {
                 EnvironmentVariablesScreen(
                     envVarRepository = envVarRepository,
+                    skillRepository = skillRepository,
                     onBack = { navController.safePopBackStack() },
                 )
             }

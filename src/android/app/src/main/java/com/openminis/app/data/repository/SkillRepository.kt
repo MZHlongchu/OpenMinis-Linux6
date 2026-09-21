@@ -88,6 +88,13 @@ class SkillRepository(private val context: Context) {
         }
     }
 
+    data class SkillRequirements(
+        val apt: List<String> = emptyList(),
+        val pip: List<String> = emptyList(),
+        val env: Map<String, String> = emptyMap(),
+        val tiers: Map<String, String> = emptyMap(),
+    )
+
     data class Skill(
         val id: String = UUID.randomUUID().toString(),
         val name: String,
@@ -1490,6 +1497,56 @@ class SkillRepository(private val context: Context) {
             append(skill.body)
         }
         File(dir, "SKILL.md").writeText(content)
+    }
+
+    /**
+     * Load optional `requirements.json` next to SKILL.md.
+     * Ubuntu sandbox prefers `"apt"`; `"apk"` is kept as Alpine leftover.
+     * `env` / `tiers` are objects (`key → description`). A JSON array of
+     * keys is accepted as a legacy shape and mapped to empty descriptions.
+     */
+    fun loadSkillRequirements(skillId: String): SkillRequirements? {
+        val file = File(skillsDir, "$skillId/requirements.json")
+        if (!file.exists()) return null
+        return try {
+            val obj = JSONObject(file.readText())
+            SkillRequirements(
+                apt = stringList(obj, preferred = "apt", fallback = "apk"),
+                pip = stringList(obj, preferred = "pip"),
+                env = stringMap(obj, "env"),
+                tiers = stringMap(obj, "tiers"),
+            )
+        } catch (e: Exception) {
+            android.util.Log.w("SkillRepository", "requirements.json for $skillId: ${e.message}")
+            null
+        }
+    }
+
+    private fun stringList(obj: JSONObject, preferred: String, fallback: String? = null): List<String> {
+        val arr = obj.optJSONArray(preferred)
+            ?: fallback?.let { obj.optJSONArray(it) }
+            ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotBlank() } }
+    }
+
+    private fun stringMap(obj: JSONObject, key: String): Map<String, String> {
+        obj.optJSONObject(key)?.let { nested ->
+            val out = linkedMapOf<String, String>()
+            val keys = nested.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                val v = nested.optString(k, "").trim()
+                if (k.isNotBlank()) out[k] = v
+            }
+            return out
+        }
+        val arr = obj.optJSONArray(key) ?: return emptyMap()
+        val out = linkedMapOf<String, String>()
+        for (i in 0 until arr.length()) {
+            val k = arr.optString(i).trim()
+            if (k.isNotBlank()) out[k] = ""
+        }
+        return out
     }
 
     private fun readSkillMdBody(id: String): String {

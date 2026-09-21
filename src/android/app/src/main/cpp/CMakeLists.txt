@@ -1,12 +1,10 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(minis_native CXX C)
 
-add_library(pty_bridge SHARED pty_bridge.c)
-
 # T283: NDK signal handler for native crashes (SIGSEGV/SIGABRT/...).
-# Separate library so loadLibrary() can pull it in independently of
-# pty_bridge — the crash handler must be installed before any other
-# native lib has a chance to fault.
+# Separate library so loadLibrary() can pull it in independently —
+# the crash handler must be installed before any other native lib
+# has a chance to fault.
 add_library(minis_crash_handler SHARED crash_handler.cpp)
 
 # [T-android-text-segmenter] CppJieba JNI bridge for TextSegmenter's Chinese
@@ -19,7 +17,6 @@ target_include_directories(jieba_jni PRIVATE
 )
 
 find_library(log-lib log)
-target_link_libraries(pty_bridge ${log-lib})
 
 # crash_handler.cpp uses _Unwind_Backtrace.
 # Do NOT find_library(unwind) / -lunwind: NDK llvm prebuilt puts a *host*
