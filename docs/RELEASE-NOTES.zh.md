@@ -1,3 +1,23 @@
+# OpenMinis-Linux 1.36.10-linux
+
+- versionCode **63**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.9-linux：
+
+- **人格提示词不再撑长设置页**：主页只显示当前文件名，点击进入二级页查看或编辑正文。
+- **导入**：设置页 + 号从手机选 `.md` / `.txt`，复制进应用私有目录 `minis-global/memory/personas/`，下拉框切换当前提示词。
+- **按供应商绑定**：每个供应商可选用不同人格文件，未绑定时跟随默认。发消息时按当前模型所属供应商注入。
+- **去掉语言 Tad**：Auto / 中文 / English 三选一已移除，磁盘上只保留单一 `lang: auto`。
+- **自绘图标**：文件、导入加号、供应商、chevron 用 Canvas 描边，不走 Material 图标包。
+
+---
+
 # OpenMinis-Linux 1.36.9-linux
 
 - versionCode **62**
