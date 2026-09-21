@@ -25,6 +25,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -50,12 +51,14 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.openminis.app.BuildConfig
 import com.openminis.app.R
+import com.openminis.app.data.PendingUpdateStore
 import com.openminis.app.data.UpdateChecker
 import com.openminis.app.data.UpdateDownloadManager
 import kotlinx.coroutines.launch
 import com.openminis.app.ui.components.MinisButton
 import com.openminis.app.ui.components.MinisTextButton
 import com.openminis.app.i18n.uppercaseForDisplay
+import java.io.File
 
 /**
  * Settings section that talks to [UpdateChecker] to surface a "Check for
@@ -86,71 +89,139 @@ fun CheckUpdateSection() {
     // Progress/error that originate from the background downloader are read
     // straight off the StateFlow. Local UI errors (install-launch failure) live
     // in their own mutable slot so they can be assigned/cleared.
-    val downloadProgress: Float? = if (dlState.running || dlState.doneFile != null) dlState.progress else null
     val dlError: String? = dlState.error
     var uiError by remember { mutableStateOf<String?>(null) }
     val downloadError: String? = uiError ?: dlError
-    var awaitingInstallPerm by remember { mutableStateOf(false) }
     var confirmSelfBuild by remember { mutableStateOf(false) }
+
+    // --- resumable flow state ------------------------------------------------
+    //
+    // Everything that decides "what should this screen be doing right now" is
+    // re-read from the PackageManager / PendingUpdateStore rather than held in
+    // remember{} slots.
+    //
+    // The old design kept `awaitingInstallPerm` in a remember{} slot, and the
+    // only dialog that could rescue a stalled flow was gated on it. A process
+    // kill while the user was in system Settings reset it to false, so on
+    // return the prompt silently vanished and the flow was stranded — the
+    // download button was disabled (see below) and nothing offered to install.
+    var canInstallNow by remember { mutableStateOf(UpdateChecker.canInstall(context)) }
+    var pendingIntent by remember { mutableStateOf(PendingUpdateStore.getPendingIntent(context)) }
+    var pendingRecord by remember { mutableStateOf(PendingUpdateStore.getPending(context)) }
+    // Lets the user wave off the "staged APK" prompt for this screen visit.
+    // The record is untouched, so the next entry offers it again.
+    var stagedPromptDismissed by remember { mutableStateOf(false) }
+
+    // The staged APK, whether it finished downloading in THIS process
+    // (dlState.doneFile) or a previous one (the persisted record). Without the
+    // second source, a cold start after "download done, permission still
+    // pending" shows a blank screen and forgets the ~98 MB file entirely.
+    val stagedApk: File? = dlState.doneFile
+        ?: pendingRecord?.let { rec -> File(rec.apkPath).takeIf { it.exists() } }
+    // An APK that is on disk but not yet handed to the installer.
+    val stagedNotInstalled = stagedApk != null && !dlState.installLaunched
+    // We auto-fire the installer exactly ONCE — on the resume where the user
+    // has just granted permission. After that the user drives it, otherwise
+    // every resume would re-open the system installer.
+    val installAlreadyLaunched = (pendingRecord?.installLaunchedAtMs ?: 0L) > 0L
+    val shouldAutoInstall = stagedNotInstalled && !installAlreadyLaunched
+    val needsInstallPerm = !canInstallNow
+
+    // Progress is a DISPLAY value only. It deliberately does not gate the
+    // dialog's action button any more: `enabled = downloadProgress == null`
+    // was permanently false once a download completed (doneFile stays non-null
+    // for the life of the process), so any flow that failed to reach the
+    // installer — MIUI refusing the intent, permission revoked mid-flight, a
+    // failed integrity check — ended on a dead button whose only way out,
+    // "Cancel", discarded the whole flow.
+    //
+    // Keyed on dlState.doneFile (this process) rather than stagedApk, so a
+    // cold start that only knows about the persisted APK doesn't render a
+    // bogus 0% bar.
+    val downloadProgress: Float? = if (dlState.running || dlState.doneFile != null) dlState.progress else null
+
+    fun refreshFlowState() {
+        canInstallNow = UpdateChecker.canInstall(context)
+        pendingIntent = PendingUpdateStore.getPendingIntent(context)
+        pendingRecord = PendingUpdateStore.getPending(context)
+    }
+
+    /** Verify + launch the installer for the staged APK. */
+    fun launchInstaller() {
+        if (!UpdateChecker.canInstall(context)) {
+            // Permission went away between the tap and the launch.
+            canInstallNow = false
+            return
+        }
+        UpdateChecker.installStagedApk(context) { ok ->
+            if (ok) {
+                UpdateDownloadManager.markInstallLaunched()
+                refreshFlowState()
+                update = null
+                uiError = null
+            } else {
+                uiError = context.getString(R.string.check_update_install_launch_failed)
+                refreshFlowState()
+            }
+        }
+    }
 
     // Housekeeping on every entry: drop stale/installed APKs from the private
     // updates dir so old installers don't pile up.
     LaunchedEffect(Unit) {
         UpdateDownloadManager.pruneUpdateDir(context)
+        refreshFlowState()
     }
 
-    // When the background downloader finishes, fire the installer (or ask for
-    // install permission). Auto-triggers even if the user left this screen
-    // mid-download and came back after completion.
-    LaunchedEffect(dlState.doneFile) {
-        val file = dlState.doneFile ?: return@LaunchedEffect
-        if (dlState.installLaunched) return@LaunchedEffect
-        if (UpdateChecker.canInstall(context)) {
-            val ok = UpdateChecker.installApk(context, file)
-            if (ok) {
-                UpdateDownloadManager.markInstallLaunched()
-                update = null
-            } else {
-                uiError = context.getString(R.string.check_update_install_launch_failed)
-            }
-        } else {
-            awaitingInstallPerm = true
+    // Cold-start rehydration. If the previous process died mid-flow there is no
+    // CheckResult in memory, so the update dialog has nothing to render and the
+    // section looks empty even though an APK is sitting on disk. Re-run the
+    // (cheap) release check once to rebuild it. A failure here is harmless —
+    // the persisted records still drive the install path.
+    LaunchedEffect(Unit) {
+        if (update == null && PendingUpdateStore.hasPendingWork(context)) {
+            val r = UpdateChecker.check(context)
+            if (r is UpdateChecker.CheckResult.UpdateAvailable) update = r
         }
     }
 
-    // Resume the install flow on every ON_RESUME. There are two cases:
+    // The user asked for a download but we had to send them to Settings for
+    // install permission first (see onDownload below). On return, if the
+    // permission is now granted, start exactly the download they asked for.
+    LaunchedEffect(canInstallNow, pendingIntent) {
+        val intent = pendingIntent ?: return@LaunchedEffect
+        if (!UpdateChecker.canInstall(context)) return@LaunchedEffect
+        PendingUpdateStore.clearPendingIntent(context)
+        pendingIntent = null
+        UpdateDownloadManager.start(context, intent.apkUrl, intent.targetVersionName, intent.apkSize)
+    }
+
+    // Download finished — fire the installer, but only when permission is
+    // already in hand. If it is not, we leave the staged APK alone and the
+    // permission prompt takes over; nothing is lost, because both the file and
+    // its record are on disk.
     //
-    //  1. Composable state survived — `update` and `awaitingInstallPerm` are
-    //     still set. We just need to flip awaitingInstallPerm off (so the
-    //     dialog stops showing the "permission required" message) and, if a
-    //     persisted APK is intact, fire the installer directly.
-    //
-    //  2. Activity recreate happened — every `remember{}` slot above is back
-    //     to its default. The only thing that knows we were mid-flow is
-    //     PendingUpdateStore. We rehydrate by calling resumablePendingFile()
-    //     and, when permission is granted, fire the installer. We do NOT
-    //     re-open the update dialog in this case because there's no
-    //     CheckResult to populate it; the install intent is enough.
-    //
-    // Either way: if permission is still denied we leave the pending record
-    // alone so the next resume can pick it up.
+    // Keyed on `installAlreadyLaunched` too, so a permission toggle later in
+    // the session cannot re-trigger an install the user already backed out of.
+    LaunchedEffect(dlState.doneFile, canInstallNow, installAlreadyLaunched) {
+        if (!shouldAutoInstall) return@LaunchedEffect
+        if (!UpdateChecker.canInstall(context)) return@LaunchedEffect
+        launchInstaller()
+    }
+
+    // Resume handling. Registered with DisposableEffect so the observer is
+    // REMOVED when this composable leaves composition — the previous
+    // LaunchedEffect version added one observer per entry and never removed
+    // any, so after N visits a single ON_RESUME fired the system installer N
+    // times (N stacked install prompts).
     val lifecycleOwner = LocalLifecycleOwner.current
-    LaunchedEffect(lifecycleOwner) {
+    DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
-            if (!UpdateChecker.canInstall(context)) return@LifecycleEventObserver
-            awaitingInstallPerm = false
-            val pendingFile = UpdateChecker.resumablePendingFile(context) ?: return@LifecycleEventObserver
-            val launched = UpdateChecker.installApk(context, pendingFile)
-            if (launched) {
-                // Dismiss any leftover dialog state; the system installer is
-                // now in charge. downloadProgress is derived from the
-                // downloader's StateFlow, so nothing to clear there.
-                update = null
-                uiError = null
-            }
+            refreshFlowState()
         }
         lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     SettingsSection(
@@ -276,45 +347,102 @@ fun CheckUpdateSection() {
             update = u,
             downloadProgress = downloadProgress,
             downloadError = downloadError,
-            needsInstallPerm = awaitingInstallPerm,
+            needsInstallPerm = needsInstallPerm,
+            installReady = stagedNotInstalled,
             probing = dlState.probing,
             activeNode = dlState.activeNode,
             downloadActive = dlState.running,
             onDownload = {
-                // Kick off the mirror-accelerated, resumable, background
-                // downloader. It owns a process-wide scope, so leaving the
-                // screen does not cancel it; re-entering re-collects state.
-                UpdateDownloadManager.start(context, u.apkUrl, u.versionName)
+                // Ask for install permission BEFORE the download, not after.
+                //
+                // This is the fix that removes the failure mode rather than
+                // patching its symptoms. Downloading first means the user ends
+                // up in system Settings with a ~98 MB APK already on disk and
+                // a process that MIUI is free to kill while they are away —
+                // which is exactly the trip that used to strand the flow. With
+                // the permission in hand up front, the download lands on a
+                // device that can actually install it and the installer fires
+                // straight off `dlState.doneFile` with no round trip.
+                if (UpdateChecker.canInstall(context)) {
+                    // Kick off the mirror-accelerated, resumable, background
+                    // downloader. It owns a process-wide scope, so leaving the
+                    // screen does not cancel it; re-entering re-collects state.
+                    UpdateDownloadManager.start(context, u.apkUrl, u.versionName, u.apkSizeBytes)
+                } else {
+                    // Persist the request so the trip to Settings — and a
+                    // process kill while there — cannot lose it. The
+                    // LaunchedEffect above starts the download on return.
+                    PendingUpdateStore.setPendingIntent(
+                        context,
+                        PendingUpdateStore.PendingIntent(
+                            targetVersionName = u.versionName,
+                            apkUrl = u.apkUrl,
+                            apkSize = u.apkSizeBytes,
+                            requestedAtMs = System.currentTimeMillis(),
+                        ),
+                    )
+                    pendingIntent = PendingUpdateStore.getPendingIntent(context)
+                    UpdateChecker.openInstallPermissionSettings(context)
+                }
             },
+            onInstall = { launchInstaller() },
             onOpenSettings = { UpdateChecker.openInstallPermissionSettings(context) },
             onDismiss = {
-                // Allow closing once nothing is actively downloading (the
-                // manager keeps the completed file + pending record, so a
-                // re-visit can resume install).
+                // Allow closing once nothing is actively downloading. The
+                // downloader keeps the completed file and PendingUpdateStore
+                // keeps the record, so a re-visit resumes the install — and
+                // even a process death cannot lose them.
                 if (!dlState.running) {
                     update = null
                     uiError = null
-                    awaitingInstallPerm = false
                 }
             },
         )
     }
 
-    // Download finished but install permission was never granted (e.g. the
-    // dialog was dismissed; we may also have no `update` after recreation).
-    // Offer a dedicated prompt so the pending APK isn't silently stuck.
-    if (update == null && awaitingInstallPerm && dlState.doneFile != null) {
+    // A staged APK that the main dialog is not covering. Two ways in: the user
+    // dismissed the dialog mid-flow, or the process died and came back with no
+    // CheckResult to render the main dialog from. Either way the downloaded
+    // APK must not be silently stranded — the old gate (`awaitingInstallPerm`)
+    // was a remember{} slot, so precisely the process-death case could never
+    // reach this prompt.
+    if (update == null && stagedNotInstalled && !stagedPromptDismissed) {
         AlertDialog(
-            onDismissRequest = { awaitingInstallPerm = false },
-            title = { Text(stringResource(R.string.check_update_install_perm_required)) },
-            text = { Text(stringResource(R.string.check_update_download_complete_install_hint)) },
+            onDismissRequest = { stagedPromptDismissed = true },
+            title = {
+                Text(
+                    stringResource(
+                        if (needsInstallPerm) R.string.check_update_install_perm_required
+                        else R.string.check_update_staged_title,
+                    ),
+                )
+            },
+            text = {
+                if (needsInstallPerm) {
+                    // No version placeholder on this one.
+                    Text(stringResource(R.string.check_update_download_complete_install_hint))
+                } else {
+                    Text(
+                        stringResource(
+                            R.string.check_update_staged_hint,
+                            pendingRecord?.targetVersionName.orEmpty(),
+                        ),
+                    )
+                }
+            },
             confirmButton = {
-                MinisButton(onClick = { UpdateChecker.openInstallPermissionSettings(context) }) {
-                    Text(stringResource(R.string.check_update_open_install_settings))
+                if (needsInstallPerm) {
+                    MinisButton(onClick = { UpdateChecker.openInstallPermissionSettings(context) }) {
+                        Text(stringResource(R.string.check_update_open_install_settings))
+                    }
+                } else {
+                    MinisButton(onClick = { launchInstaller() }) {
+                        Text(stringResource(R.string.check_update_install_now))
+                    }
                 }
             },
             dismissButton = {
-                MinisTextButton(onClick = { awaitingInstallPerm = false }) {
+                MinisTextButton(onClick = { stagedPromptDismissed = true }) {
                     Text(stringResource(R.string.cancel))
                 }
             },
@@ -328,10 +456,12 @@ private fun UpdateDialog(
     downloadProgress: Float?,
     downloadError: String?,
     needsInstallPerm: Boolean,
+    installReady: Boolean,
     probing: Boolean,
     activeNode: String?,
     downloadActive: Boolean,
     onDownload: () -> Unit,
+    onInstall: () -> Unit,
     onOpenSettings: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -421,16 +551,24 @@ private fun UpdateDialog(
             }
         },
         confirmButton = {
-            if (needsInstallPerm) {
-                MinisButton(onClick = onOpenSettings) {
+            when {
+                // Install permission is the blocker; nothing else can proceed.
+                needsInstallPerm -> MinisButton(onClick = onOpenSettings) {
                     Text(stringResource(R.string.check_update_open_install_settings))
                 }
-            } else {
-                MinisButton(
+                // Already downloaded. Offering "Download & Install" again here
+                // is what produced the dead, permanently-disabled button —
+                // `enabled` was computed from a `downloadProgress` that never
+                // returns to null once a download completes. The honest action
+                // for a staged APK is install.
+                installReady -> MinisButton(onClick = onInstall) {
+                    Text(stringResource(R.string.check_update_install_now))
+                }
+                else -> MinisButton(
                     onClick = onDownload,
-                    enabled = downloadProgress == null && !downloadActive,
+                    enabled = !downloadActive,
                 ) {
-                    if (downloadActive || (downloadProgress != null && downloadProgress < 1f)) {
+                    if (downloadActive) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),

@@ -9,7 +9,10 @@ import androidx.core.content.FileProvider
 import com.openminis.app.BuildConfig
 import com.openminis.app.ProjectRepo
 import com.openminis.app.logging.AppLogger
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -386,18 +389,29 @@ object UpdateChecker {
      * the dialog with no visible feedback.
      */
     /**
-     * If a pending APK from a previous download is still on disk and intact,
-     * returns the [File]. The caller is responsible for checking
-     * [canInstall] and firing [installApk]. Returns null when nothing pending
-     * or when the cached file failed integrity checks — in the latter case
-     * the pending record is cleared so the UI falls through to a fresh
-     * download.
+     * A pending APK that can still be handed to the system installer.
+     *
+     * [alreadyLaunched] is true when the installer intent was fired for this
+     * APK on an earlier resume. The caller uses it to decide between the ONE
+     * automatic launch (right after the user grants install permission) and an
+     * explicit user-initiated "install" affordance — without it, every resume
+     * would re-open the system installer.
      */
-    fun resumablePendingFile(context: Context): File? {
+    data class ResumableInstall(val file: File, val alreadyLaunched: Boolean)
+
+    /**
+     * If a pending APK from a previous download is still on disk and intact,
+     * returns it. The caller is responsible for checking [canInstall] and
+     * firing [installApk]. Returns null when nothing pending or when the
+     * cached file failed integrity checks — in the latter case the pending
+     * record is cleared so the UI falls through to a fresh download.
+     */
+    fun resumableInstall(context: Context): ResumableInstall? {
         val pending = PendingUpdateStore.getPending(context) ?: return null
         // Only resume if the persisted target is still newer than the running
-        // build — protects against the case where the user updated by some
-        // other means since the download.
+        // build. This is also what retires the record once the user actually
+        // installs: the running versionName catches up and the comparison
+        // flips to <= 0.
         // [T-android-updatechecker-localver-normalize] targetVersionName is a
         // normalized version (set from upgradeCandidate.versionName), so the
         // local side must be normalized too — same asymmetry fix as check().
@@ -416,7 +430,7 @@ object UpdateChecker {
             PendingUpdateStore.clearPending(context)
             return null
         }
-        return file
+        return ResumableInstall(file = file, alreadyLaunched = pending.installLaunchedAtMs > 0L)
     }
 
     fun installApk(context: Context, apk: File): Boolean {
@@ -430,15 +444,47 @@ object UpdateChecker {
             }
             context.startActivity(intent)
             AppLogger.info(TAG, "installApk launched apk=${apk.absolutePath} size=${apk.length()}")
-            // Once the installer is in flight we don't want a subsequent
-            // resume to re-fire the intent (would double-prompt). Clear the
-            // pending record now; if the user backs out, the next "Check for
-            // Updates" tap will re-discover and re-download.
-            PendingUpdateStore.clearPending(context)
+            // Record the launch but KEEP the pending record. Firing the
+            // installer intent is not installing: the user can back out, and
+            // MIUI builds can refuse the intent outright. The old code cleared
+            // the record here, which orphaned the already-downloaded APK and
+            // forced a full re-download on the next attempt. The record is now
+            // retired by [resumableInstall] once the running build catches up.
+            PendingUpdateStore.markInstallLaunched(context)
             true
         } catch (e: Exception) {
             AppLogger.error(TAG, "installApk failed: ${e.javaClass.simpleName}: ${e.message}")
             false
+        }
+    }
+
+    /**
+     * Install launches must outlive the screen that requested them. The user
+     * grants install permission in system Settings and comes back; by then the
+     * About screen may have been recreated (or the process restarted), so a
+     * composition-scoped coroutine would have been cancelled before it could
+     * fire the installer.
+     */
+    private val installScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Verify the staged APK and hand it to the system installer.
+     *
+     * The verification hashes the whole APK (~98 MB), so it runs on [installScope]
+     * rather than the caller's thread — hashing on the main thread would jank
+     * the very dialog the user is looking at. [onResult] reports whether the
+     * installer intent was launched.
+     */
+    fun installStagedApk(context: Context, onResult: (Boolean) -> Unit = {}) {
+        val appCtx = context.applicationContext
+        installScope.launch {
+            val resumable = resumableInstall(appCtx)
+            val ok = resumable != null && installApk(appCtx, resumable.file)
+            if (!ok) {
+                AppLogger.warning(TAG, "installStagedApk: nothing installable (missing or failed integrity)")
+            }
+            // Hop back to the main thread: the callback writes Compose state.
+            withContext(Dispatchers.Main) { onResult(ok) }
         }
     }
 

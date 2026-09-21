@@ -8,32 +8,46 @@ import java.io.File
 import java.security.MessageDigest
 
 /**
- * Persists a downloaded-but-not-yet-installed APK across Activity recreate /
- * process death.
+ * Persists the update flow across Activity recreate / process death.
  *
- * Why this exists: the original update flow held the downloaded [File]
- * reference in a Composable `remember{}` slot. When the user tapped "Open
- * Settings" to grant "install unknown apps" permission, the system pushed
- * Minis to the background; on return the Activity often recreated, the slot
- * was reset, and the UI silently asked the user to download the APK again.
+ * Why this exists: the original update flow held every piece of state in
+ * Composable `remember{}` slots. When the user tapped "Open Settings" to grant
+ * "install unknown apps" permission the system pushed Minis to the background;
+ * on return the Activity often recreated, the slots were reset, and the UI
+ * either silently asked the user to download the APK again or stranded them on
+ * a dialog whose only action button had gone dead.
  *
- * Storage: a single SharedPreferences key holding a small JSON blob. We
- * deliberately avoid DataStore here — this object is touched at most a
- * couple times per update flow, blocking access is fine, and SharedPreferences
- * is already initialised elsewhere.
+ * Two records live here:
  *
- * Freshness: a [PendingUpdate] older than [MAX_AGE_MS] (24 h) is discarded
- * on read so a stale APK can't auto-install on cold start a week later
- * after the GitHub release was re-rolled.
+ *  - **[PendingUpdate]** — an APK that has been fully downloaded but not yet
+ *    installed. Written by [UpdateDownloadManager] on completion.
+ *  - **[PendingIntent]** — a download the user explicitly asked for that we
+ *    could not start because install permission was still missing. Written
+ *    when the UI hands off to system Settings; consumed on return.
  *
- * Integrity: we compute and store sha256 if [setPending] is given the
- * file bytes; if absent, [verify] falls back to (size == expectedSize).
+ * Both are needed. Without [PendingUpdate] a process kill between "download
+ * finished" and "user grants permission" loses the 98 MB APK. Without
+ * [PendingIntent] a process kill *while the user is in Settings* loses the
+ * fact that they ever asked for the download, so nothing resumes on return.
+ *
+ * Storage: SharedPreferences keys holding small JSON blobs. We deliberately
+ * avoid DataStore here — this object is touched at most a couple times per
+ * update flow, blocking access is fine, and SharedPreferences is already
+ * initialised elsewhere.
+ *
+ * Freshness: records older than [MAX_AGE_MS] (24 h) are discarded on read so
+ * a stale APK can't auto-install on cold start a week later after the GitHub
+ * release was re-rolled.
+ *
+ * Integrity: we compute and store sha256 if [setPending] is given the file
+ * bytes; if absent, [verify] falls back to (size == expectedSize).
  */
 object PendingUpdateStore {
 
     private const val TAG = "PendingUpdateStore"
     private const val PREFS = "pending_update"
     private const val KEY = "pending"
+    private const val KEY_INTENT = "pending_intent"
     private const val MAX_AGE_MS = 24L * 60L * 60L * 1000L
 
     data class PendingUpdate(
@@ -42,6 +56,25 @@ object PendingUpdateStore {
         val apkSize: Long,
         val sha256: String?,
         val downloadedAtMs: Long,
+        /**
+         * When the system installer intent was last fired for this APK, or 0
+         * when it has never been launched. Used to decide whether a resume
+         * should auto-fire the installer again (the one automatic launch,
+         * right after the user grants permission) or offer an explicit
+         * "install" affordance instead of re-prompting on every resume.
+         */
+        val installLaunchedAtMs: Long = 0L,
+    )
+
+    /**
+     * A download the user asked for that is waiting on install permission.
+     * Written before handing off to system Settings, consumed on return.
+     */
+    data class PendingIntent(
+        val targetVersionName: String,
+        val apkUrl: String,
+        val apkSize: Long,
+        val requestedAtMs: Long,
     )
 
     private var prefs: SharedPreferences? = null
@@ -65,6 +98,7 @@ object PendingUpdateStore {
             put("apkSize", pending.apkSize)
             if (pending.sha256 != null) put("sha256", pending.sha256) else put("sha256", JSONObject.NULL)
             put("downloadedAtMs", pending.downloadedAtMs)
+            put("installLaunchedAtMs", pending.installLaunchedAtMs)
         }
         requirePrefs(context).edit().putString(KEY, json.toString()).apply()
         AppLogger.info(
@@ -72,6 +106,70 @@ object PendingUpdateStore {
             "setPending version=${pending.targetVersionName} size=${pending.apkSize} sha256=${pending.sha256 != null}",
         )
     }
+
+    /**
+     * Record that the system installer intent was fired for the pending APK.
+     *
+     * Deliberately does NOT drop the record. "The installer was launched" is
+     * not "the APK was installed": the user can back out of the system
+     * installer, and MIUI/Xiaomi builds can refuse the intent outright. When
+     * that happened the old code had already cleared the record, so the
+     * downloaded APK became an orphan that nothing referenced — the next
+     * "Check for Updates" had to re-fetch all 98 MB. The record now survives
+     * until [UpdateChecker.resumableInstall] observes the running build
+     * has caught up with [PendingUpdate.targetVersionName].
+     */
+    fun markInstallLaunched(context: Context) {
+        val p = requirePrefs(context)
+        val raw = p.getString(KEY, null) ?: return
+        val obj = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        obj.put("installLaunchedAtMs", System.currentTimeMillis())
+        p.edit().putString(KEY, obj.toString()).apply()
+        AppLogger.info(TAG, "markInstallLaunched version=${obj.optString("targetVersionName")}")
+    }
+
+    fun setPendingIntent(context: Context, intent: PendingIntent) {
+        val json = JSONObject().apply {
+            put("targetVersionName", intent.targetVersionName)
+            put("apkUrl", intent.apkUrl)
+            put("apkSize", intent.apkSize)
+            put("requestedAtMs", intent.requestedAtMs)
+        }
+        requirePrefs(context).edit().putString(KEY_INTENT, json.toString()).apply()
+        AppLogger.info(TAG, "setPendingIntent version=${intent.targetVersionName} size=${intent.apkSize}")
+    }
+
+    /** Returns the outstanding download request, or null when none / expired. */
+    fun getPendingIntent(context: Context): PendingIntent? {
+        val p = requirePrefs(context)
+        val raw = p.getString(KEY_INTENT, null) ?: return null
+        val obj = runCatching { JSONObject(raw) }.getOrNull()
+        if (obj == null) {
+            p.edit().remove(KEY_INTENT).apply()
+            return null
+        }
+        val intent = PendingIntent(
+            targetVersionName = obj.optString("targetVersionName"),
+            apkUrl = obj.optString("apkUrl"),
+            apkSize = obj.optLong("apkSize"),
+            requestedAtMs = obj.optLong("requestedAtMs"),
+        )
+        if (intent.apkUrl.isBlank() || System.currentTimeMillis() - intent.requestedAtMs > MAX_AGE_MS) {
+            AppLogger.info(TAG, "pending intent expired/blank; clearing")
+            clearPendingIntent(context)
+            return null
+        }
+        return intent
+    }
+
+    fun clearPendingIntent(context: Context) {
+        requirePrefs(context).edit().remove(KEY_INTENT).apply()
+        AppLogger.info(TAG, "clearPendingIntent")
+    }
+
+    /** True when either half of the flow has something persisted to resume. */
+    fun hasPendingWork(context: Context): Boolean =
+        getPending(context) != null || getPendingIntent(context) != null
 
     /**
      * Returns the persisted pending update, or null when:
@@ -95,6 +193,7 @@ object PendingUpdateStore {
             apkSize = obj.optLong("apkSize"),
             sha256 = obj.optString("sha256", "").takeIf { it.isNotEmpty() && it != "null" },
             downloadedAtMs = obj.optLong("downloadedAtMs"),
+            installLaunchedAtMs = obj.optLong("installLaunchedAtMs"),
         )
         val age = System.currentTimeMillis() - pending.downloadedAtMs
         if (age > MAX_AGE_MS) {

@@ -63,6 +63,9 @@
     <string name="check_update_install_launch_failed">Failed to launch installer. Check \"install unknown apps\" permission or open the downloaded APK manually.</string>
     <string name="check_update_install_hint">Tip: If installation gives no feedback, the signature may not match — uninstall the previous version first, then download again.</string>
     <string name="check_update_open_install_settings">Open Settings</string>
+    <string name="check_update_install_now">Install Now</string>
+    <string name="check_update_staged_title">Update Downloaded</string>
+    <string name="check_update_staged_hint">%1$s is downloaded and ready. Tap install to finish — the file stays on disk until it is installed.</string>
     <string name="check_update_self_build">Build APK in sandbox (experimental)</string>
     <string name="check_update_self_build_sub">Needs multi-GB disk, NDK/SDK, and user confirmation. Debug-signed APKs cannot replace a differently signed install.</string>
     <string name="check_update_self_build_confirm_title">Run in-device self-build?</string>

@@ -59,6 +59,9 @@
     <string name="check_update_install_launch_failed">启动安装程序失败。请检查\"安装未知应用\"权限或手动打开下载的 APK。</string>
     <string name="check_update_install_hint">提示：如果安装时无任何反馈，可能是签名不匹配，请先卸载旧版本再重新点击下载。</string>
     <string name="check_update_open_install_settings">打开设置</string>
+    <string name="check_update_install_now">立即安装</string>
+    <string name="check_update_staged_title">更新已下载</string>
+    <string name="check_update_staged_hint">%1$s 已下载完成，点「立即安装」即可完成更新。安装完成前安装包会一直保留。</string>
     <string name="check_update_self_build">沙箱内自编译 APK（实验性）</string>
     <string name="check_update_self_build_sub">需要数 GB 磁盘、NDK/SDK，并需确认。debug 签名无法覆盖不同证书的安装。</string>
     <string name="check_update_self_build_confirm_title">在本机沙箱编译？</string>

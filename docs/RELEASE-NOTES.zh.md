@@ -1,3 +1,21 @@
+# OpenMinis-Linux 1.36.12-linux
+
+- versionCode **65**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.11-linux：
+
+- **检查更新不再卡死**：没给「安装未知应用」权限时先把请求写进磁盘再跳设置；从系统设置回来或进程被杀后继续原流程，不把确认按钮灰掉。
+- **不再重复下载**：唤起安装器不再清掉 pending；磁盘上已有完整且大小匹配的 APK 直接安装。
+- **生命周期**：设置页进出多次后，一次恢复不会再弹多个安装界面。
+
+---
+
 # OpenMinis-Linux 1.36.11-linux
 
 - versionCode **64**

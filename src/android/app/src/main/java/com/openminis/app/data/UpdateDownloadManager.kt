@@ -98,10 +98,25 @@ object UpdateDownloadManager {
 
     /**
      * Start (or restart) a download of [apkUrl] for [versionName]. If one is
-     * already running for the same version this is a no-op; the caller simply
-     * keeps collecting [state].
+     * already running this is a no-op; the caller simply keeps collecting
+     * [state].
+     *
+     * If a COMPLETE APK for this exact version is already staged on disk it is
+     * reused instead of re-fetched. This matters because a finished download
+     * leaves no `.part` behind (it is renamed to the final name), so
+     * [downloadWithResume] would otherwise restart from byte 0 — that is how
+     * "cancel the system installer, tap download again" turned into a second
+     * 98 MB transfer for a file we already had.
+     *
+     * [expectedSizeBytes] is the release asset size when known; a staged file
+     * whose length disagrees is treated as a truncated leftover and refetched.
      */
-    fun start(context: Context, apkUrl: String, versionName: String) {
+    fun start(
+        context: Context,
+        apkUrl: String,
+        versionName: String,
+        expectedSizeBytes: Long = -1L,
+    ) {
         if (job?.isActive == true) return
         val appCtx = context.applicationContext
         val outDir = File(appCtx.filesDir, "updates").apply { mkdirs() }
@@ -112,23 +127,18 @@ object UpdateDownloadManager {
         _state.value = DownloadState(running = true, probing = true, progress = 0f)
         job = scope.launch {
             try {
+                if (reusableCompleteApk(finalFile, expectedSizeBytes)) {
+                    AppLogger.info(
+                        TAG,
+                        "reusing complete APK ${finalFile.name} size=${finalFile.length()} — skipping download",
+                    )
+                    publishDownloaded(appCtx, finalFile, versionName)
+                    return@launch
+                }
                 val node = pickFastestNode(apkUrl)
                 _state.value = _state.value.copy(probing = false, activeNode = node)
                 downloadWithResume(node, partFile, finalFile)
-                // Success — verify non-trivial size, rename done by downloadWithResume.
-                val sha = runCatching { PendingUpdateStore.sha256(finalFile) }.getOrNull()
-                PendingUpdateStore.setPending(
-                    appCtx,
-                    PendingUpdateStore.PendingUpdate(
-                        targetVersionName = versionName,
-                        apkPath = finalFile.absolutePath,
-                        apkSize = finalFile.length(),
-                        sha256 = sha,
-                        downloadedAtMs = System.currentTimeMillis(),
-                    ),
-                )
-                _state.value = _state.value.copy(running = false, progress = 1f, doneFile = finalFile)
-                AppLogger.info(TAG, "download complete ${finalFile.absolutePath} size=${finalFile.length()}")
+                publishDownloaded(appCtx, finalFile, versionName)
             } catch (e: Exception) {
                 AppLogger.error(TAG, "download failed: ${e.javaClass.simpleName}: ${e.message}")
                 _state.value = _state.value.copy(
@@ -138,6 +148,43 @@ object UpdateDownloadManager {
                 )
             }
         }
+    }
+
+    /**
+     * True when [f] is a complete staged APK for the version being requested.
+     * [expectedSize] <= 0 means the release asset size was unknown, in which
+     * case any non-empty file is accepted.
+     */
+    private fun reusableCompleteApk(f: File, expectedSize: Long): Boolean {
+        if (!f.exists() || f.length() <= 0L) return false
+        if (expectedSize > 0L && f.length() != expectedSize) {
+            AppLogger.warning(
+                TAG,
+                "staged APK ${f.name} len=${f.length()} != expected=$expectedSize; refetching",
+            )
+            return false
+        }
+        return true
+    }
+
+    /** Persist the pending record and publish the completed state. */
+    private fun publishDownloaded(appCtx: Context, file: File, versionName: String) {
+        val sha = runCatching { PendingUpdateStore.sha256(file) }.getOrNull()
+        PendingUpdateStore.setPending(
+            appCtx,
+            PendingUpdateStore.PendingUpdate(
+                targetVersionName = versionName,
+                apkPath = file.absolutePath,
+                apkSize = file.length(),
+                sha256 = sha,
+                downloadedAtMs = System.currentTimeMillis(),
+            ),
+        )
+        // The download request is satisfied — drop the "waiting on permission"
+        // intent so a later resume doesn't try to start it a second time.
+        PendingUpdateStore.clearPendingIntent(appCtx)
+        _state.value = _state.value.copy(running = false, probing = false, progress = 1f, doneFile = file)
+        AppLogger.info(TAG, "download complete ${file.absolutePath} size=${file.length()}")
     }
 
     /** Cancel the in-flight download (keeps the .part file for later resume). */
@@ -280,8 +327,16 @@ object UpdateDownloadManager {
             runCatching {
                 val dir = File(context.filesDir, "updates")
                 if (!dir.exists()) return@runCatching
-                val current = BuildConfig.VERSION_NAME
+                // Normalize the same way UpdateChecker.resumableInstall does —
+                // comparing a normalized filename version against a raw
+                // "1.36.9-linux" local build made the two code paths disagree
+                // about whether a staged APK was still needed.
+                val current = UpdateVersionLogic.normalizeTag(BuildConfig.VERSION_NAME)
                 val running = job?.isActive == true
+                // Never delete the APK the pending record points at, whatever
+                // the version arithmetic says: it is the one the user already
+                // downloaded and is about to install.
+                val protectedPath = PendingUpdateStore.getPending(context)?.apkPath
                 dir.listFiles()?.forEach { f ->
                     val name = f.name
                     when {
@@ -293,8 +348,13 @@ object UpdateDownloadManager {
                                 f.delete()
                             }
                         }
+                        f.absolutePath == protectedPath -> {
+                            AppLogger.info(TAG, "keep pending apk ${f.name}")
+                        }
                         else -> {
-                            val v = name.removePrefix("minis-").removeSuffix(".apk")
+                            val v = UpdateVersionLogic.normalizeTag(
+                                name.removePrefix("minis-").removeSuffix(".apk"),
+                            )
                             val cmp = UpdateVersionLogic.compareVersions(v, current)
                             if (cmp <= 0) {
                                 // Older than, or equal to (already installed) running build.
