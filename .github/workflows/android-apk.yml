@@ -140,7 +140,11 @@ jobs:
         run: |
           sed -i 's|org.gradle.jvmargs=.*|org.gradle.jvmargs=-Xmx6g -Dfile.encoding=UTF-8|' gradle.properties
           chmod +x gradlew
-          ./gradlew :app:testDebugUnitTest :app:assembleRelease --no-daemon --stacktrace
+          # Sequential: kspDebug + kspRelease both export the same Room
+          # schema JSON; running them in one parallel Gradle invocation
+          # can leave that file empty ("Empty schema file").
+          ./gradlew :app:testDebugUnitTest --no-daemon --no-parallel --stacktrace
+          ./gradlew :app:assembleRelease --no-daemon --no-parallel --stacktrace
 
       - name: Stage APK
         run: |
