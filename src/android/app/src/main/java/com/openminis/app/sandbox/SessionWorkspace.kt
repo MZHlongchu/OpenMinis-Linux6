@@ -101,9 +101,10 @@ object SessionWorkspace {
     fun hostDir(filesDir: File, sessionId: String, subdir: String): File {
         val folderId = folderIdFor(sessionId)
         if (folderId != null && subdir in SHARED_SUBDIRS) {
-            val shared = File(projectBase(filesDir, folderId), subdir)
+            val projectRoot = projectBase(filesDir, folderId)
+            val shared = File(projectRoot, subdir)
             if (shared.isDirectory()) return shared
-            if (File(projectBase(filesDir, folderId)).isDirectory()) {
+            if (projectRoot.isDirectory()) {
                 AppLogger.warning(
                     "SessionWorkspace",
                     "project dir missing subdir '$subdir' for folder=$folderId " +

@@ -43,9 +43,10 @@ object LegacyWorkspaceMigrator {
 
     fun seedProjectFromGlobal(filesDir: File, folderId: String) {
         SessionWorkspace.ensureProjectDirs(filesDir, folderId)
+        val projectRoot = SessionWorkspace.projectBase(filesDir, folderId)
         for (sub in SessionWorkspace.SHARED_SUBDIRS) {
             val src = File(filesDir, "${SessionWorkspace.GLOBAL_DIR}/$sub")
-            val dst = File(SessionWorkspace.projectBase(filesDir, folderId), sub)
+            val dst = File(projectRoot, sub)
             if (!src.isDirectory()) continue
             val destEmpty = dst.listFiles().isNullOrEmpty()
             if (!destEmpty) continue

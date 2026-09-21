@@ -70,6 +70,7 @@ object WorkspaceMover {
         val projectRoot = SessionWorkspace.projectBase(filesDir, folderId)
         SessionWorkspace.ensureProjectDirs(filesDir, folderId)
 
+
         val moved = mutableListOf<String>()
         val skipped = mutableListOf<String>()
         var bytes = 0L
