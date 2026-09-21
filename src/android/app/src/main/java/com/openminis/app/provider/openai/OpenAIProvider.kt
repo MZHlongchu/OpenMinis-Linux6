@@ -1578,7 +1578,7 @@ class OpenAIProvider private constructor(
         endpoint: String?,
         method: String,
         headers: Map<String, String>,
-        bodyObject: JSONObject?,
+        body: HttpBody?,
     ): RawPassthroughResult = withContext(Dispatchers.IO) {
         val url: String = when {
             endpoint != null && endpoint.startsWith("/") ->
@@ -1588,31 +1588,48 @@ class OpenAIProvider private constructor(
             else -> endpointURL("/chat/completions")
         }
 
+        if (body != null) RequestBodyGate.check(body, "rawPassthrough")
+
         val verb = method.uppercase()
         val builder = Request.Builder().url(url)
-        if (verb != "GET" && bodyObject != null) {
-            val jsonMediaType = "application/json".toMediaType()
-            val bodyBytes = bodyObject.toString().toByteArray(Charsets.UTF_8)
-            val requestBody = object : okhttp3.RequestBody() {
-                override fun contentType() = jsonMediaType
-                override fun contentLength() = bodyBytes.size.toLong()
-                override fun writeTo(sink: okio.BufferedSink) { sink.write(bodyBytes) }
-            }
-            builder.method(verb, requestBody)
+        // GET never carries a body. POST/PUT/PATCH/DELETE with Empty/null still
+        // need a RequestBody — OkHttp rejects method(POST, null).
+        val requestBody = if (verb == "GET") {
+            null
         } else {
-            builder.method(verb, null)
+            body?.toOkHttpRequestBody()
+                ?: ByteArray(0).toRequestBody(HttpBody.JSON_MEDIA_TYPE)
         }
+        builder.method(verb, requestBody)
         val token = getToken()
         builder.applyKeyAuth(token)
-        builder.header("Content-Type", "application/json")
-        // ctor extraHeaders, then user headers LAST — replace semantics.
-        for ((k, v) in extraHeaders) builder.header(k, v)
-        for ((k, v) in headers) builder.header(k, v)
+        // Content-Type is DERIVED. Multipart returns null so OkHttp owns the
+        // boundary; a user Content-Type header must not clobber that.
+        val multipart = body is HttpBody.Multipart
+        if (!multipart) {
+            val derived = body?.contentType() ?: HttpBody.JSON_MEDIA_TYPE
+            builder.header("Content-Type", derived.toString())
+        }
+        // ctor extraHeaders, then user headers LAST — replace semantics,
+        // except Content-Type on multipart (boundary belongs to OkHttp).
+        for ((k, v) in extraHeaders) {
+            if (multipart && k.equals("Content-Type", ignoreCase = true)) continue
+            builder.header(k, v)
+        }
+        for ((k, v) in headers) {
+            if (multipart && k.equals("Content-Type", ignoreCase = true)) continue
+            builder.header(k, v)
+        }
 
+        val bodyKeys = when (body) {
+            is HttpBody.Json -> body.obj.keys().asSequence().sorted().joinToString(",")
+            is HttpBody.Multipart -> body.parts.joinToString(",") { it.name }
+            else -> ""
+        }
         com.openminis.app.logging.AppLogger.info(
             "OpenAIProvider",
             "[ModelUseRoute] route=raw-passthrough method=$verb url=$url " +
-                "bodyKeys=[${bodyObject?.keys()?.asSequence()?.sorted()?.joinToString(",") ?: ""}] " +
+                "bodyKeys=[$bodyKeys] " +
                 "headerOverrides=[${headers.keys.sorted().joinToString(",")}]",
         )
 

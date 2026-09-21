@@ -504,6 +504,17 @@ class MinisApp : Application(), ImageLoaderFactory {
         com.openminis.app.data.repository.MemoryRepository.loadGlobalDefaultFromAssets(this)
         com.openminis.app.data.repository.MemoryRepository.ensureGlobalExists(this)
 
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            runCatching { chatRepository.warmupWorkspaceOwners() }.onFailure {
+                android.util.Log.e("MinisApp", "workspace owner warmup failed", it)
+            }
+            runCatching {
+                com.openminis.app.sandbox.LegacyWorkspaceMigrator.run(this@MinisApp, chatRepository)
+            }.onFailure {
+                android.util.Log.e("MinisApp", "legacy workspace migrate failed", it)
+            }
+        }
+
         // [skill-startup-refresh] Every launch: re-scan minis-global/skills/,
         // register anything new, and default-enable the whole library except
         // ids the user explicitly switched off. Runs on IO so a large library

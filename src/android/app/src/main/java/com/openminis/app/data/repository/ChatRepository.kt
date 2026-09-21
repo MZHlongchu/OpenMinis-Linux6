@@ -154,7 +154,29 @@ class ChatRepository(
             updatedAt = now,
         )
         dao.insertFolder(folder)
+        filesDir?.let { SessionWorkspace.ensureProjectDirs(it, folder.id) }
         return folder
+    }
+
+    suspend fun ensureDefaultWorkspace(name: String): FolderEntity {
+        dao.getFolder(FolderEntity.DEFAULT_ID)?.let { return it }
+        val now = System.currentTimeMillis()
+        val folder = FolderEntity(
+            id = FolderEntity.DEFAULT_ID,
+            name = name.trim().ifEmpty { "Workspace" },
+            origin = FolderEntity.ORIGIN_MANUAL,
+            createdAt = now,
+            updatedAt = now,
+        )
+        dao.insertFolder(folder)
+        filesDir?.let { SessionWorkspace.ensureProjectDirs(it, folder.id) }
+        return folder
+    }
+
+    suspend fun warmupWorkspaceOwners() {
+        for (s in dao.listSessions()) {
+            SessionWorkspace.rememberFolder(s.id, s.folderId)
+        }
     }
 
     /**
@@ -201,6 +223,7 @@ class ChatRepository(
         val memberIds = dao.sessionIdsInFolder(id)
         dao.clearFolderForSessions(id)
         dao.deleteFolder(id)
+        for (sid in memberIds) SessionWorkspace.rememberFolder(sid, null)
         return memberIds
     }
 
@@ -214,7 +237,13 @@ class ChatRepository(
      */
     suspend fun setFolderForSessions(folderId: String?, sessionIds: List<String>) {
         if (sessionIds.isEmpty()) return
-        for (sid in sessionIds) dao.setSessionFolder(sid, folderId)
+        for (sid in sessionIds) {
+            dao.setSessionFolder(sid, folderId)
+            SessionWorkspace.rememberFolder(sid, folderId)
+        }
+        if (folderId != null) {
+            filesDir?.let { SessionWorkspace.ensureProjectDirs(it, folderId) }
+        }
     }
 
     /**
@@ -224,8 +253,14 @@ class ChatRepository(
      *
      * @return true if this call actually filed the session.
      */
-    suspend fun setFolderIfUnfiled(folderId: String, sessionId: String): Boolean =
-        dao.setSessionFolderIfUnfiled(sessionId, folderId) > 0
+    suspend fun setFolderIfUnfiled(folderId: String, sessionId: String): Boolean {
+        val n = dao.setSessionFolderIfUnfiled(sessionId, folderId)
+        if (n > 0) {
+            SessionWorkspace.rememberFolder(sessionId, folderId)
+            filesDir?.let { SessionWorkspace.ensureProjectDirs(it, folderId) }
+        }
+        return n > 0
+    }
 
     /**
      * Name → group, case- and whitespace-insensitive. Duplicate-tolerant by

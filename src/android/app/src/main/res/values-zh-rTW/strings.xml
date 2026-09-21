@@ -469,7 +469,9 @@
     <string name="group_name_hint">分組名稱</string>
     <string name="group_desc_hint">描述（可選，用於指導自動分組）</string>
     <string name="group_create">建立</string>
-    <string name="group_section_header">分組</string>
+    <string name="group_section_header">工作區</string>
+    <string name="group_default_workspace">工作區</string>
+    <string name="sessionlist_new_workspace_session">新建工作區會話</string>
     <string name="group_none">暫不分組</string>
     <string name="group_none_subtitle">將會話移出目前分組</string>
     <string name="group_n_chats">%1$d 個會話</string>
@@ -1810,6 +1812,4 @@
     <string name="settings_evolution_state_on">目前開啟</string>
     <string name="settings_evolution_state_off">目前關閉</string>
     <string name="gate_approval_allow_all">本工作階段全部允許</string>
-    <string name="settings_persona_extension">人格擴充</string>
-    <string name="settings_persona_extension_subtitle">會話提示詞範本與工作區規則</string>
 </resources>

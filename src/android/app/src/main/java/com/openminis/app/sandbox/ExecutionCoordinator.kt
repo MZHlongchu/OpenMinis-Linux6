@@ -201,11 +201,13 @@ object ExecutionCoordinator {
         // the "file disappears after first download" bug)
         val prevAttachments = PRootKernel.bindMounts["/var/minis/attachments"]
 
-        // Session-specific directories. Sub-agent lanes share the parent
+        // Session / project directories. Sub-agent lanes share the parent
         // session tree so files written by a teammate stay visible here.
-        val sessionBase = File(filesDir, "minis-sessions/${ownerSessionId(sessionId)}")
+        // Filed sessions mount attachments/workspace/offloads/browser from the
+        // project folder; memory stays per-session.
+        val owner = ownerSessionId(sessionId)
         SessionWorkspace.SESSION_SUBDIRS.forEach { subdir ->
-            val hostDir = File(sessionBase, subdir).also { it.mkdirs() }
+            val hostDir = SessionWorkspace.hostDir(filesDir, owner, subdir).also { it.mkdirs() }
             val linuxPath = "/var/minis/$subdir"
             mounts[linuxPath] = hostDir.absolutePath
             PRootKernel.addBindMount(linuxPath, hostDir.absolutePath)

@@ -1,3 +1,25 @@
+# OpenMinis-Linux 1.36.14-linux
+
+- versionCode **67**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.13-linux：
+
+- **项目工作区**：一个文件夹里可以有很多会话，共享 `workspace` / 附件 / 浏览器缓存；日记仍按会话隔离。删会话不清项目文件。
+- **主页 FAB**：右下角改为「新建工作区会话」（当前展开的工作区，否则默认「工作区」）；长按仍选模型组。
+- **升级**：1.36.13 之前、没有隔离文件的旧会话归入默认工作区；已隔离的 1.36.13 会话不强制合并。
+- **日记**：`minis-global/memory/YYYY-MM-DD.md` 拷进各会话 memory（不覆盖已有文件；SOUL / GLOBAL / LEARNED 仍全局）。
+- **AI 过程折叠**：折叠条只显示「AI过程 / 思考* / 工具*」，不再铺工具芯片；展开后列出思考和工具行。
+- **HttpBody**：passthrough 支持 JSON / multipart / 原始字节；multipart 的 boundary 由 OkHttp 管；密钥不进沙箱。`minis-model-use` 支持 `body_kind=multipart`。
+- **清理**：去掉无入口的 prompt-templates 字符串。
+
+---
+
 # OpenMinis-Linux 1.36.13-linux
 
 - versionCode **66**

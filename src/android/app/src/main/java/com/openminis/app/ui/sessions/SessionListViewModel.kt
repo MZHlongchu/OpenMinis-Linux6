@@ -9,9 +9,11 @@ import com.openminis.app.data.db.ChatSessionEntity
 import com.openminis.app.data.db.FolderEntity
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.R
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.sandbox.SessionWorkspace
 import com.openminis.app.provider.ProviderFactory
 import com.openminis.app.ui.chat.ChatViewModelStore
 import kotlinx.coroutines.Dispatchers
@@ -720,6 +722,7 @@ class SessionListViewModel(
                 com.openminis.app.service.SessionBadgeStore.clear(id)
             }
             chatRepository.dissolveFolder(folderId)
+            SessionWorkspace.deleteProject(context.filesDir, folderId)
             // Just drop the dead id — do NOT use expandOnly here. The folder no
             // longer exists, so there is nothing to expand; re-deriving the set
             // from the surviving folders would leave one of them open purely
@@ -1125,6 +1128,23 @@ class SessionListViewModel(
      *   (the folder_id row can only be written once the session exists —
      *   iOS defers the same way via pendingFolderDraft).
      */
+    suspend fun createNewWorkspaceSession(groupId: String? = null): String? {
+        val folderId = resolveWorkspaceFolderId()
+        expandOnly(folderId)
+        return createNewSession(groupId = groupId, folderId = folderId)
+    }
+
+    private suspend fun resolveWorkspaceFolderId(): String {
+        val all = folders.value
+        val collapsed = collapsedFolderIds.value
+        all.firstOrNull { it.id !in collapsed }?.id?.let { return it }
+        all.firstOrNull { it.id == FolderEntity.DEFAULT_ID }?.id?.let { return it }
+        all.firstOrNull()?.id?.let { return it }
+        return chatRepository.ensureDefaultWorkspace(
+            context.getString(R.string.group_default_workspace),
+        ).id
+    }
+
     fun createNewSession(groupId: String? = null, folderId: String? = null): String? {
         if (providerRepository.allVisibleEntries().isEmpty()) return null
         var id = "__new__${java.util.UUID.randomUUID()}"

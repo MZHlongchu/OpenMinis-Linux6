@@ -605,7 +605,10 @@ internal fun shouldShowProcessToolRow(
 ): Boolean {
     if (isAlwaysVisibleProcessTool(block)) return true
     if (showProcessSummary) {
-        if (processExpanded) return shouldShowToolUseRow(block, showCompletedToolCards)
+        // Expanded process lists thinking + tools in-thread. The fold bar no
+        // longer carries tool chips, so hiding completed tools here would
+        // make them unreachable.
+        if (processExpanded) return true
         // Keep the in-progress tool visible; completed ones live in the summary.
         return isInFlightProcessTool(block)
     }

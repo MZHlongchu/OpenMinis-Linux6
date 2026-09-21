@@ -4235,8 +4235,6 @@ fun ChatScreen(
                                 toolCount = item.toolCount,
                                 expanded = item.expanded,
                                 hasFailure = item.hasFailure,
-                                processTools = item.processTools,
-                                onOpenTool = { viewModel.openToolDetail(it) },
                                 onToggle = {
                                     val id = originalMessageId(item.messageId)
                                     expandedProcessIds = if (id in expandedProcessIds) {

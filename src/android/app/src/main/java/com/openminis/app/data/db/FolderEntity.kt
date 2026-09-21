@@ -66,5 +66,8 @@ data class FolderEntity(
 
         /** iOS caps the description at 100 chars; keep the two in step. */
         const val DESC_MAX_CHARS = 100
+
+        /** Stable id for the default shared project created on upgrade / FAB. */
+        const val DEFAULT_ID = "default-workspace"
     }
 }

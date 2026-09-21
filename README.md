@@ -6,15 +6,16 @@
 
 **端侧私人 AI Agent。** 把 Claude、GPT、Gemini 等模型接到手机里的一台真 Linux：Ubuntu 24.04 沙箱、浏览器自动化、技能与记忆、多智能体调度。
 
-本仓库是 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 **Linux 沙箱 Android 分支**。启动器名称 **Minis Ultra**，包名 `com.openminis.linux`，可与官方 OpenMinis **并排安装**。当前 **1.36.13-linux**（versionCode 66）。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。
+本仓库是 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 **Linux 沙箱 Android 分支**。启动器名称 **Minis Ultra**，包名 `com.openminis.linux`，可与官方 OpenMinis **并排安装**。当前 **1.36.14-linux**（versionCode 67）。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。
 
 ## 仓库介绍
 
 - **沙箱即电脑**：客户机 Ubuntu 24.04（PRoot），可装包、跑脚本；主机 `su`、工具链 `minis-dev-setup`、POSIX `/sdcard` 挂载见 [LINUX.md](LINUX.md)。
-- **一会话一工作区（1.36.13）**：每个会话独立 `workspace` / `memory` / 附件；技能、共享目录、MCP 装在工作区外，所有会话都能调用。删会话会删掉该工作区全部文件（含记忆）。
+- **项目工作区（1.36.14）**：一个项目文件夹里可以有多个会话，共享 `workspace` / 附件 / 浏览器缓存；日记仍按会话隔离。未分组会话保持 1.36.13 的一会话一工作区。技能 / 共享 / MCP 仍全局。
 - **模型参数自动补全（1.36.1）**：先查 models.dev（去厂商前缀、统一大小写和 `./_` → `-`，再按精确 ID → 归一化 ID → 全库多数票），没有的洞用 DataLearner 补，中转站脏名（如 `GPT-6免费` / `免费GPT-6 Astra`）按命中最多的字匹配。目录和家族都认不出的 id 默认 **256k 上下文 / 128k 输出 / 开启思考（最高 max）/ 文本模态**。
 - **多智能体**：主会话当协调者，设置 → 多智能体（`minis://settings/multi-agent`）。
 - **签名与国内编译**：[docs/SIGNING.md](docs/SIGNING.md)、[docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)（切勿覆盖 aarch64 aapt2）。
+- **1.36.14**：项目工作区、折叠条只显示过程摘要、旧日记迁入会话、multipart 直通。
 - **1.36.13**：会话工作区隔离；内置人格重写并在本版安装时覆盖一次 SOUL.md；移除人格扩展。
 - **1.36.11**：长会话人格不被历史盖过；AI 过程折叠改为完成后立刻收起且仍能点开工具详情；子代理运行中可看日志；人格页一级返回自动保存身份。
 - **1.36.10**：人格提示词显示文件名、点进二级页编辑；可导入 .md/.txt 到私有目录并用下拉选择；不同供应商可绑不同提示词。
@@ -22,10 +23,14 @@
 
 ## 下载
 
-- **本版发行包（1.36.13-linux / versionCode 66）**：[Releases `1.36.13-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.13-linux) → `minis-ultra-com.openminis.linux.apk`
+- **本版发行包（1.36.14-linux / versionCode 67）**：[Releases `1.36.14-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.14-linux) → `minis-ultra-com.openminis.linux.apk`
 - **滚动构建**：[Releases `android-latest`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest)（main 每次成功构建都会覆盖）
 
 侧载前允许「安装未知应用」。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本，见 [docs/SIGNING.md](docs/SIGNING.md)。
+
+### 1.36.14 要点
+
+会话可归入项目工作区：同一文件夹共享磁盘工作区，日记仍按会话。主页 FAB 改为「新建工作区会话」。折叠的 AI 过程条只显示标题和计数。旧版 `minis-global/memory` 日记会拷进各会话。模型直通支持 multipart。完整说明：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ### 1.36.13 要点
 
@@ -161,7 +166,7 @@ Official website: **[openminis.app](https://openminis.app)**
   <img alt="Download on the App Store" height="48" src="assets/badge-appstore.svg" />
 </a>
 &nbsp;
-<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.13-linux">
+<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.14-linux">
   <img alt="Get the APK on GitHub" height="48" src="assets/badge-android.svg" />
 </a>
 

@@ -83,6 +83,7 @@ import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.Language
@@ -941,7 +942,7 @@ fun SessionListScreen(
                             onSelectModels = onSelectModelsClick,
                             onStartConversation = {
                                 scope.launch {
-                                    val sessionId = viewModel.createNewSession()
+                                    val sessionId = viewModel.createNewWorkspaceSession()
                                     if (sessionId != null) onNewChatGuarded(sessionId)
                                 }
                             },
@@ -1260,13 +1261,13 @@ fun SessionListScreen(
                     hasSessions = sessions.isNotEmpty() || isSearchActive,
                     onNewChat = {
                         scope.launch {
-                            val sessionId = viewModel.createNewSession()
+                            val sessionId = viewModel.createNewWorkspaceSession()
                             if (sessionId != null) onNewChatGuarded(sessionId)
                         }
                     },
                     onNewChatWithGroup = { groupId ->
                         scope.launch {
-                            val sessionId = viewModel.createNewSession(groupId = groupId)
+                            val sessionId = viewModel.createNewWorkspaceSession(groupId = groupId)
                             if (sessionId != null) onNewChatGuarded(sessionId)
                         }
                     },
@@ -1584,7 +1585,12 @@ private fun DualFabRow(
                     .shadow(8.dp, CircleShape, ambientColor = Color.Black.copy(alpha = 0.2f)),
                 elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp),
             ) {
-                Icon(Icons.Outlined.Forum, contentDescription = "New Chat", tint = Color.White, modifier = Modifier.size(24.dp))
+                Icon(
+                    Icons.Outlined.CreateNewFolder,
+                    contentDescription = stringResource(R.string.sessionlist_new_workspace_session),
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp),
+                )
             }
             DropdownMenu(
                 expanded = showGroupMenu,

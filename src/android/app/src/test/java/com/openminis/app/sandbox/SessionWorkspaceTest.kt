@@ -17,7 +17,7 @@ class SessionWorkspaceTest {
         SessionWorkspace.ensureDirs(filesDir, sid)
         File(SessionWorkspace.memoryDir(filesDir, sid), "2026-09-21.md").writeText("note")
         File(SessionWorkspace.base(filesDir, sid), "workspace/a.txt").apply {
-            parentFile.mkdirs()
+            parentFile?.mkdirs()
             writeText("ws")
         }
         assertTrue(SessionWorkspace.deleteEntire(filesDir, sid))
@@ -45,5 +45,42 @@ class SessionWorkspaceTest {
         val filesDir = tmp.root
         assertFalse(SessionWorkspace.deleteEntire(filesDir, "../escape"))
         assertFalse(SessionWorkspace.deleteEntire(filesDir, ""))
+    }
+
+    @Test
+    fun filedSessionsShareProjectWorkspaceAndKeepOwnMemory() {
+        val filesDir = tmp.root
+        SessionWorkspace.rememberFolder("a", "proj")
+        SessionWorkspace.rememberFolder("b", "proj")
+        try {
+            SessionWorkspace.ensureDirs(filesDir, "a")
+            SessionWorkspace.ensureDirs(filesDir, "b")
+            val sharedA = SessionWorkspace.hostDir(filesDir, "a", "workspace")
+            val sharedB = SessionWorkspace.hostDir(filesDir, "b", "workspace")
+            assertTrue(sharedA.absolutePath == sharedB.absolutePath)
+            File(sharedA, "note.txt").writeText("hi")
+            File(SessionWorkspace.memoryDir(filesDir, "a"), "a.md").writeText("a")
+            File(SessionWorkspace.memoryDir(filesDir, "b"), "b.md").writeText("b")
+
+            assertTrue(SessionWorkspace.deleteEntire(filesDir, "a"))
+            assertTrue(File(sharedB, "note.txt").exists())
+            assertFalse(SessionWorkspace.base(filesDir, "a").exists())
+            assertTrue(File(SessionWorkspace.memoryDir(filesDir, "b"), "b.md").exists())
+        } finally {
+            SessionWorkspace.rememberFolder("a", null)
+            SessionWorkspace.rememberFolder("b", null)
+        }
+    }
+
+    @Test
+    fun parseDraftFolderIdFromEncodedSessionId() {
+        assertTrue(
+            SessionWorkspace.parseDraftFolderId("__new__abc__fld__default-workspace")
+                == "default-workspace",
+        )
+        assertTrue(
+            SessionWorkspace.parseDraftFolderId("__new__abc__grp__g1__fld__f1") == "f1",
+        )
+        assertTrue(SessionWorkspace.parseDraftFolderId("plain-session") == null)
     }
 }

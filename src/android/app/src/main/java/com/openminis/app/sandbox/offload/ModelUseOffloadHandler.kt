@@ -12,7 +12,9 @@ import com.openminis.app.provider.safeOptString
 import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
+import com.openminis.app.provider.openai.HttpBody
 import com.openminis.app.sandbox.PRootKernel
+import com.openminis.app.sandbox.SessionWorkspace
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -674,6 +676,17 @@ class ModelUseOffloadHandler(
      * Explicit passthrough envelope: verbatim body/headers/endpoint, raw
      * (unparsed) response output. Mirrors iOS ModelUseOffloadBridge.PassthroughSpec.
      */
+    private data class ParsedPart(
+        val name: String,
+        val isFile: Boolean,
+        /** Field value, or a Linux path when [isFile]. */
+        val value: String,
+        /** Explicit media type for file parts; empty = sniff from extension. */
+        val mediaType: String = "",
+        /** Original filename for file parts; empty = derive from the path. */
+        val filename: String = "",
+    )
+
     private data class PassthroughSpec(
         val active: Boolean = false,
         val endpoint: String? = null,        // "/abs/path?q" (absolute) or "rel/segment"
@@ -681,6 +694,15 @@ class ModelUseOffloadHandler(
         val headers: Map<String, String> = emptyMap(),
         val body: Map<String, Any?> = emptyMap(),
         val bodyMode: String = "merge",      // "merge" | "replace"
+        /**
+         * "json" (default — [body] is the payload, byte-identical to the old
+         * behaviour) or "multipart" ([parts] is the payload, sent as
+         * multipart/form-data for endpoints like /images/edits that reject
+         * JSON bodies).
+         */
+        val bodyKind: String = "json",
+        /** Multipart parts, only meaningful when [bodyKind] == "multipart". */
+        val parts: List<ParsedPart> = emptyList(),
         /** [T-model-use-passthrough-warnings] Ignored/downgraded-field feedback. */
         val warnings: List<String> = emptyList(),
     )
@@ -792,7 +814,96 @@ class ModelUseOffloadHandler(
                 warnings.add("body_mode value '$desc' is invalid (only merge/replace are supported) — treated as merge.")
             }
         }
-        return PassthroughSpec(true, endpoint, method, headers, bodyMode = bodyMode, body = body, warnings = warnings)
+        var bodyKind = "json"
+        env.opt("body_kind")?.takeIf { it != JSONObject.NULL }?.let { bkRaw ->
+            val bk = (bkRaw as? String)?.lowercase()
+            if (bk != null && bk in setOf("json", "multipart")) {
+                bodyKind = bk
+            } else {
+                val desc = (bkRaw as? String) ?: jsonTypeName(bkRaw)
+                warnings.add(
+                    "body_kind value '$desc' is invalid (only json/multipart are supported) — " +
+                        "treated as json, so this request was sent as a JSON body.",
+                )
+            }
+        }
+
+        val parts = mutableListOf<ParsedPart>()
+        if (bodyKind == "multipart") {
+            val partsRaw = env.opt("parts")
+            if (partsRaw == null || partsRaw == JSONObject.NULL) {
+                warnings.add(
+                    "body_kind=multipart but no 'parts' array was supplied — the request was sent with an " +
+                        "empty multipart body. Expected shape: \"parts\":[{\"name\":...,\"type\":\"field|file\",...}].",
+                )
+            } else if (partsRaw !is JSONArray) {
+                warnings.add(
+                    "passthrough.parts is not a JSON array (actual type: ${jsonTypeName(partsRaw)}) — " +
+                        "the request was sent with an empty multipart body.",
+                )
+            } else {
+                for (i in 0 until partsRaw.length()) {
+                    val p = partsRaw.optJSONObject(i)
+                    if (p == null) {
+                        warnings.add("passthrough.parts[$i] is not a JSON object — skipped.")
+                        continue
+                    }
+                    val name = p.safeOptString("name", "").trim()
+                    if (name.isEmpty()) {
+                        warnings.add("passthrough.parts[$i] has no 'name' — skipped.")
+                        continue
+                    }
+                    val type = p.safeOptString("type", "field").lowercase()
+                    when (type) {
+                        "file" -> {
+                            val path = p.safeOptString("path", "").trim()
+                            if (path.isEmpty()) {
+                                warnings.add("passthrough.parts[$i] is type=file but has no 'path' — skipped.")
+                                continue
+                            }
+                            parts.add(
+                                ParsedPart(
+                                    name = name,
+                                    isFile = true,
+                                    value = path,
+                                    mediaType = p.safeOptString("media_type", "").trim(),
+                                    filename = p.safeOptString("filename", "").trim(),
+                                ),
+                            )
+                        }
+                        "field" -> {
+                            val raw = p.opt("value")
+                            val value = when (raw) {
+                                null, JSONObject.NULL -> ""
+                                is String -> raw
+                                else -> raw.toString()
+                            }
+                            parts.add(ParsedPart(name = name, isFile = false, value = value))
+                        }
+                        else -> warnings.add(
+                            "passthrough.parts[$i].type '$type' is invalid (only field/file are supported) — skipped.",
+                        )
+                    }
+                }
+            }
+            if (body.isNotEmpty()) {
+                warnings.add(
+                    "body_kind=multipart ignores 'body' — put fields in 'parts' as {\"type\":\"field\"} entries.",
+                )
+            }
+        }
+
+        return PassthroughSpec(
+            active = true,
+            endpoint = endpoint,
+            method = method,
+            headers = headers,
+            bodyMode = bodyMode,
+            body = body,
+            bodyKind = bodyKind,
+            parts = parts,
+            warnings = warnings,
+        )
     }
 
     /**
@@ -891,7 +1002,9 @@ class ModelUseOffloadHandler(
         // (messages + system + max_tokens), so callers add ONLY their extras.
         // replace mode: spec.body verbatim (model unlocked — user owns it).
         val warnings = spec.warnings.toMutableList()
-        val bodyObject: JSONObject? = if (spec.bodyMode == "replace") {
+        val bodyObject: JSONObject? = if (spec.bodyKind == "multipart") {
+            null
+        } else if (spec.bodyMode == "replace") {
             if (spec.body.isEmpty()) {
                 // Legit for GET-style calls, but a common symptom of body
                 // content nested at the wrong JSON level — say so. Mirrors iOS.
@@ -923,13 +1036,29 @@ class ModelUseOffloadHandler(
             baseline
         }
 
+        val body: HttpBody? = try {
+            if (spec.bodyKind == "multipart") {
+                buildMultipartBody(spec.parts, sessionId, warnings)
+            } else {
+                bodyObject?.let { HttpBody.Json(it) }
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "raw passthrough body build failed: ${e.message}", e)
+            return NativeOffloadResult(
+                1,
+                JSONObject().put("error", "passthrough_failed")
+                    .put("message", e.message ?: "passthrough body build failed")
+                    .toString() + "\n",
+            )
+        }
+
         val result = try {
             runBlocking {
                 openAI.rawPassthroughRequest(
                     endpoint = spec.endpoint,
                     method = spec.method,
                     headers = spec.headers,
-                    bodyObject = bodyObject,
+                    body = body,
                 )
             }
         } catch (e: Throwable) {
@@ -1280,8 +1409,75 @@ class ModelUseOffloadHandler(
             ?: return null
         val sub = m.groupValues[1]
         val rest = m.groupValues[2].removePrefix("/")
-        val base = File(context.filesDir, "minis-sessions/$sessionId/$sub")
+        val base = SessionWorkspace.hostDir(context.filesDir, sessionId, sub)
         return if (rest.isEmpty()) base else File(base, rest)
+    }
+
+    private fun sessionScopedHostBytes(linuxPath: String, sessionId: String?): ByteArray {
+        val host = sessionScopedHostFile(linuxPath, sessionId)
+            ?: PRootKernel.resolveHostPath(linuxPath)
+            ?: throw IllegalArgumentException("Could not resolve file part '$linuxPath'")
+        if (!host.isFile) {
+            throw IllegalArgumentException("File part '$linuxPath' is not a file (${host.absolutePath})")
+        }
+        return host.readBytes()
+    }
+
+    private fun partMediaType(path: String, explicit: String): String {
+        if (explicit.isNotEmpty()) return explicit
+        val ext = path.substringAfterLast('.', "").lowercase()
+        return when (ext) {
+            "png" -> "image/png"
+            "jpg", "jpeg" -> "image/jpeg"
+            "webp" -> "image/webp"
+            "gif" -> "image/gif"
+            "heic" -> "image/heic"
+            "heif" -> "image/heif"
+            "bmp" -> "image/bmp"
+            "wav" -> "audio/wav"
+            "mp3" -> "audio/mpeg"
+            "m4a", "mp4" -> "audio/mp4"
+            "ogg" -> "audio/ogg"
+            "flac" -> "audio/flac"
+            "pdf" -> "application/pdf"
+            "json" -> "application/json"
+            "txt" -> "text/plain"
+            else -> "application/octet-stream"
+        }
+    }
+
+    private fun buildMultipartBody(
+        parts: List<ParsedPart>,
+        sessionId: String?,
+        warnings: MutableList<String>,
+    ): HttpBody.Multipart {
+        val built = mutableListOf<HttpBody.Part>()
+        for (p in parts) {
+            if (!p.isFile) {
+                built.add(HttpBody.Part.Field(p.name, p.value))
+                continue
+            }
+            val bytes = sessionScopedHostBytes(p.value, sessionId)
+            val mediaType = partMediaType(p.value, p.mediaType)
+            val filename = p.filename.ifEmpty { p.value.substringAfterLast('/') }
+            built.add(
+                HttpBody.Part.FilePart(
+                    name = p.name,
+                    filename = filename,
+                    mediaType = mediaType,
+                    data = bytes,
+                ),
+            )
+            Log.i(
+                TAG,
+                "[ModelUseRoute] multipart part name=${p.name} file=$filename " +
+                    "mime=$mediaType bytes=${bytes.size}",
+            )
+        }
+        if (built.isEmpty()) {
+            warnings.add("body_kind=multipart produced no usable parts — the request was sent with an empty body.")
+        }
+        return HttpBody.Multipart(built)
     }
 
     /** [T-android-model-use-session-scoped-write] One-line audit of a model-use
