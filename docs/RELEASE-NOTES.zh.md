@@ -1,3 +1,28 @@
+# OpenMinis-Linux 1.36.7-linux
+
+- versionCode **60**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.6-linux，一批小刀口的性能与健壮性收口（来源：两轮源码分析报告）：
+
+- **`agentTools` 列表记忆化**：此前是裸计算属性，每次访问都全量重建工具定义 + JSON 参数 schema + 插件注册表扫描；实测访问点有三处（每次流式尝试、每次工具执行、每次工具预检），一个含 10 次工具调用的回合至少重建 21 次。现在按"视觉能力 / Vision Group / 记忆开关 / 多智能体开关 / 插件商店变更戳"组合键缓存，输入不变直接复用。
+- **provider 实例记忆化**：`ProviderFactory.create` 此前每次都新建实例，而每个 provider 自带一个 OkHttpClient（Dispatcher 独立，仅连接池共享）——14 人分组一次回退链最多新建 14 个。现在按"实例 id + 实例全量状态 + 模型状态 + 密钥指纹"记忆化（上限 64，配置写入 / 密钥轮换时整体失效）。OAuth token provider 闭包随实例缓存，刷新令牌后仍可用。
+- **会话列表 `updated_at` 索引**（Room 15→16，含降级迁移 16→15）：会话列表主查询 `ORDER BY updated_at DESC` 此前是全表扫描 + 排序，且挂在 Compose 观察流上、任一列更新都触发重查。
+- **主线程看门狗冻结伪影不再计数**：心跳用墙钟，进程被 cached-app freezer / 深睡冻结的时间全部计入 gap；设备两日 6 起事件全部为解冻伪影（48s / 6.6min / 63min / 11.4min，均单样本无重采样、0.5s 后恢复 idle）。现在 gap > 30s 的事件照常落 `stall-*.log` 但不计入断路器（渲染降级 ≥2 / 强制首页 ≥3），并打印 `freeze artifact` 标记。
+- **非流式调用整体 deadline**（900s）：标题生成、压缩、oneShotAsk、vision group、快速测试等 `sendMessage` 路径此前只受单次 read timeout 约束，无整体上限。超时以 `TransientError` 抛出，走既有重试/回退分类，不会被误判为用户取消。
+- **`AlarmReceiver` 收紧为不可导出**：此前 `exported="true"` 且通知文案取自外部 intent 的 `EXTRA_ALARM_LABEL`——任意第三方应用可借 Minis 身份弹出内容可控的通知（钓鱼载体），并可借 `EXTRA_ALARM_ID` 清除任意 ONCE 闹钟记录。`BOOT_COMPLETED` 是受保护广播、闹钟触发走自家 PendingIntent，均不要求 exported。
+- **429 永久容量标记分级**：强标记（`无可用渠道`/`no_available_providers`/`insufficient_quota`/`负载已饱和` 等）仍直接 `ProviderError` 不重试；弱标记（`无可用`/`余额`/`billing` 等，可能出现在瞬时限流文案里）在 provider 层保持 `RateLimited`（transient 族），由既有的"还有回退候选就换人、末位候选只重试 1 次"逻辑自然分级——不再对末位候选硬禁重试。
+- **`Retry-After` 补全**：支持 RFC 7231 HTTP-date 形式；显式数值/日期上限从 120s 放宽到 3600s（退避阶梯自身仍封顶 120s）。此前 `Retry-After: 86400`（日配额）会被压成 2 分钟重锤。
+- **429 摘要脱敏**：进入 UI 横幅的响应体摘要对 `sk-…`、`Bearer …`、`api_key=`/`token=` 值、32 位以上 hex 串打码，防止中转在错误体里回显密钥。
+- **`SessionConcurrencyManager` 快路径并锁**：acquire 的 check-and-add 与 `@Synchronized` 的 release 统一监视器，消除并发 acquire 双双通过容量检查的竞态窗口。
+
+---
+
 # OpenMinis-Linux 1.36.6-linux
 
 - versionCode **59**

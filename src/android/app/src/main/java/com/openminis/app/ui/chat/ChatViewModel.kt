@@ -1236,24 +1236,47 @@ class ChatViewModel(
      * The cost is negligible — [AgentTools.makeAgentTools] just builds a
      * fixed list of definition objects, no I/O.
      */
+    // [T-android-agent-tools-memo] agentTools used to be a bare computed
+    // property, rebuilding every tool definition + JSON schema + the plugin
+    // registry scan on EVERY access (3 live access sites: per stream attempt,
+    // per tool execution, per tool preflight — 21+ rebuilds in a 10-tool turn).
+    // The memo below invalidates on the exact inputs that shape the list:
+    // the four exposure flags plus the plugin store's change stamp.
+    private var agentToolsMemo: List<AgentToolDefinition>? = null
+    private var agentToolsMemoStamp: Long = Long.MIN_VALUE
+
     private val agentTools: List<AgentToolDefinition>
-        get() = AgentTools.makeAgentTools(
-            // [T-android-vision-group / GH#182] The main model's own vision
-            // capability. When false but a Vision Group is configured, read_image
-            // is still exposed and routes through the group (see
-            // executeReadImageTool). Note pre-vision-group Android always passed
-            // the default `true` here, so read_image was already always exposed;
-            // threading the real flag lets a text-only model without a Vision
-            // Group correctly LOSE the tool (iOS parity), while a configured
-            // Vision Group keeps it.
-            supportsImageInput = currentModelHasNativeVision,
-            visionGroupConfigured = com.openminis.app.tools.VisionGroupResolver.isConfigured(
-                providerRepository, context,
-            ),
-            memoryEnabled = _memoryEnabled.value,
-            subAgentEnabled = multiAgentSettings.enabled.value,
-            codeGraphEnabled = true,
-        ) + com.openminis.app.plugins.OnlinePluginStore.toolDefinitions(context)
+        get() {
+            val stamp = (if (currentModelHasNativeVision) 1L else 0L) or
+                (if (com.openminis.app.tools.VisionGroupResolver.isConfigured(
+                        providerRepository, context,
+                    )
+                ) 2L else 0L) or
+                (if (_memoryEnabled.value) 4L else 0L) or
+                (if (multiAgentSettings.enabled.value) 8L else 0L) or
+                (com.openminis.app.plugins.OnlinePluginStore.toolDefinitionsStamp(context) shl 4)
+            agentToolsMemo?.takeIf { agentToolsMemoStamp == stamp }?.let { return it }
+            val built = AgentTools.makeAgentTools(
+                // [T-android-vision-group / GH#182] The main model's own vision
+                // capability. When false but a Vision Group is configured, read_image
+                // is still exposed and routes through the group (see
+                // executeReadImageTool). Note pre-vision-group Android always passed
+                // the default `true` here, so read_image was already always exposed;
+                // threading the real flag lets a text-only model without a Vision
+                // Group correctly LOSE the tool (iOS parity), while a configured
+                // Vision Group keeps it.
+                supportsImageInput = currentModelHasNativeVision,
+                visionGroupConfigured = com.openminis.app.tools.VisionGroupResolver.isConfigured(
+                    providerRepository, context,
+                ),
+                memoryEnabled = _memoryEnabled.value,
+                subAgentEnabled = multiAgentSettings.enabled.value,
+                codeGraphEnabled = true,
+            ) + com.openminis.app.plugins.OnlinePluginStore.toolDefinitions(context)
+            agentToolsMemo = built
+            agentToolsMemoStamp = stamp
+            return built
+        }
 
     /**
      * Per-session loop detector. Reset alongside [agentHistory] whenever the

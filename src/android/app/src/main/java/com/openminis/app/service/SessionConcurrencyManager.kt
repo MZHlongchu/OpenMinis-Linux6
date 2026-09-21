@@ -29,8 +29,20 @@ object SessionConcurrencyManager {
     private val waitQueue = LinkedList<Waiter>()
 
     suspend fun acquireSlot(sessionId: String) {
-        if (_runningSessions.value.size < MAX_CONCURRENT) {
-            _runningSessions.value = _runningSessions.value + sessionId
+        // [T-android-slot-lock-unify] The fast path used to check-and-add
+        // WITHOUT the same lock releaseSlot holds (@Synchronized), so two
+        // concurrent acquires could both read size < MAX and both add —
+        // overshooting the cap. Route the check-and-add through the same
+        // monitor; the StateFlow assignment inside is non-suspending.
+        val fastAcquired = synchronized(this) {
+            if (_runningSessions.value.size < MAX_CONCURRENT) {
+                _runningSessions.value = _runningSessions.value + sessionId
+                true
+            } else {
+                false
+            }
+        }
+        if (fastAcquired) {
             // [T-STALL-DIAG] Fast path taken — record who now holds slots so a
             // later leak can be traced back to the turn that opened it.
             println(

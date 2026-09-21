@@ -8,13 +8,25 @@ import com.openminis.app.data.model.inferredMaxOutputTokens
 import com.openminis.app.data.model.LLMResponse
 import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.ThinkingLevel
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.withTimeout
 
 interface LLMProvider {
     val name: String
     var model: LLMModel
+
+    /**
+     * [T-android-nonstream-deadline] Wall-clock ceiling for NON-streaming calls
+     * ([sendMessage] callers: title gen, compaction, oneShotAsk, vision group,
+     * quick test, model-use, group suggest). Streaming turns are exempt — their
+     * budget is the per-attempt read timeout plus the retry/fallback ladder.
+     * Timeout surfaces as [LLMError.TransientError] so existing retry/fallback
+     * classification applies unchanged.
+     */
+    val nonStreamDeadlineMs: Long get() = 900_000L
 
     /** Host+credential+model fingerprint for [ProviderKeyGate]. Blank skips the gate. */
     val callGateKey: String get() = ""
@@ -73,9 +85,20 @@ interface LLMProvider {
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
     ): LLMResponse {
         val level = clampThinkingLevel(thinkingLevel)
-        return ProviderKeyGate.withPermit(callGateKey) {
-            sendMessageClamped(
-                messages, systemPrompt, maxTokens, temperature, imageParts, tools, level,
+        try {
+            return withTimeout(nonStreamDeadlineMs) {
+                ProviderKeyGate.withPermit(callGateKey) {
+                    sendMessageClamped(
+                        messages, systemPrompt, maxTokens, temperature, imageParts, tools, level,
+                    )
+                }
+            }
+        } catch (e: TimeoutCancellationException) {
+            // Re-classify as transient (retryable) instead of letting the bare
+            // CancellationException reach the turn-level catch, which treats
+            // cause-less cancellations as user-initiated job cancellation.
+            throw LLMError.TransientError(
+                "non-stream call exceeded ${nonStreamDeadlineMs / 1000}s deadline",
             )
         }
     }

@@ -55,7 +55,7 @@ object DatabaseVersionGuard {
      * treated the user's own database as "from a newer build" and blocked
      * opening. Keep this equal to `@Database(version=...)`.
      */
-    const val CODE_DB_VERSION = 15 // 1.33.1: dropped kanban_tasks 14 -> 15
+    const val CODE_DB_VERSION = 16 // 1.36.7: sessions.updated_at index 15 -> 16
 
     /** Filename must match the one passed to `Room.databaseBuilder`. */
     private const val DB_NAME = "minis.db"

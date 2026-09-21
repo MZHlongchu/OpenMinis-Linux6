@@ -20,7 +20,7 @@ import com.openminis.app.data.db.CodeEdgeEntity
         CodeSymbolEntity::class,
         CodeEdgeEntity::class,
     ],
-    version = 15, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
+    version = 16, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
     // [T-android-downgrade-compat] Kept ON so MigrationTestHelper and CI can
     // validate every migration (and its downgrade counterpart) against the
     // committed schema json. Without it the upgrade/downgrade chain has no
@@ -416,6 +416,26 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * [T-android-sessions-updated-at-index] 15 -> 16: the session-list
+         * query (`SELECT * FROM sessions ORDER BY updated_at DESC`) ran as a
+         * full scan + sort; the index lets SQLite walk it in order.
+         */
+        val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_sessions_updated_at` ON `sessions` (`updated_at`)",
+                )
+            }
+        }
+
+        /** Downgrade 16 -> 15: drop the index; the old schema has no column constraints. */
+        val MIGRATION_16_15 = object : Migration(16, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP INDEX IF EXISTS `index_sessions_updated_at`")
+            }
+        }
+
         val MIGRATION_12_11 = object : Migration(12, 11) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // Intentionally empty. See the doc comment above — the four
@@ -438,6 +458,7 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
                         MIGRATION_11_12, MIGRATION_12_11, MIGRATION_12_13, MIGRATION_13_12,
                         MIGRATION_13_14, MIGRATION_14_13, MIGRATION_14_15, MIGRATION_15_14,
+                        MIGRATION_15_16, MIGRATION_16_15,
                     )
                     .build()
                     .also { INSTANCE = it }

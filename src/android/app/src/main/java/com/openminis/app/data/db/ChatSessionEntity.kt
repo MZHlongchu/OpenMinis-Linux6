@@ -14,7 +14,14 @@ import androidx.room.PrimaryKey
  */
 @Entity(
     tableName = "sessions",
-    indices = [androidx.room.Index(value = ["folder_id"], name = "index_sessions_folder_id")],
+    // [T-android-sessions-updated-at-index] Backs the session-list query
+    // (SELECT * FROM sessions ORDER BY updated_at DESC); without it the list
+    // is a full scan + sort on every recomposition-triggered requery.
+    // Keep in lockstep with MIGRATION_15_16 (same index name).
+    indices = [
+        androidx.room.Index(value = ["folder_id"], name = "index_sessions_folder_id"),
+        androidx.room.Index(value = ["updated_at"], name = "index_sessions_updated_at"),
+    ],
 )
 data class ChatSessionEntity(
     @PrimaryKey val id: String,

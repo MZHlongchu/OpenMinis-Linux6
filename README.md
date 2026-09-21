@@ -6,7 +6,7 @@
 
 **端侧私人 AI Agent。** 把 Claude、GPT、Gemini 等模型接到手机里的一台真 Linux：Ubuntu 24.04 沙箱、浏览器自动化、技能与记忆、多智能体调度。
 
-本仓库是 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 **Linux 沙箱 Android 分支**。启动器名称 **Minis Ultra**，包名 `com.openminis.linux`，可与官方 OpenMinis **并排安装**。当前 **1.36.6-linux**（versionCode 59）。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。
+本仓库是 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 **Linux 沙箱 Android 分支**。启动器名称 **Minis Ultra**，包名 `com.openminis.linux`，可与官方 OpenMinis **并排安装**。当前 **1.36.7-linux**（versionCode 60）。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。
 
 ## 仓库介绍
 
@@ -18,10 +18,14 @@
 
 ## 下载
 
-- **本版发行包（1.36.6-linux / versionCode 59）**：[Releases `1.36.6-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.6-linux) → `minis-ultra-com.openminis.linux.apk`
+- **本版发行包（1.36.7-linux / versionCode 60）**：[Releases `1.36.7-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.7-linux) → `minis-ultra-com.openminis.linux.apk`
 - **滚动构建**：[Releases `android-latest`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest)（main 每次成功构建都会覆盖）
 
 侧载前允许「安装未知应用」。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本，见 [docs/SIGNING.md](docs/SIGNING.md)。
+
+### 1.36.7 要点
+
+一批小刀口修复/优化：`agentTools` 列表记忆化（此前每次工具调用/流式尝试全量重建）、provider 实例记忆化（此前回退链每回合最多新建 14 个 provider + OkHttpClient）、会话列表 `updated_at` 索引（Room 15→16）、主线程卡顿看门狗冻结伪影不再计数、非流式调用整体 deadline、`AlarmReceiver` 收紧为不可导出、429 永久容量标记分级（弱标记在末位候选改走重试）、`Retry-After` 支持 HTTP-date 并放宽到 1 小时、429 摘要脱敏。完整说明：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ### 1.36.6 要点
 
@@ -129,7 +133,7 @@ Official website: **[openminis.app](https://openminis.app)**
   <img alt="Download on the App Store" height="48" src="assets/badge-appstore.svg" />
 </a>
 &nbsp;
-<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.6-linux">
+<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.7-linux">
   <img alt="Get the APK on GitHub" height="48" src="assets/badge-android.svg" />
 </a>
 

@@ -12,10 +12,43 @@ import com.openminis.app.provider.openai.OpenAIProvider
 
 object ProviderFactory {
     /**
+     * [T-android-provider-memo] Memoized provider construction.
+     *
+     * Per send, `buildFallbackProviders` constructs one provider per group
+     * candidate and the sub-agent lanes construct one per entry — and each
+     * OpenAIProvider/AnthropicProvider carries its own OkHttpClient (Dispatcher
+     * included; only the connection pool is shared). With a 14-member group that
+     * was up to 14 fresh clients per turn, every turn. The memo keys on
+     * everything that shapes the client: instance identity + full instance
+     * state (data-class hashCode covers baseURL/UA/azure/responses flags),
+     * resolved model state, and a fingerprint of the credential so a rotated
+     * OAuth token yields a fresh provider. Config writes call [invalidateAll]
+     * via ProviderRepository.
+     */
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, LLMProvider>()
+
+    private const val CACHE_CAP = 64
+
+    fun create(instance: ProviderInstance, apiKey: String, model: LLMModel, context: Context? = null): LLMProvider {
+        val key = instance.id + "|" + model.hashCode() + "|" +
+            ProviderKeyGate.fingerprint(apiKey) + "|" + instance.hashCode()
+        cache[key]?.let { return it }
+        val built = createUncached(instance, apiKey, model, context)
+        if (cache.size >= CACHE_CAP) cache.clear()
+        cache[key] = built
+        return built
+    }
+
+    /** Drop every memoized provider. Called on any provider-config write. */
+    fun invalidateAll() {
+        cache.clear()
+    }
+
+    /**
      * Create a provider, optionally with OAuth support.
      * [context] is needed for OpenAI OAuth to access encrypted storage for token refresh.
      */
-    fun create(instance: ProviderInstance, apiKey: String, model: LLMModel, context: Context? = null): LLMProvider {
+    private fun createUncached(instance: ProviderInstance, apiKey: String, model: LLMModel, context: Context? = null): LLMProvider {
         // T174: route through ProviderInstance.effectiveBaseURL instead of
         // re-implementing the trim-+-endsWith dance inline. The previous
         // version did `url.endsWith("/v1")` on the raw, untrimmed string,

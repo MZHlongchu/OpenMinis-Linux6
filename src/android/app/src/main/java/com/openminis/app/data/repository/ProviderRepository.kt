@@ -479,6 +479,10 @@ class ProviderRepository(private val context: Context) {
         // the DB rows when re-import fails or is rejected, so the user's
         // data is not lost.
         val mirrorWritten = prefs.edit().putString("config", mirrorStr).commit()
+        // [T-android-provider-memo] Any persisted config change can reshape
+        // instances/entries (baseURL, UA, azure flags, useResponsesAPI…), so
+        // drop the provider memo — next create() rebuilds from fresh state.
+        com.openminis.app.provider.ProviderFactory.invalidateAll()
         if (!mirrorWritten) {
             android.util.Log.w(
                 "ProviderRepo",
@@ -2416,6 +2420,10 @@ class ProviderRepository(private val context: Context) {
     // API Key management
     fun saveApiKey(instanceId: String, key: String) {
         encryptedPrefs.edit().putString("apikey_$instanceId", key).apply()
+        // [T-android-provider-memo] The memo keys on the credential fingerprint;
+        // a rotated token already yields a new entry, but drop everything so
+        // stale-keyed providers can't linger past the cap.
+        com.openminis.app.provider.ProviderFactory.invalidateAll()
     }
 
     fun loadApiKey(instanceId: String): String? {

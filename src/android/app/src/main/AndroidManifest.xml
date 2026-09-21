@@ -465,10 +465,17 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 
-        <!-- Alarm broadcast receiver (also handles BOOT_COMPLETED for re-scheduling) -->
+        <!-- Alarm broadcast receiver (also handles BOOT_COMPLETED for re-scheduling)
+             [T-android-alarm-receiver-nonexported] exported=false: BOOT_COMPLETED is a
+             protected system broadcast and IS delivered to non-exported receivers, and
+             the alarm firings arrive via this app's own AlarmManager PendingIntents, so
+             no external caller ever needs to reach it. While exported=true, any app
+             could post a notification under Minis' identity with attacker-chosen
+             EXTRA_ALARM_LABEL text and clear arbitrary ONCE alarm records via
+             EXTRA_ALARM_ID (see AlarmReceiver.onReceive). -->
         <receiver
             android:name=".offload.AlarmReceiver"
-            android:exported="true">
+            android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>

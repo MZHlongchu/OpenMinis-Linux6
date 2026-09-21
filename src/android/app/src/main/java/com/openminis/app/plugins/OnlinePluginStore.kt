@@ -49,4 +49,17 @@ object OnlinePluginStore {
             .filter { it.id in installed }
             .flatMap { plugin -> plugin.tools.map { OnlineApiTool.definition(plugin, it) } }
     }
+
+    /**
+     * [T-android-agent-tools-memo] Cheap change-stamp for [toolDefinitions]:
+     * covers both inputs (installed flags + the cached remote registry). Reading
+     * two SharedPreferences values is orders of magnitude cheaper than building
+     * the definitions, so the agent loop can key its memo on this per access.
+     */
+    fun toolDefinitionsStamp(context: Context): Long {
+        val flags = context.getSharedPreferences(FLAGS, Context.MODE_PRIVATE).all
+        val registry = context.getSharedPreferences("plugin_registry", Context.MODE_PRIVATE)
+            .getString("plugin_registry_cache", null)
+        return 31L * flags.hashCode() + (registry?.hashCode() ?: 0)
+    }
 }

@@ -64,6 +64,19 @@ object HangDetector {
     private const val HANG_LIMIT_FOR_BREAKER = 3
 
     /**
+     * [T-android-hangdetector-freeze-gate] Heartbeat gaps above this ceiling are
+     * process-freeze / deep-sleep artifacts, not live ANRs: a genuinely stuck
+     * main thread is killed by the system (or by the 600s read watchdog upstream)
+     * long before a gap this large can accumulate, and 6/6 recorded stall episodes
+     * (48s, 6.6min, 63min, 11.4min) were all cached-app-freezer resumes — single
+     * mid-hang sample, post-recovery idle ~0.5s later, zero escalation re-samples.
+     * Such episodes are still LOGGED (the thaw stack is diagnostic gold) but no
+     * longer COUNTED, so an overnight freeze cannot trip the render breaker (>=2)
+     * or the force-home breaker (>=3).
+     */
+    private const val FREEZE_GAP_CEILING_MS = 30_000L
+
+    /**
      * [T-android-render-breaker] Once `count >= this`, streaming markdown
      * rendering degrades to plain text until the hang count resets (quiet
      * period or manual reset). Deliberately one step EARLIER than the launch
@@ -243,8 +256,18 @@ object HangDetector {
                 episodePeakSinceMs = since
                 lastSampleAt = now
                 lastLogAt.set(now)
-                // Counts once per episode + writes the first mid-hang sample.
-                recordHang(durationMs = since)
+                // [T-android-hangdetector-freeze-gate] Freeze/deep-sleep resumes
+                // produce wall-clock gaps of minutes; a live main-thread ANR
+                // cannot survive that long. Log the episode, but only let it
+                // feed the breakers when the gap is plausibly a real hang.
+                val isFreezeArtifact = since > FREEZE_GAP_CEILING_MS
+                if (isFreezeArtifact) {
+                    println(
+                        "[T-HANG-DIAG] freeze artifact: gap=${since}ms > ${FREEZE_GAP_CEILING_MS}ms — " +
+                            "logged but NOT counted toward breakers",
+                    )
+                }
+                recordHang(durationMs = since, counts = !isFreezeArtifact)
                 continue
             }
             episodePeakSinceMs = maxOf(episodePeakSinceMs, since)
@@ -303,13 +326,14 @@ object HangDetector {
         }
     }
 
-    private fun recordHang(durationMs: Long) {
+    private fun recordHang(durationMs: Long, counts: Boolean) {
         val ctx = appContext ?: return
         // [T-android-hangdetector-midhang-sample] The trip-time stack IS a
         // mid-hang sample (the heartbeat is 3s stale and the main thread is
         // still stuck); the watchdog keeps re-sampling every
         // MID_HANG_RESAMPLE_MS via writeStallSample while the episode lasts.
         writeStallSample("mid-hang", durationMs, escalation = 0)
+        if (!counts) return  // [T-android-hangdetector-freeze-gate]
 
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val newCount = prefs.getInt(KEY_HANG_COUNT, 0) + 1
