@@ -23,6 +23,9 @@ import java.util.concurrent.ConcurrentHashMap
  * SOUL.md / LEARNED.md stay under minis-global/memory (not bind-mounted as
  * `/var/minis/memory`). `/var/minis/memory` is this chat's daily logs.
  */
+// Cache-bust marker: the previous CI run compiled a stale source tree where
+// File.isDirectory was still written as a property. This comment exists so the
+// next run's source fingerprint differs from the cached one.
 object SessionWorkspace {
     const val SESSIONS_DIR = "minis-sessions"
     const val WORKSPACES_DIR = "minis-workspaces"
