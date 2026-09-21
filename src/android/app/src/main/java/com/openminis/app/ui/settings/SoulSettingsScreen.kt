@@ -254,7 +254,7 @@ fun SoulSettingsScreen(
         body = pendingRestoreBody ?: baseline?.body.orEmpty(),
     )
     val isDirty = loaded && baseline != null && (
-        currentFile.metadata != baseline.metadata || pendingRestoreBody != null
+        currentFile.metadata != baseline?.metadata || pendingRestoreBody != null
     )
     var showDiscardDialog by remember { mutableStateOf(false) }
 
