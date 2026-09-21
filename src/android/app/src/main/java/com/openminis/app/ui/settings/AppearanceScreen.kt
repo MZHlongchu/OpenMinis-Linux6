@@ -513,6 +513,7 @@ fun AppearanceScreen(
                 icon = Icons.Outlined.ViewAgenda,
                 iconColor = tilePurple,
                 title = stringResource(R.string.appearance_fold_ai_process_title),
+                subtitle = stringResource(R.string.appearance_fold_ai_process_subtitle),
                 checked = foldAiProcess,
                 onCheckedChange = {
                     foldAiProcess = it

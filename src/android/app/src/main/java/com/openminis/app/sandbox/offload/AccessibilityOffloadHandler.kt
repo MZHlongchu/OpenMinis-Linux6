@@ -502,7 +502,9 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         }
         val gestureOk = svc.dispatchSimpleGesture(path, 0L, duration)
         if (args.hasFlag("double")) {
-            Thread.sleep(80)
+            if (!awaitA11yEvent(svc, 80L)) {
+                return err(args, "INTERRUPTED", "double-tap cancelled")
+            }
             svc.dispatchSimpleGesture(path, 0L, duration)
         }
         return if (gestureOk) ok(args, JSONObject().put("x", x).put("y", y).put("action", "tap"))

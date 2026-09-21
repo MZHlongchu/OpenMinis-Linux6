@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,6 +46,7 @@ class WebViewHolder(
         private set
 
     private var mobileUserAgent: String = ""
+    private var destroyed = false
 
     @SuppressLint("SetJavaScriptEnabled")
     val webView: WebView = WebView(appContext).apply {
@@ -363,6 +365,8 @@ class WebViewHolder(
      * doesn't linger. Safe to call multiple times.
      */
     fun destroy() {
+        if (destroyed) return
+        destroyed = true
         try {
             detach()
             webView.stopLoading()
@@ -389,5 +393,9 @@ class WebViewHolder(
 @Composable
 fun rememberWebViewHolder(url: String): WebViewHolder {
     val context = androidx.compose.ui.platform.LocalContext.current
-    return remember(url) { WebViewHolder(context.applicationContext, url) }
+    val holder = remember(url) { WebViewHolder(context.applicationContext, url) }
+    DisposableEffect(holder) {
+        onDispose { holder.destroy() }
+    }
+    return holder
 }

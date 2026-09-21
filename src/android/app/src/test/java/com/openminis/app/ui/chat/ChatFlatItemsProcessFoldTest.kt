@@ -27,6 +27,7 @@ class ChatFlatItemsProcessFoldTest {
 
     private fun assistant(
         streaming: Boolean = false,
+        awaiting: Boolean = false,
         blocks: List<AssistantBlock>,
         role: String = "assistant",
         id: String = "m1",
@@ -35,6 +36,7 @@ class ChatFlatItemsProcessFoldTest {
         role = role,
         content = "",
         isStreaming = streaming,
+        isAwaitingModelResponse = awaiting,
         toolBlocks = blocks,
     )
 
@@ -172,5 +174,28 @@ class ChatFlatItemsProcessFoldTest {
         assertTrue(summary.hasFailure)
         assertEquals(1, summary.toolCount)
         assertEquals(0, summary.thinkingCount)
+    }
+
+    @Test
+    fun `fold on awaiting leaves process expanded`() {
+        val items = buildFlatChatItems(
+            listOf(assistant(awaiting = true, blocks = listOf(thinking(), tool(), text()))),
+            showCompletedToolCards = false,
+            foldAiProcess = true,
+        )
+        val k = kinds(items)
+        assertFalse(k.contains("summary"))
+        assertTrue(k.contains("thinking"))
+        assertTrue(k.contains("tool:bash"))
+    }
+
+    @Test
+    fun `floating overlay hides completed tools when fold is on`() {
+        val done = tool(status = ToolBlockStatus.SUCCESS)
+        val running = tool(id = "t2", status = ToolBlockStatus.RUNNING)
+        assertTrue(isFloatingProcessTool(done, foldAiProcess = false))
+        assertFalse(isFloatingProcessTool(done, foldAiProcess = true))
+        assertTrue(isFloatingProcessTool(running, foldAiProcess = true))
+        assertFalse(isFloatingProcessTool(thinking(), foldAiProcess = false))
     }
 }

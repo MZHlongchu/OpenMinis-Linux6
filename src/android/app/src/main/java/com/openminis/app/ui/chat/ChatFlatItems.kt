@@ -392,9 +392,11 @@ internal fun buildFlatChatItems(
         val thinkingCount = blocks.count { it.kind == "thinking" }
         val toolCount = blocks.count { it.kind == "tool_use" }
         val processExpanded = message.id in expandedProcessIds
-        // Streaming stays expanded (no summary). Finished turns collapse into
-        // the thinking-block-style summary unless the user tapped it open.
-        val showProcessSummary = foldAiProcess && !isSystem && !message.isStreaming &&
+        // Streaming AND the post-tool "awaiting next model chunk" gap stay
+        // expanded (no summary). Finished turns collapse into the
+        // thinking-block-style summary unless the user tapped it open.
+        val turnLive = message.isStreaming || message.isAwaitingModelResponse
+        val showProcessSummary = foldAiProcess && !isSystem && !turnLive &&
             (thinkingCount > 0 || toolCount > 0)
         if (showProcessSummary) {
             out.add(dedupe(FlatChatItem.AssistantProcessSummary(
@@ -594,4 +596,23 @@ internal fun shouldShowProcessToolRow(
     if (isAlwaysVisibleProcessTool(block)) return true
     if (showProcessSummary) return processExpanded
     return shouldShowToolUseRow(block, showCompletedToolCards)
+}
+
+private val IN_FLIGHT_PROCESS_TOOL_STATUSES = setOf(
+    ToolBlockStatus.STREAMING,
+    ToolBlockStatus.PENDING,
+    ToolBlockStatus.RUNNING,
+)
+
+/**
+ * Whether [block] belongs on the floating tool overlay. When
+ * [foldAiProcess] is on, completed tools fold into the in-list summary
+ * and must not linger as a second "computer" strip — that was why the
+ * Appearance switch looked like a no-op.
+ */
+internal fun isFloatingProcessTool(block: AssistantBlock, foldAiProcess: Boolean): Boolean {
+    if (block.toolStatus == null) return false
+    if (block.kind == "thinking" || block.kind == "info") return false
+    if (foldAiProcess && block.toolStatus !in IN_FLIGHT_PROCESS_TOOL_STATUSES) return false
+    return true
 }

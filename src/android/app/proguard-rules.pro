@@ -35,3 +35,19 @@
 # Android R8 treats those as missing and fails minifyRelease (1.33 CI).
 -dontwarn java.beans.**
 -dontwarn javax.lang.model.**
+-dontwarn org.mozilla.javascript.**
+-dontwarn org.mozilla.classfile.**
+#
+# [T-android-rhino-vmbridge-keep] execute_code uses Context.enter() which
+# Class.forName()s VMBridge implementations
+# (org.mozilla.javascript.jdk18.VMBridge_jdk18, …). R8 sees no Java call
+# graph to those types, strips them, and release builds crash on the first
+# execute_code with ExceptionInInitializerError / "Failed to create
+# VMBridge instance". Keep the whole engine — the sandbox is small next to
+# the rest of the APK, and a narrow keep that missed a reflective lookup
+# would fail the same way as VAD JNI did in 1.12.
+#
+# NOTE FOR VERIFICATION: debug builds don't minify. Check against
+# assembleRelease (and that mapping.txt still lists org.mozilla.javascript).
+-keep class org.mozilla.javascript.** { *; }
+-keep class org.mozilla.classfile.** { *; }

@@ -8,13 +8,13 @@ import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.ProviderModelsCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
+import com.openminis.app.network.SharedHttpClients
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 
 object OpenRouterModelsApi {
-    private val client = OkHttpClient()
+    private val client = SharedHttpClients.default
     private val cache = ProviderModelsCache("openrouter")
 
     /**

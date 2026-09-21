@@ -2300,22 +2300,51 @@ fun ChatScreen(
     // reused via `internal` visibility — no duplicate UI). Populated by an
     // async repo lookup once the user taps the title pill.
     var editingSession by remember { mutableStateOf<com.openminis.app.data.db.ChatSessionEntity?>(null) }
-    DisposableEffect(appearancePrefs) {
+    val appearanceLifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(appearancePrefs, appearanceLifecycleOwner) {
+        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        fun applyAppearancePrefs(sp: android.content.SharedPreferences) {
+            messageFontLevel = sp.getInt(com.openminis.app.ui.settings.KEY_FONT_MESSAGE, 0)
+            chatInputLevel = sp.getInt(com.openminis.app.ui.settings.KEY_FONT_CHAT_INPUT, 0)
+            toolPreviewEnabled = sp.getBoolean(com.openminis.app.ui.settings.KEY_TOOL_PREVIEW, true)
+            showFloatingToolBar = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_FLOATING_TOOL_BAR, true)
+            showCompletedToolCards = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS, false)
+            foldAiProcess = sp.getBoolean(com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS, false)
+            showSubAgentBar = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_SUBAGENT_BAR, true)
+            showPlanBanner = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_PLAN_BANNER, false)
+            showChatTitlePill = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE, true)
+        }
+        fun onMain(block: () -> Unit) {
+            if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) block()
+            else mainHandler.post(block)
+        }
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { sp, key ->
-            when (key) {
-                com.openminis.app.ui.settings.KEY_FONT_MESSAGE -> messageFontLevel = sp.getInt(key, 0)
-                com.openminis.app.ui.settings.KEY_FONT_CHAT_INPUT -> chatInputLevel = sp.getInt(key, 0)
-                com.openminis.app.ui.settings.KEY_TOOL_PREVIEW -> toolPreviewEnabled = sp.getBoolean(key, true)
-                com.openminis.app.ui.settings.KEY_SHOW_FLOATING_TOOL_BAR -> showFloatingToolBar = sp.getBoolean(key, true)
-                com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS -> showCompletedToolCards = sp.getBoolean(key, false)
-                com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS -> foldAiProcess = sp.getBoolean(key, false)
-                com.openminis.app.ui.settings.KEY_SHOW_SUBAGENT_BAR -> showSubAgentBar = sp.getBoolean(key, true)
-                com.openminis.app.ui.settings.KEY_SHOW_PLAN_BANNER -> showPlanBanner = sp.getBoolean(key, false)
-                com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE -> showChatTitlePill = sp.getBoolean(key, true)
+            onMain {
+                when (key) {
+                    com.openminis.app.ui.settings.KEY_FONT_MESSAGE -> messageFontLevel = sp.getInt(key, 0)
+                    com.openminis.app.ui.settings.KEY_FONT_CHAT_INPUT -> chatInputLevel = sp.getInt(key, 0)
+                    com.openminis.app.ui.settings.KEY_TOOL_PREVIEW -> toolPreviewEnabled = sp.getBoolean(key, true)
+                    com.openminis.app.ui.settings.KEY_SHOW_FLOATING_TOOL_BAR -> showFloatingToolBar = sp.getBoolean(key, true)
+                    com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS -> showCompletedToolCards = sp.getBoolean(key, false)
+                    com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS -> foldAiProcess = sp.getBoolean(key, false)
+                    com.openminis.app.ui.settings.KEY_SHOW_SUBAGENT_BAR -> showSubAgentBar = sp.getBoolean(key, true)
+                    com.openminis.app.ui.settings.KEY_SHOW_PLAN_BANNER -> showPlanBanner = sp.getBoolean(key, false)
+                    com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE -> showChatTitlePill = sp.getBoolean(key, true)
+                    null -> applyAppearancePrefs(sp)
+                }
+            }
+        }
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                applyAppearancePrefs(appearancePrefs)
             }
         }
         appearancePrefs.registerOnSharedPreferenceChangeListener(listener)
-        onDispose { appearancePrefs.unregisterOnSharedPreferenceChangeListener(listener) }
+        appearanceLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            appearancePrefs.unregisterOnSharedPreferenceChangeListener(listener)
+            appearanceLifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
     val markdownFontScale = com.openminis.app.ui.settings.fontScaleForLevel(messageFontLevel)
     val chatInputFontScale = com.openminis.app.ui.settings.fontScaleForLevel(chatInputLevel)
@@ -3285,12 +3314,12 @@ fun ChatScreen(
                 // view; we mirror that semantically by checking the same
                 // filter on both sources.
                 val streamingById by viewModel.streamingById.collectAsState()
-                val hasFloatingTools = remember(messages, streamingById) {
+                val hasFloatingTools = remember(messages, streamingById, foldAiProcess) {
                     val merged = if (streamingById.isEmpty()) messages
                                  else mergeStreamingOverlay(messages, streamingById)
                     merged.any { msg ->
                         msg.role == "assistant" && msg.toolBlocks.any { tb ->
-                            tb.toolStatus != null && tb.kind != "thinking" && tb.kind != "info"
+                            isFloatingProcessTool(tb, foldAiProcess)
                         }
                     }
                 }
@@ -4470,7 +4499,7 @@ fun ChatScreen(
                 // never opens (and its sentinel LaunchedEffect immediately
                 // closes the detail state because the id "doesn't exist").
                 var lastToolBlocks by remember { mutableStateOf<List<AssistantBlock>>(emptyList()) }
-                LaunchedEffect(messages) {
+                LaunchedEffect(messages, foldAiProcess) {
                     kotlinx.coroutines.flow.combine(
                         kotlinx.coroutines.flow.flowOf(messages),
                         viewModel.streamingById,
@@ -4478,7 +4507,7 @@ fun ChatScreen(
                         val merged = if (stream.isEmpty()) msgs else mergeStreamingOverlay(msgs, stream)
                         merged.filter { it.role == "assistant" }
                             .flatMap { it.toolBlocks }
-                            .filter { it.toolStatus != null && it.kind != "thinking" && it.kind != "info" }
+                            .filter { isFloatingProcessTool(it, foldAiProcess) }
                     }.collect { lastToolBlocks = it }
                 }
                 val allToolBlocks = lastToolBlocks

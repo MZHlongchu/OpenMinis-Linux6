@@ -7,13 +7,13 @@ import com.openminis.app.provider.applyUserAgentOverride
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.OkHttpClient
+import com.openminis.app.network.SharedHttpClients
 import okhttp3.Request
 import okhttp3.Response
 import org.json.JSONObject
 
 object AnthropicModelsApi {
-    private val client = OkHttpClient()
+    private val client = SharedHttpClients.default
 
     /**
      * Fetch models from Anthropic API.

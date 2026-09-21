@@ -365,6 +365,16 @@ internal object ConfigBuiltins {
                 defaultValue = true,
             )
         )
+        r.register(
+            PrefsBoolField(
+                path = "chat.foldAiProcess",
+                displayName = "Fold AI process",
+                description = "When ON, finished thinking and tool cards collapse into a thinking-style summary. In-flight tools still show on the overlay. Default OFF.",
+                prefs = appearancePrefs,
+                key = com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS,
+                defaultValue = false,
+            )
+        )
         // [T-keyboard-auto-pop default flip] On by default — iOS gates
         // the existing post-stream auto-focus behind this. Android
         // currently does not auto-focus on stream end (it only

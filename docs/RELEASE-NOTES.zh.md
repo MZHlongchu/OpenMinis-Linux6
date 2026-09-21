@@ -1,3 +1,22 @@
+# OpenMinis-Linux 1.36.9-linux
+
+- versionCode **62**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.8-linux：
+
+- **AI 过程折叠真正生效**：开启后回复结束把思考和工具收进一条摘要；底部浮动工具条只保留进行中的工具，不再挂着已完成卡片（这是 1.36.8 开关看起来没效果的原因）。偏好监听回到主线程，回到聊天页会重读。工具回合间隙（等待下一模型块）先不收起。
+- **release `execute_code`**：ProGuard keep 整个 `org.mozilla.javascript` / `org.mozilla.classfile`，避免 R8 裁掉 VMBridge 反射实现导致 `Failed to create VMBridge instance`。
+- **ModelsApi 共用 OkHttpClient**：五个目录拉取客户端共享连接池，不再各 new 一个。
+- **WebViewHolder.destroy 幂等**，Compose 离开时释放；无障碍双击改为等无障碍事件而不是 `Thread.sleep(80)`。
+
+---
+
 # OpenMinis-Linux 1.36.8-linux
 
 - versionCode **61**
