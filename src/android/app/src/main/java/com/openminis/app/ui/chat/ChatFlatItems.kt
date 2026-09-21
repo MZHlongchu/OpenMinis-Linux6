@@ -171,6 +171,18 @@ internal sealed class FlatChatItem {
         override val contentType = "thinking"
     }
 
+    /** Collapsed thinking+tools header. Same decoration family as ThinkingBlock. */
+    data class AssistantProcessSummary(
+        val messageId: String,
+        val thinkingCount: Int,
+        val toolCount: Int,
+        val expanded: Boolean,
+        val hasFailure: Boolean,
+    ) : FlatChatItem() {
+        override val key = "process:$messageId"
+        override val contentType = "process"
+    }
+
     data class AssistantToolUse(
         val messageId: String,
         val block: AssistantBlock,
@@ -272,6 +284,8 @@ internal fun buildFlatChatItems(
     // single full build would.
     seedKeys: Set<String> = emptySet(),
     showCompletedToolCards: Boolean = true,
+    foldAiProcess: Boolean = false,
+    expandedProcessIds: Set<String> = emptySet(),
 ): List<FlatChatItem> {
     val out = mutableListOf<FlatChatItem>()
     val usedKeys = if (seedKeys.isEmpty()) mutableSetOf() else seedKeys.toMutableSet()
@@ -300,6 +314,7 @@ internal fun buildFlatChatItems(
                 messageMarkdown = item.messageMarkdown,
             )
             is FlatChatItem.AssistantThinking -> item.copy(messageId = "${item.messageId}#$n")
+            is FlatChatItem.AssistantProcessSummary -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantToolUse -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantInfo -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantTyping -> item.copy(messageId = "${item.messageId}#$n")
@@ -374,6 +389,24 @@ internal fun buildFlatChatItems(
         // Only the last cancelled tool_use in the message gets the Retry button —
         // retryLast() re-runs the whole turn, so one button is enough.
         val lastCancelledToolId = blocks.lastOrNull { it.kind == "tool_use" && it.toolStatus == ToolBlockStatus.CANCELLED }?.id
+        val thinkingCount = blocks.count { it.kind == "thinking" }
+        val toolCount = blocks.count { it.kind == "tool_use" }
+        val processExpanded = message.id in expandedProcessIds
+        // Streaming stays expanded (no summary). Finished turns collapse into
+        // the thinking-block-style summary unless the user tapped it open.
+        val showProcessSummary = foldAiProcess && !isSystem && !message.isStreaming &&
+            (thinkingCount > 0 || toolCount > 0)
+        if (showProcessSummary) {
+            out.add(dedupe(FlatChatItem.AssistantProcessSummary(
+                messageId = message.id,
+                thinkingCount = thinkingCount,
+                toolCount = toolCount,
+                expanded = processExpanded,
+                hasFailure = blocks.any {
+                    it.kind == "tool_use" && it.toolStatus == ToolBlockStatus.FAILED
+                },
+            )))
+        }
 
         blocks.forEachIndexed { index, block ->
             when (block.kind) {
@@ -461,19 +494,29 @@ internal fun buildFlatChatItems(
                         }
                     }
                 }
-                "thinking" -> out.add(dedupe(FlatChatItem.AssistantThinking(
-                    messageId = message.id,
-                    block = block,
-                    isLast = block.id == lastThinkingId,
-                    messageIsStreaming = message.isStreaming,
-                    messageThinkingLevel = message.thinkingLevel,
-                    isLastBlockOverall = block.id == lastBlockId,
-                )))
+                "thinking" -> {
+                    if (!showProcessSummary || processExpanded) {
+                        out.add(dedupe(FlatChatItem.AssistantThinking(
+                            messageId = message.id,
+                            block = block,
+                            isLast = block.id == lastThinkingId,
+                            messageIsStreaming = message.isStreaming,
+                            messageThinkingLevel = message.thinkingLevel,
+                            isLastBlockOverall = block.id == lastBlockId,
+                        )))
+                    }
+                }
                 "info" -> out.add(dedupe(FlatChatItem.AssistantInfo(
                     messageId = message.id,
                     block = block,
                 )))
-                else -> if (shouldShowToolUseRow(block, showCompletedToolCards)) {
+                else -> if (shouldShowProcessToolRow(
+                        block,
+                        showCompletedToolCards = showCompletedToolCards,
+                        showProcessSummary = showProcessSummary,
+                        processExpanded = processExpanded,
+                    )
+                ) {
                     out.add(dedupe(FlatChatItem.AssistantToolUse(
                         messageId = message.id,
                         block = block,
@@ -537,4 +580,18 @@ internal fun shouldShowToolUseRow(block: AssistantBlock, showCompletedToolCards:
         ToolBlockStatus.SUCCESS, ToolBlockStatus.FAILED, ToolBlockStatus.TIMEOUT -> false
         else -> true
     }
+}
+
+internal fun isAlwaysVisibleProcessTool(block: AssistantBlock): Boolean =
+    block.kind == "tool_use" && block.toolName == "ask_user_question"
+
+internal fun shouldShowProcessToolRow(
+    block: AssistantBlock,
+    showCompletedToolCards: Boolean,
+    showProcessSummary: Boolean,
+    processExpanded: Boolean,
+): Boolean {
+    if (isAlwaysVisibleProcessTool(block)) return true
+    if (showProcessSummary) return processExpanded
+    return shouldShowToolUseRow(block, showCompletedToolCards)
 }

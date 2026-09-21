@@ -107,6 +107,9 @@ const val KEY_SHOW_CHAT_TITLE = "appearance.show_chat_title"  // Boolean, defaul
 // `@AppStorage("chat.autoExpandThinking")` so future config sync reads the same
 // value. Read at block-mount time in ThinkingBlock.
 const val KEY_AUTO_EXPAND_THINKING = "chat.autoExpandThinking"  // Boolean, default true
+// Collapse thinking + tool process into a summary after the turn finishes
+// (streaming stays expanded). Default off. Read live in ChatScreen.
+const val KEY_FOLD_AI_PROCESS = "chat.foldAiProcess"  // Boolean, default false
 // [T-android-auto-grouping] When a chat's title is first generated, also file
 // it into a matching EXISTING group. Rides the title-generation call — no
 // second round-trip. Key name matches iOS `autoGroupingEnabled` so a future
@@ -272,6 +275,7 @@ fun AppearanceScreen(
     var showPlanBanner by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_PLAN_BANNER, false)) }
     var autoFocusAfterReply by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_FOCUS_AFTER_REPLY, true)) }
     var autoExpandThinking by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_EXPAND_THINKING, true)) }
+    var foldAiProcess by remember { mutableStateOf(prefs.getBoolean(KEY_FOLD_AI_PROCESS, false)) }
     var showChatTitle by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_CHAT_TITLE, true)) }
     var autoGrouping by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_GROUPING, true)) }
     var chatInputLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_CHAT_INPUT, 0)) }
@@ -502,6 +506,17 @@ fun AppearanceScreen(
                 onCheckedChange = {
                     autoExpandThinking = it
                     prefs.edit().putBoolean(KEY_AUTO_EXPAND_THINKING, it).apply()
+                },
+                showDivider = true,
+            )
+            SettingsSwitchRow(
+                icon = Icons.Outlined.ViewAgenda,
+                iconColor = tilePurple,
+                title = stringResource(R.string.appearance_fold_ai_process_title),
+                checked = foldAiProcess,
+                onCheckedChange = {
+                    foldAiProcess = it
+                    prefs.edit().putBoolean(KEY_FOLD_AI_PROCESS, it).apply()
                 },
                 showDivider = false,
             )

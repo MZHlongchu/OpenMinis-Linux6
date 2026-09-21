@@ -1,0 +1,176 @@
+package com.openminis.app.ui.chat
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class ChatFlatItemsProcessFoldTest {
+
+    private fun thinking(id: String = "th1") =
+        AssistantBlock(id = id, kind = "thinking", content = "reason")
+
+    private fun text(id: String = "tx1", content: String = "hello") =
+        AssistantBlock(id = id, kind = "text", content = content)
+
+    private fun tool(
+        id: String = "tool1",
+        name: String = "bash",
+        status: ToolBlockStatus = ToolBlockStatus.SUCCESS,
+    ) = AssistantBlock(
+        id = id,
+        kind = "tool_use",
+        toolName = name,
+        toolStatus = status,
+        toolTitle = name,
+    )
+
+    private fun assistant(
+        streaming: Boolean = false,
+        blocks: List<AssistantBlock>,
+        role: String = "assistant",
+        id: String = "m1",
+    ) = ChatMessage(
+        id = id,
+        role = role,
+        content = "",
+        isStreaming = streaming,
+        toolBlocks = blocks,
+    )
+
+    private fun kinds(items: List<FlatChatItem>): List<String> = items.map { item ->
+        when (item) {
+            is FlatChatItem.UserBubble -> "user"
+            is FlatChatItem.AssistantHeader -> "header"
+            is FlatChatItem.AssistantText -> "text"
+            is FlatChatItem.AssistantMarkdownBlock -> "md"
+            is FlatChatItem.AssistantProcessSummary -> "summary"
+            is FlatChatItem.AssistantThinking -> "thinking"
+            is FlatChatItem.AssistantToolUse -> "tool:${item.block.toolName}"
+            is FlatChatItem.AssistantInfo -> "info"
+            is FlatChatItem.AssistantTyping -> "typing"
+            is FlatChatItem.AssistantError -> "error"
+            is FlatChatItem.AssistantLegacyContent -> "legacy"
+        }
+    }
+
+    @Test
+    fun `fold off keeps thinking tools and text with no summary`() {
+        val items = buildFlatChatItems(
+            listOf(assistant(blocks = listOf(thinking(), tool(), text()))),
+            showCompletedToolCards = true,
+            foldAiProcess = false,
+        )
+        assertFalse(kinds(items).contains("summary"))
+        assertTrue(kinds(items).contains("thinking"))
+        assertTrue(kinds(items).contains("tool:bash"))
+        assertTrue(kinds(items).contains("md"))
+    }
+
+    @Test
+    fun `fold on finished collapses process and keeps every text block`() {
+        val items = buildFlatChatItems(
+            listOf(
+                assistant(
+                    blocks = listOf(
+                        thinking(),
+                        tool(),
+                        text(id = "tx1", content = "one"),
+                        text(id = "tx2", content = "two"),
+                    ),
+                ),
+            ),
+            showCompletedToolCards = false,
+            foldAiProcess = true,
+        )
+        val k = kinds(items)
+        assertEquals(listOf("header", "summary", "md", "md"), k)
+        val summary = items.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single()
+        assertEquals(1, summary.thinkingCount)
+        assertEquals(1, summary.toolCount)
+        assertFalse(summary.expanded)
+        assertFalse(summary.hasFailure)
+    }
+
+    @Test
+    fun `fold on streaming leaves process expanded`() {
+        val items = buildFlatChatItems(
+            listOf(assistant(streaming = true, blocks = listOf(thinking(), tool(status = ToolBlockStatus.RUNNING), text()))),
+            showCompletedToolCards = false,
+            foldAiProcess = true,
+        )
+        val k = kinds(items)
+        assertFalse(k.contains("summary"))
+        assertTrue(k.contains("thinking"))
+        assertTrue(k.contains("tool:bash"))
+        assertTrue(k.contains("md"))
+    }
+
+    @Test
+    fun `tap expand restores thinking and completed tools`() {
+        val items = buildFlatChatItems(
+            listOf(assistant(blocks = listOf(thinking(), tool(), text()))),
+            showCompletedToolCards = false,
+            foldAiProcess = true,
+            expandedProcessIds = setOf("m1"),
+        )
+        val k = kinds(items)
+        assertTrue(k.contains("summary"))
+        assertTrue(k.contains("thinking"))
+        assertTrue(k.contains("tool:bash"))
+        assertTrue(k.contains("md"))
+        assertTrue(items.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single().expanded)
+    }
+
+    @Test
+    fun `ask_user_question stays visible while process is folded`() {
+        val items = buildFlatChatItems(
+            listOf(
+                assistant(
+                    blocks = listOf(
+                        thinking(),
+                        tool(id = "q", name = "ask_user_question", status = ToolBlockStatus.RUNNING),
+                        tool(),
+                        text(),
+                    ),
+                ),
+            ),
+            showCompletedToolCards = false,
+            foldAiProcess = true,
+        )
+        val k = kinds(items)
+        assertTrue(k.contains("summary"))
+        assertTrue(k.contains("tool:ask_user_question"))
+        assertFalse(k.contains("tool:bash"))
+        assertFalse(k.contains("thinking"))
+        assertTrue(k.contains("md"))
+    }
+
+    @Test
+    fun `system info rows are not folded`() {
+        val items = buildFlatChatItems(
+            listOf(
+                assistant(
+                    role = "system",
+                    blocks = listOf(AssistantBlock(id = "i1", kind = "info", content = "note")),
+                ),
+            ),
+            foldAiProcess = true,
+        )
+        val k = kinds(items)
+        assertFalse(k.contains("summary"))
+        assertTrue(k.contains("info"))
+    }
+
+    @Test
+    fun `failed tool is flagged on the summary`() {
+        val items = buildFlatChatItems(
+            listOf(assistant(blocks = listOf(tool(status = ToolBlockStatus.FAILED)))),
+            foldAiProcess = true,
+        )
+        val summary = items.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single()
+        assertTrue(summary.hasFailure)
+        assertEquals(1, summary.toolCount)
+        assertEquals(0, summary.thinkingCount)
+    }
+}

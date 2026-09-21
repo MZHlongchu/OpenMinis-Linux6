@@ -2289,6 +2289,7 @@ fun ChatScreen(
     var toolPreviewEnabled by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_TOOL_PREVIEW, true)) }
     var showFloatingToolBar by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_FLOATING_TOOL_BAR, true)) }
     var showCompletedToolCards by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS, false)) }
+    var foldAiProcess by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS, false)) }
     var showSubAgentBar by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_SUBAGENT_BAR, true)) }
     var showPlanBanner by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_PLAN_BANNER, false)) }
     // T-chat-title-pill: live-toggled by Settings → Appearance and by
@@ -2307,6 +2308,7 @@ fun ChatScreen(
                 com.openminis.app.ui.settings.KEY_TOOL_PREVIEW -> toolPreviewEnabled = sp.getBoolean(key, true)
                 com.openminis.app.ui.settings.KEY_SHOW_FLOATING_TOOL_BAR -> showFloatingToolBar = sp.getBoolean(key, true)
                 com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS -> showCompletedToolCards = sp.getBoolean(key, false)
+                com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS -> foldAiProcess = sp.getBoolean(key, false)
                 com.openminis.app.ui.settings.KEY_SHOW_SUBAGENT_BAR -> showSubAgentBar = sp.getBoolean(key, true)
                 com.openminis.app.ui.settings.KEY_SHOW_PLAN_BANNER -> showPlanBanner = sp.getBoolean(key, false)
                 com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE -> showChatTitlePill = sp.getBoolean(key, true)
@@ -3394,7 +3396,8 @@ fun ChatScreen(
                 // scope. The flatten still runs per token (cheap-ish; ran
                 // before too), but the rebuild stays off the main UI
                 // composable's invalidation list.
-                LaunchedEffect(messages, sessionId, showCompletedToolCards) {
+                var expandedProcessIds by remember(sessionId) { mutableStateOf(emptySet<String>()) }
+                LaunchedEffect(messages, sessionId, showCompletedToolCards, foldAiProcess, expandedProcessIds) {
                     // [T-android-stream-pipeline-incremental] Frozen/live split.
                     //
                     // `messages` is CONSTANT within this effect (the effect is
@@ -3482,7 +3485,13 @@ fun ChatScreen(
                                     // threw ConcurrentModificationException from
                                     // a later frame's SubList.equals. Copying
                                     // severs the view so it can't comodify.
-                                    buildFlatChatItems(msgs.take(splitIdx), sessionId, showCompletedToolCards = showCompletedToolCards)
+                                    buildFlatChatItems(
+                                        msgs.take(splitIdx),
+                                        sessionId,
+                                        showCompletedToolCards = showCompletedToolCards,
+                                        foldAiProcess = foldAiProcess,
+                                        expandedProcessIds = expandedProcessIds,
+                                    )
                                 }
                                 val buildMs = (System.nanoTime() - tBuildStart) / 1_000_000
                                 frozenRows = rows
@@ -3560,7 +3569,15 @@ fun ChatScreen(
                             } else {
                                 withContext(Dispatchers.Default) {
                                     val merged = mergeStreamingOverlay(msgs, stream)
-                                    buildFlatChatItems(merged, null, fromIndex = splitIdx, seedKeys = frozenKeys, showCompletedToolCards = showCompletedToolCards)
+                                    buildFlatChatItems(
+                                        merged,
+                                        null,
+                                        fromIndex = splitIdx,
+                                        seedKeys = frozenKeys,
+                                        showCompletedToolCards = showCompletedToolCards,
+                                        foldAiProcess = foldAiProcess,
+                                        expandedProcessIds = expandedProcessIds,
+                                    )
                                 }
                             }
                             flatItems = if (liveRows.isEmpty()) frozenRows else frozenRows + liveRows
@@ -3674,6 +3691,7 @@ fun ChatScreen(
                     is FlatChatItem.AssistantText -> grayedMap[originalMessageId(messageId)] == true
                     is FlatChatItem.AssistantMarkdownBlock -> grayedMap[originalMessageId(messageId)] == true
                     is FlatChatItem.AssistantThinking -> grayedMap[originalMessageId(messageId)] == true
+                    is FlatChatItem.AssistantProcessSummary -> grayedMap[originalMessageId(messageId)] == true
                     is FlatChatItem.AssistantToolUse -> grayedMap[originalMessageId(messageId)] == true
                     is FlatChatItem.AssistantInfo -> false  // system rows never grayed
                     is FlatChatItem.AssistantTyping -> false
@@ -4195,6 +4213,20 @@ fun ChatScreen(
                                     )
                                 }
                             }
+                            is FlatChatItem.AssistantProcessSummary -> ProcessSummaryBar(
+                                thinkingCount = item.thinkingCount,
+                                toolCount = item.toolCount,
+                                expanded = item.expanded,
+                                hasFailure = item.hasFailure,
+                                onToggle = {
+                                    val id = originalMessageId(item.messageId)
+                                    expandedProcessIds = if (id in expandedProcessIds) {
+                                        expandedProcessIds - id
+                                    } else {
+                                        expandedProcessIds + id
+                                    }
+                                },
+                            )
                             is FlatChatItem.AssistantThinking -> {
                                 // T300: hide Deep Thinking block when the user
                                 // currently has thinking turned off — even if
