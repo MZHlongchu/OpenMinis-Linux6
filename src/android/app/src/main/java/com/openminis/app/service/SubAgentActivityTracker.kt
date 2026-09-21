@@ -28,6 +28,7 @@ object SubAgentActivityTracker {
         val turnIndex: Int = 0,
         val turnCap: Int = 0,
         val currentTool: String = "",
+        val transcript: String = "",
     )
 
     private val _members = MutableStateFlow<List<Member>>(emptyList())
@@ -89,6 +90,44 @@ object SubAgentActivityTracker {
         val status = if (success) Status.SUCCESS else Status.FAILED
         _members.value = _members.value.map { m ->
             if (m.id == id) m.copy(status = status, error = error) else m
+        }
+    }
+
+    fun appendLog(id: String, line: String) {
+        if (line.isBlank()) return
+        synchronized(this) {
+            _members.value = _members.value.map { m ->
+                if (m.id != id) m else {
+                    val next = if (m.transcript.isEmpty()) line else m.transcript + "\n" + line
+                    val clipped = if (next.length > 40_000) next.takeLast(32_000) else next
+                    m.copy(transcript = clipped)
+                }
+            }
+        }
+    }
+
+    fun combinedTranscript(parentSessionId: String): String {
+        val list = membersFor(parentSessionId)
+        if (list.isEmpty()) return ""
+        if (list.size == 1) {
+            val m = list.first()
+            val body = m.transcript.ifBlank { m.lastStep }
+            return if (m.error.isNullOrBlank()) body else body.trimEnd() + "\nerror: ${m.error}"
+        }
+        return list.joinToString("\n\n") { m ->
+            buildString {
+                append("## ")
+                if (m.index > 0 && m.total > 0) append("子代理 ${m.index}/${m.total}")
+                else append(m.title)
+                m.kind?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
+                append(" · ").append(m.status.name.lowercase())
+                append('\n')
+                val body = m.transcript.ifBlank { m.lastStep }
+                if (body.isNotBlank()) append(body.trimEnd())
+                m.error?.takeIf { it.isNotBlank() }?.let {
+                    append("\nerror: ").append(it)
+                }
+            }
         }
     }
 

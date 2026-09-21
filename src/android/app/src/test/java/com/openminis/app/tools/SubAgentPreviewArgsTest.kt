@@ -21,4 +21,21 @@ class SubAgentPreviewArgsTest {
         assertEquals(80, preview.length)
         assertTrue(preview.all { it == 'c' })
     }
+
+    @Test
+    fun composeOutputPutsTraceBeforeReport() {
+        val out = SubAgentRunner.composeOutput(
+            report = "found 2 files",
+            timeline = "- turn 1: file_read `/tmp/a`\n  → hello",
+        )
+        assertTrue(out.startsWith("## Trace"))
+        assertTrue(out.contains("## Report"))
+        assertTrue(out.contains("found 2 files"))
+        assertTrue(out.indexOf("## Trace") < out.indexOf("## Report"))
+    }
+
+    @Test
+    fun composeOutputEmptyFallback() {
+        assertEquals("(sub-agent finished with empty output)", SubAgentRunner.composeOutput("", ""))
+    }
 }

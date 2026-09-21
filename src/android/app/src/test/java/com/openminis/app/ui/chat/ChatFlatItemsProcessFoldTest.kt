@@ -95,15 +95,32 @@ class ChatFlatItemsProcessFoldTest {
     }
 
     @Test
-    fun `fold on streaming leaves process expanded`() {
+    fun `fold on live thinking stays expanded until a later block arrives`() {
         val items = buildFlatChatItems(
-            listOf(assistant(streaming = true, blocks = listOf(thinking(), tool(status = ToolBlockStatus.RUNNING), text()))),
+            listOf(assistant(streaming = true, blocks = listOf(thinking()))),
             showCompletedToolCards = false,
             foldAiProcess = true,
         )
         val k = kinds(items)
         assertFalse(k.contains("summary"))
         assertTrue(k.contains("thinking"))
+    }
+
+    @Test
+    fun `fold on streaming collapses finished thinking while current tool stays`() {
+        val items = buildFlatChatItems(
+            listOf(
+                assistant(
+                    streaming = true,
+                    blocks = listOf(thinking(), tool(status = ToolBlockStatus.RUNNING), text()),
+                ),
+            ),
+            showCompletedToolCards = false,
+            foldAiProcess = true,
+        )
+        val k = kinds(items)
+        assertTrue(k.contains("summary"))
+        assertFalse(k.contains("thinking"))
         assertTrue(k.contains("tool:bash"))
         assertTrue(k.contains("md"))
     }
@@ -177,16 +194,17 @@ class ChatFlatItemsProcessFoldTest {
     }
 
     @Test
-    fun `fold on awaiting leaves process expanded`() {
+    fun `fold on awaiting collapses completed process`() {
         val items = buildFlatChatItems(
             listOf(assistant(awaiting = true, blocks = listOf(thinking(), tool(), text()))),
             showCompletedToolCards = false,
             foldAiProcess = true,
         )
         val k = kinds(items)
-        assertFalse(k.contains("summary"))
-        assertTrue(k.contains("thinking"))
-        assertTrue(k.contains("tool:bash"))
+        assertTrue(k.contains("summary"))
+        assertFalse(k.contains("thinking"))
+        assertFalse(k.contains("tool:bash"))
+        assertTrue(k.contains("md"))
     }
 
     @Test
@@ -197,5 +215,29 @@ class ChatFlatItemsProcessFoldTest {
         assertFalse(isFloatingProcessTool(done, foldAiProcess = true))
         assertTrue(isFloatingProcessTool(running, foldAiProcess = true))
         assertFalse(isFloatingProcessTool(thinking(), foldAiProcess = false))
+    }
+
+    @Test
+    fun `folded summary still exposes tool chips for detail`() {
+        val items = buildFlatChatItems(
+            listOf(assistant(blocks = listOf(thinking(), tool(id = "tool1", name = "bash"), text()))),
+            foldAiProcess = true,
+        )
+        val summary = items.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single()
+        assertEquals(1, summary.processTools.size)
+        assertEquals("tool1", summary.processTools.single().id)
+        assertEquals("bash", summary.processTools.single().title)
+    }
+
+    @Test
+    fun `detail sheet helper keeps completed tools when fold hides overlay`() {
+        val done = tool(id = "done1", status = ToolBlockStatus.SUCCESS)
+        val running = tool(id = "run1", status = ToolBlockStatus.RUNNING)
+        val msgs = listOf(assistant(blocks = listOf(thinking(), done, running, text())))
+        val all = assistantToolUseBlocks(msgs)
+        assertEquals(listOf("done1", "run1"), all.map { it.id })
+        assertTrue(isDetailProcessTool(done))
+        assertFalse(isFloatingProcessTool(done, foldAiProcess = true))
+        assertTrue(isFloatingProcessTool(running, foldAiProcess = true))
     }
 }

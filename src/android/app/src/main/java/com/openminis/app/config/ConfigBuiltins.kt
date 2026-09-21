@@ -369,7 +369,7 @@ internal object ConfigBuiltins {
             PrefsBoolField(
                 path = "chat.foldAiProcess",
                 displayName = "Fold AI process",
-                description = "When ON, finished thinking and tool cards collapse into a thinking-style summary. In-flight tools still show on the overlay. Default OFF.",
+                description = "When ON, finished thinking and tool cards collapse into a thinking-style summary as soon as they complete — not after the whole reply. In-flight thinking stays expanded; in-flight tools still show on the overlay. Default OFF.",
                 prefs = appearancePrefs,
                 key = com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS,
                 defaultValue = false,

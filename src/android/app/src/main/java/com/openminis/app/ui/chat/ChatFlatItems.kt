@@ -178,6 +178,7 @@ internal sealed class FlatChatItem {
         val toolCount: Int,
         val expanded: Boolean,
         val hasFailure: Boolean,
+        val processTools: List<ProcessToolRef> = emptyList(),
     ) : FlatChatItem() {
         override val key = "process:$messageId"
         override val contentType = "process"
@@ -392,12 +393,20 @@ internal fun buildFlatChatItems(
         val thinkingCount = blocks.count { it.kind == "thinking" }
         val toolCount = blocks.count { it.kind == "tool_use" }
         val processExpanded = message.id in expandedProcessIds
-        // Streaming AND the post-tool "awaiting next model chunk" gap stay
-        // expanded (no summary). Finished turns collapse into the
-        // thinking-block-style summary unless the user tapped it open.
-        val turnLive = message.isStreaming || message.isAwaitingModelResponse
-        val showProcessSummary = foldAiProcess && !isSystem && !turnLive &&
-            (thinkingCount > 0 || toolCount > 0)
+        // Fold completed thinking/tools as soon as they finish — even while
+        // the turn is still live. Only the currently streaming thinking
+        // block (last block overall) and in-flight tools stay expanded.
+        // Waiting for the whole turn / tool-loop to end was the old gate.
+        val liveThinkingId = liveThinkingBlockId(message.isStreaming, blocks)
+        val hasFoldableProcess = blocks.any { block ->
+            when (block.kind) {
+                "thinking" -> block.id != liveThinkingId
+                "tool_use" -> !isAlwaysVisibleProcessTool(block) &&
+                    !isInFlightProcessTool(block)
+                else -> false
+            }
+        }
+        val showProcessSummary = foldAiProcess && !isSystem && hasFoldableProcess
         if (showProcessSummary) {
             out.add(dedupe(FlatChatItem.AssistantProcessSummary(
                 messageId = message.id,
@@ -407,6 +416,7 @@ internal fun buildFlatChatItems(
                 hasFailure = blocks.any {
                     it.kind == "tool_use" && it.toolStatus == ToolBlockStatus.FAILED
                 },
+                processTools = processToolRefs(blocks),
             )))
         }
 
@@ -497,7 +507,7 @@ internal fun buildFlatChatItems(
                     }
                 }
                 "thinking" -> {
-                    if (!showProcessSummary || processExpanded) {
+                    if (!showProcessSummary || processExpanded || block.id == liveThinkingId) {
                         out.add(dedupe(FlatChatItem.AssistantThinking(
                             messageId = message.id,
                             block = block,
@@ -594,7 +604,11 @@ internal fun shouldShowProcessToolRow(
     processExpanded: Boolean,
 ): Boolean {
     if (isAlwaysVisibleProcessTool(block)) return true
-    if (showProcessSummary) return processExpanded
+    if (showProcessSummary) {
+        if (processExpanded) return shouldShowToolUseRow(block, showCompletedToolCards)
+        // Keep the in-progress tool visible; completed ones live in the summary.
+        return isInFlightProcessTool(block)
+    }
     return shouldShowToolUseRow(block, showCompletedToolCards)
 }
 
@@ -604,15 +618,56 @@ private val IN_FLIGHT_PROCESS_TOOL_STATUSES = setOf(
     ToolBlockStatus.RUNNING,
 )
 
+internal fun isInFlightProcessTool(block: AssistantBlock): Boolean =
+    block.kind == "tool_use" && block.toolStatus in IN_FLIGHT_PROCESS_TOOL_STATUSES
+
+internal fun liveThinkingBlockId(isStreaming: Boolean, blocks: List<AssistantBlock>): String? {
+    if (!isStreaming) return null
+    val last = blocks.lastOrNull() ?: return null
+    return if (last.kind == "thinking") last.id else null
+}
+
+/** Compact identity for a folded process-summary chip. */
+internal data class ProcessToolRef(
+    val id: String,
+    val title: String,
+    val status: ToolBlockStatus?,
+)
+
+internal fun processToolRefs(blocks: List<AssistantBlock>): List<ProcessToolRef> =
+    blocks.filter { it.kind == "tool_use" }.map { block ->
+        ProcessToolRef(
+            id = block.id,
+            title = block.toolTitle.ifEmpty { block.toolName }.ifEmpty { "tool" },
+            status = block.toolStatus,
+        )
+    }
+
+/** Tool-use rows that belong in the detail sheet (completed or live). */
+internal fun isDetailProcessTool(block: AssistantBlock): Boolean {
+    if (block.toolStatus == null) return false
+    if (block.kind == "thinking" || block.kind == "info") return false
+    return true
+}
+
+internal fun assistantToolUseBlocks(messages: List<ChatMessage>): List<AssistantBlock> =
+    messages.asSequence()
+        .filter { it.role == "assistant" }
+        .flatMap { it.toolBlocks.asSequence() }
+        .filter(::isDetailProcessTool)
+        .toList()
+
 /**
  * Whether [block] belongs on the floating tool overlay. When
  * [foldAiProcess] is on, completed tools fold into the in-list summary
  * and must not linger as a second "computer" strip — that was why the
  * Appearance switch looked like a no-op.
+ *
+ * The overlay subset is *not* the source of truth for ToolDetailSheet:
+ * completed tools must remain openable after they leave the overlay.
  */
 internal fun isFloatingProcessTool(block: AssistantBlock, foldAiProcess: Boolean): Boolean {
-    if (block.toolStatus == null) return false
-    if (block.kind == "thinking" || block.kind == "info") return false
+    if (!isDetailProcessTool(block)) return false
     if (foldAiProcess && block.toolStatus !in IN_FLIGHT_PROCESS_TOOL_STATUSES) return false
     return true
 }

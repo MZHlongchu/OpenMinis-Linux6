@@ -4247,6 +4247,8 @@ fun ChatScreen(
                                 toolCount = item.toolCount,
                                 expanded = item.expanded,
                                 hasFailure = item.hasFailure,
+                                processTools = item.processTools,
+                                onOpenTool = { viewModel.openToolDetail(it) },
                                 onToggle = {
                                     val id = originalMessageId(item.messageId)
                                     expandedProcessIds = if (id in expandedProcessIds) {
@@ -4499,18 +4501,20 @@ fun ChatScreen(
                 // never opens (and its sentinel LaunchedEffect immediately
                 // closes the detail state because the id "doesn't exist").
                 var lastToolBlocks by remember { mutableStateOf<List<AssistantBlock>>(emptyList()) }
+                var detailToolBlocks by remember { mutableStateOf<List<AssistantBlock>>(emptyList()) }
                 LaunchedEffect(messages, foldAiProcess) {
                     kotlinx.coroutines.flow.combine(
                         kotlinx.coroutines.flow.flowOf(messages),
                         viewModel.streamingById,
                     ) { msgs, stream ->
                         val merged = if (stream.isEmpty()) msgs else mergeStreamingOverlay(msgs, stream)
-                        merged.filter { it.role == "assistant" }
-                            .flatMap { it.toolBlocks }
-                            .filter { isFloatingProcessTool(it, foldAiProcess) }
-                    }.collect { lastToolBlocks = it }
+                        val all = assistantToolUseBlocks(merged)
+                        all to all.filter { isFloatingProcessTool(it, foldAiProcess) }
+                    }.collect { (all, overlay) ->
+                        detailToolBlocks = all
+                        lastToolBlocks = overlay
+                    }
                 }
-                val allToolBlocks = lastToolBlocks
                 if (showFloatingToolBar && lastToolBlocks.isNotEmpty()) {
                     Box(
                         modifier = Modifier
@@ -4593,22 +4597,23 @@ fun ChatScreen(
                 // pill-disposal / new-tool emissions can't snap it shut.
                 // existence guard auto-closes the sheet when the underlying
                 // block disappears (T258 retry-preserve removes in-flight
-                // tools, clearChat, etc.). Reuses lastToolBlocks (already
-                // computed above) so we don't traverse messages twice.
+                // tools, clearChat, etc.). Uses detailToolBlocks (all tool_use
+                // rows, including folded completed ones) so opening a chip
+                // after foldAiProcess collapses the overlay still works.
                 val selectedToolDetailId by viewModel.selectedToolDetailId.collectAsState()
-                LaunchedEffect(selectedToolDetailId, lastToolBlocks) {
+                LaunchedEffect(selectedToolDetailId, detailToolBlocks) {
                     val id = selectedToolDetailId ?: return@LaunchedEffect
-                    if (lastToolBlocks.none { it.id == id }) viewModel.closeToolDetail()
+                    if (detailToolBlocks.none { it.id == id }) viewModel.closeToolDetail()
                 }
                 val selectedToolBlock = selectedToolDetailId?.let { id ->
-                    lastToolBlocks.firstOrNull { it.id == id }
+                    detailToolBlocks.firstOrNull { it.id == id }
                 }
                 if (selectedToolBlock != null) {
-                    val initialIdx = lastToolBlocks
+                    val initialIdx = detailToolBlocks
                         .indexOfFirst { it.id == selectedToolBlock.id }
                         .coerceAtLeast(0)
                     ToolDetailSheet(
-                        toolBlocks = lastToolBlocks,
+                        toolBlocks = detailToolBlocks,
                         initialIndex = initialIdx,
                         onDismiss = { viewModel.closeToolDetail() },
                         onOpenTerminalWithCommand = onOpenTerminalWithCommand,

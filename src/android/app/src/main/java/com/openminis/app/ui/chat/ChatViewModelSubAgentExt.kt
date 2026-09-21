@@ -361,28 +361,28 @@ private suspend fun ChatViewModel.runOneSubAgent(
                 }
                 val attemptResult: ToolExecutionResult? = try {
             withContext(SubAgentLane(laneId)) {
-            val liveLog = StringBuilder()
             var lastUiMs = 0L
-            val publishLive = total == 1
             suspend fun onStep(turn: Int, toolName: String) {
                 com.openminis.app.service.SubAgentActivityTracker.updateProgress(
                     trackerId, turn, maxTurns, toolName,
                 )
-                val clipped = buildString {
-                    append("turn $turn/$maxTurns")
-                    if (toolName.isNotBlank()) append(" · $toolName")
-                }
-                liveLog.append(clipped).append('\n')
-                if (liveLog.length > 24_000) {
-                    liveLog.delete(0, liveLog.length - 20_000)
+                if (toolName.isNotBlank()) {
+                    com.openminis.app.service.SubAgentActivityTracker.appendLog(
+                        trackerId,
+                        "turn $turn/$maxTurns · $toolName",
+                    )
                 }
                 val now = System.currentTimeMillis()
                 val important = toolName.isNotBlank()
                 if (!important && now - lastUiMs < 250L) return
                 lastUiMs = now
-                if (publishLive) {
-                    publishRunSubagentLog(toolId, assistantId, currentText, toolBlocks, liveLog.toString())
-                }
+                publishRunSubagentLog(
+                    toolId,
+                    assistantId,
+                    currentText,
+                    toolBlocks,
+                    com.openminis.app.service.SubAgentActivityTracker.combinedTranscript(parentSession),
+                )
             }
             val result = com.openminis.app.tools.WritePathGuard.withPaths(writePaths) {
                 SubAgentRunner.run(
@@ -431,14 +431,17 @@ private suspend fun ChatViewModel.runOneSubAgent(
                     maxTurns = maxTurns,
                 )
             }
-            val uiLog = if (liveLog.isNotEmpty()) {
-                liveLog.toString().trimEnd() + "\n---\n" + result.output
-            } else {
-                result.output
-            }
-            if (publishLive) {
-                publishRunSubagentLog(toolId, assistantId, currentText, toolBlocks, uiLog)
-            }
+            com.openminis.app.service.SubAgentActivityTracker.appendLog(
+                trackerId,
+                "---\n" + result.output,
+            )
+            publishRunSubagentLog(
+                toolId,
+                assistantId,
+                currentText,
+                toolBlocks,
+                com.openminis.app.service.SubAgentActivityTracker.combinedTranscript(parentSession),
+            )
             com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, result.success)
             result.copy(toolTitle = title.ifEmpty { "Sub-agent · ${entry.model.displayName}" })
             }

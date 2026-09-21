@@ -52,4 +52,43 @@ class SubAgentActivityTrackerTest {
         assertEquals("boom", SubAgentActivityTracker.membersFor("s3").first().error)
         SubAgentActivityTracker.clearSession("s3")
     }
+
+    @Test
+    fun appendLogAndCombinedTranscriptCoverBatchAndSingle() {
+        SubAgentActivityTracker.clearSession("s4")
+        val a = SubAgentActivityTracker.start(
+            parentSessionId = "s4",
+            title = "A",
+            role = "worker",
+            model = "gpt",
+            index = 1,
+            total = 2,
+            kind = "explore",
+        )
+        val b = SubAgentActivityTracker.start(
+            parentSessionId = "s4",
+            title = "B",
+            role = "worker",
+            model = "gpt",
+            index = 2,
+            total = 2,
+            kind = "worker",
+        )
+        SubAgentActivityTracker.appendLog(a, "turn 1/40 · file_read · src/Foo.kt")
+        SubAgentActivityTracker.appendLog(b, "turn 1/40 · grep · TODO")
+        val combined = SubAgentActivityTracker.combinedTranscript("s4")
+        assertTrue(combined.contains("子代理 1/2"))
+        assertTrue(combined.contains("file_read"))
+        assertTrue(combined.contains("子代理 2/2"))
+        assertTrue(combined.contains("grep"))
+        assertEquals("turn 1/40 · file_read · src/Foo.kt", SubAgentActivityTracker.membersFor("s4").first { it.id == a }.transcript)
+        SubAgentActivityTracker.clearSession("s4")
+        SubAgentActivityTracker.clearSession("s5")
+        val one = SubAgentActivityTracker.start("s5", "solo", "worker", "gpt")
+        SubAgentActivityTracker.appendLog(one, "turn 2/10 · done")
+        val solo = SubAgentActivityTracker.combinedTranscript("s5")
+        assertEquals("turn 2/10 · done", solo)
+        assertFalse(solo.contains("## "))
+        SubAgentActivityTracker.clearSession("s5")
+    }
 }

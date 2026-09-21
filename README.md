@@ -6,7 +6,7 @@
 
 **端侧私人 AI Agent。** 把 Claude、GPT、Gemini 等模型接到手机里的一台真 Linux：Ubuntu 24.04 沙箱、浏览器自动化、技能与记忆、多智能体调度。
 
-本仓库是 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 **Linux 沙箱 Android 分支**。启动器名称 **Minis Ultra**，包名 `com.openminis.linux`，可与官方 OpenMinis **并排安装**。当前 **1.36.10-linux**（versionCode 63）。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。
+本仓库是 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 **Linux 沙箱 Android 分支**。启动器名称 **Minis Ultra**，包名 `com.openminis.linux`，可与官方 OpenMinis **并排安装**。当前 **1.36.11-linux**（versionCode 64）。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。
 
 ## 仓库介绍
 
@@ -14,15 +14,20 @@
 - **模型参数自动补全（1.36.1）**：先查 models.dev（去厂商前缀、统一大小写和 `./_` → `-`，再按精确 ID → 归一化 ID → 全库多数票），没有的洞用 DataLearner 补，中转站脏名（如 `GPT-6免费` / `免费GPT-6 Astra`）按命中最多的字匹配。目录和家族都认不出的 id 默认 **256k 上下文 / 128k 输出 / 开启思考（最高 max）/ 文本模态**。
 - **多智能体**：主会话当协调者，设置 → 多智能体（`minis://settings/multi-agent`）。
 - **签名与国内编译**：[docs/SIGNING.md](docs/SIGNING.md)、[docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)（切勿覆盖 aarch64 aapt2）。
+- **1.36.11**：长会话人格不被历史盖过；AI 过程折叠改为完成后立刻收起且仍能点开工具详情；子代理运行中可看日志；人格页一级返回自动保存身份。
 - **1.36.10**：人格提示词显示文件名、点进二级页编辑；可导入 .md/.txt 到私有目录并用下拉选择；不同供应商可绑不同提示词。
 - **中文发行说明**：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ## 下载
 
-- **本版发行包（1.36.10-linux / versionCode 63）**：[Releases `1.36.10-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.10-linux) → `minis-ultra-com.openminis.linux.apk`
+- **本版发行包（1.36.11-linux / versionCode 64）**：[Releases `1.36.11-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.11-linux) → `minis-ultra-com.openminis.linux.apk`
 - **滚动构建**：[Releases `android-latest`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest)（main 每次成功构建都会覆盖）
 
 侧载前允许「安装未知应用」。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本，见 [docs/SIGNING.md](docs/SIGNING.md)。
+
+### 1.36.11 要点
+
+有人格的已有会话不会再被早期回复的口吻拖走；「AI 过程折叠」改为思考/工具一完成就收，折叠后仍能点开工具详情；子代理运行中可看实时日志，结束输出 Trace / Report；人格页一级去掉保存按钮，返回时自动写身份。完整说明：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ### 1.36.10 要点
 
@@ -146,7 +151,7 @@ Official website: **[openminis.app](https://openminis.app)**
   <img alt="Download on the App Store" height="48" src="assets/badge-appstore.svg" />
 </a>
 &nbsp;
-<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.10-linux">
+<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.11-linux">
   <img alt="Get the APK on GitHub" height="48" src="assets/badge-android.svg" />
 </a>
 

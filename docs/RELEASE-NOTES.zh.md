@@ -1,3 +1,22 @@
+# OpenMinis-Linux 1.36.11-linux
+
+- versionCode **64**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.10-linux：
+
+- **已有会话人格纠偏**：系统提示写明更早的回复可能是旧人设；有人格时只在发给模型的最近一条用户文本前加 `<persona-binding>`（不入库）；压缩摘要注明以当前人格为准。新会话第一句不加。
+- **AI 过程折叠改为增量收起**：思考或工具一完成就收进摘要，不必等整段回复结束；只有正在跑的工具还展开。折叠后摘要上可点子芯片打开工具详情（详情页不再跟悬浮条共用「只含进行中」列表）。开关仍默认关。
+- **子代理**：顶栏芯片运行中可点看实时日志；批量 spawn 也会把各子代理日志写进工具块；结束后输出 `## Trace` + `## Report`。
+- **人格设置一级页**：去掉保存按钮。提示词切换即保存；名称 / 风格 / 图标、恢复默认在返回时自动保存。二级编辑页仍保留保存。
+
+---
+
 # OpenMinis-Linux 1.36.10-linux
 
 - versionCode **63**

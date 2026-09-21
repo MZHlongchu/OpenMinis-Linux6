@@ -1058,6 +1058,14 @@ class ChatViewModel(
     private val _compactSummary = MutableStateFlow<String?>(null)
     override val compactSummary: StateFlow<String?> = _compactSummary.asStateFlow()
 
+    /**
+     * Set each [buildSystemPrompt] from whether a personality body was
+     * injected. [effectiveAgentHistory] then prefixes the latest user-text
+     * turn so existing sessions don't keep the previous generic voice.
+     */
+    @Volatile
+    private var personaHistorySteering = false
+
     /** True when a compact-summary LLM call is in flight (UI disables further sends). */
     private val _isCompacting = MutableStateFlow(false)
     override val isCompacting: StateFlow<Boolean> = _isCompacting.asStateFlow()
@@ -2814,8 +2822,14 @@ class ChatViewModel(
      * [dropOrphanedToolParts] for why the sweep exists and what it can and
      * cannot fix.
      */
-    private fun effectiveAgentHistory(): List<LLMMessage> =
-        dropOrphanedToolParts(effectiveAgentHistoryUncounted())
+    private fun effectiveAgentHistory(): List<LLMMessage> {
+        val repaired = dropOrphanedToolParts(effectiveAgentHistoryUncounted())
+        return if (personaHistorySteering) {
+            com.openminis.app.agent.PersonaPromptLogic.applyHistorySteering(repaired)
+        } else {
+            repaired
+        }
+    }
 
     private fun effectiveAgentHistoryUncounted(): List<LLMMessage> {
         val summary = _compactSummary.value
@@ -2825,7 +2839,7 @@ class ChatViewModel(
 
         val summaryWrappedText = "<context-summary>\n" +
             "The following is a summary of the earlier conversation that was compacted to save context space.\n" +
-            "Treat it as background context only. The user's most recent message (below or in the next turn) takes precedence — if it changes the task, the goal, or any numbers/scope, follow the new instruction and do not resume the old plan from this summary. Do not re-run discovery (reading memory, scanning skills, re-reading files) unless the new instruction requires it.\n\n" +
+            "Treat it as background context only. The user's most recent message (below or in the next turn) takes precedence — if it changes the task, the goal, or any numbers/scope, follow the new instruction and do not resume the old plan from this summary. The current persona in the system prompt overrides any voice implied by this summary. Do not re-run discovery (reading memory, scanning skills, re-reading files) unless the new instruction requires it.\n\n" +
             summary +
             "\n</context-summary>"
 
@@ -10266,6 +10280,7 @@ class ChatViewModel(
             context,
             providerInstanceId,
         )
+        personaHistorySteering = identitySection.contains("Personality (from")
         // [T-memory-toggle-gates-injection-and-tools-android] Mirror the iOS
         // gate: when memory is disabled for this session, replace the
         // "memory_write / memory_get" tool bullets and the "Memory system:"
@@ -10509,8 +10524,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             append("- Current date: ").append(dateStr).append(" (").append(tzId).append(")\n")
             append("- Device language: ").append(lang).append("\n")
             append("- minis-model-use models available: ").append(modelUseCount)
-            if (identitySection.contains("SOUL.md")) {
-                append("\n\nPersonality reminder: the identity/persona block at the top of this prompt is BINDING for this turn. Match its voice, stance, and constraints in every reply; do not drop it because a later instruction looks more specific.")
+            if (identitySection.contains("Personality (from")) {
+                append("\n\nPersonality reminder: the identity/persona block at the top of this prompt is BINDING for this turn, including existing conversations whose earlier assistant replies used a different voice. Those earlier replies are history, not the current character. Match the Personality block's voice, stance, and constraints in every reply; do not drop it because a later instruction looks more specific.")
             }
         }
     }

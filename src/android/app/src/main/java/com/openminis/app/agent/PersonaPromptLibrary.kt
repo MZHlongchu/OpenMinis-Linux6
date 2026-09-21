@@ -3,6 +3,8 @@ package com.openminis.app.agent
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.openminis.app.data.model.AgentContentPart
+import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -138,6 +140,66 @@ object PersonaPromptLogic {
         if (mapped != null) return mapped
         if (normalized.selectedId in ids) return normalized.selectedId
         return BUILTIN_ID
+    }
+
+    const val HISTORY_STEERING_PREFIX = "<persona-binding>"
+    const val HISTORY_STEERING_SUFFIX = "</persona-binding>"
+
+    fun historySteeringBlock(): String =
+        "$HISTORY_STEERING_PREFIX\n" +
+            "The Personality block in the system prompt is BINDING for this turn. " +
+            "Earlier assistant replies in this conversation may predate that persona or use a generic voice — " +
+            "do not continue that voice. Stay in character unless the user explicitly asks you to leave it.\n" +
+            HISTORY_STEERING_SUFFIX
+
+    fun wrapUserTextWithHistorySteering(userText: String): String {
+        if (userText.contains(HISTORY_STEERING_PREFIX)) return userText
+        val block = historySteeringBlock()
+        return if (userText.isBlank()) block else "$block\n\n$userText"
+    }
+
+    fun isUserTextTurn(msg: LLMMessage): Boolean {
+        if (msg.role != LLMMessage.Role.USER) return false
+        val parts = msg.contentParts
+        if (parts.any { it is AgentContentPart.ToolUse }) return false
+        val hasToolResult = parts.any { it is AgentContentPart.ToolResult }
+        val hasText = msg.content.isNotBlank() ||
+            parts.any { it is AgentContentPart.Text && it.text.isNotBlank() }
+        if (hasToolResult && !hasText) return false
+        return hasText
+    }
+
+    /**
+     * Existing sessions already have assistant turns in a previous voice.
+     * Prefix the latest user-text turn (request-time only; never persist)
+     * so the persona sits next to the generation, not only at the top of
+     * a long system prompt.
+     */
+    fun applyHistorySteering(history: List<LLMMessage>): List<LLMMessage> {
+        if (history.none { it.role == LLMMessage.Role.ASSISTANT }) return history
+        val idx = history.indexOfLast { isUserTextTurn(it) }
+        if (idx < 0) return history
+        val msg = history[idx]
+        val already = msg.content.contains(HISTORY_STEERING_PREFIX) ||
+            msg.contentParts.any { it is AgentContentPart.Text && it.text.contains(HISTORY_STEERING_PREFIX) }
+        if (already) return history
+        val block = historySteeringBlock()
+        val newContent = wrapUserTextWithHistorySteering(msg.content)
+        val newParts = if (msg.contentParts.isEmpty()) {
+            emptyList()
+        } else {
+            var done = false
+            val mapped = msg.contentParts.map { part ->
+                if (!done && part is AgentContentPart.Text) {
+                    done = true
+                    AgentContentPart.Text(wrapUserTextWithHistorySteering(part.text))
+                } else {
+                    part
+                }
+            }
+            if (done) mapped else listOf(AgentContentPart.Text(block)) + mapped
+        }
+        return history.toMutableList().also { it[idx] = msg.copy(content = newContent, contentParts = newParts) }
     }
 }
 

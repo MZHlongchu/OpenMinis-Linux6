@@ -53,6 +53,7 @@ object SubAgentRunner {
         val turns = maxTurns.coerceIn(1, ABSOLUTE_MAX_TURNS)
         val system = workerSystemPrompt(modelDisplayName, role, skillsHint, kind, writePaths, turns, roleContext)
         val report = StringBuilder()
+        val timeline = StringBuilder()
         var warned = false
         var forced = false
 
@@ -89,8 +90,7 @@ object SubAgentRunner {
 
                 if (toolCalls.isEmpty()) {
                     runCatching { onStep(turn, "done") }
-                    val out = report.toString().ifBlank { text.ifBlank { "(sub-agent finished with empty output)" } }
-                    return ToolExecutionResult(truncate(out), true)
+                    return ToolExecutionResult(composeOutput(report.toString(), timeline.toString()), true)
                 }
 
                 val assistantParts = mutableListOf<AgentContentPart>()
@@ -109,6 +109,8 @@ object SubAgentRunner {
                 val resultParts = mutableListOf<AgentContentPart>()
                 for ((id, name, args) in toolCalls) {
                     if (SubAgentKind.isSpawnTool(name) || SubAgentKind.blocks(kind, name)) {
+                        runCatching { onStep(turn, "$name · blocked") }
+                        timeline.append("- turn $turn: $name (blocked)\n")
                         resultParts.add(
                             AgentContentPart.ToolResult(
                                 id = id,
@@ -120,7 +122,13 @@ object SubAgentRunner {
                         continue
                     }
                     val argsJson = args.toString()
-                    runCatching { onStep(turn, name) }
+                    val preview = previewToolArgs(argsJson)
+                    runCatching {
+                        onStep(turn, buildString {
+                            append(name)
+                            if (preview.isNotBlank()) append(" · ").append(preview)
+                        })
+                    }
                     val result = try {
                         executeTool(name, argsJson)
                     } catch (e: CancellationException) {
@@ -128,7 +136,15 @@ object SubAgentRunner {
                     } catch (e: Exception) {
                         ToolExecutionResult("Error: ${e.message ?: e.javaClass.simpleName}", false)
                     }
-                    runCatching { onStep(turn, name) }
+                    runCatching {
+                        onStep(turn, buildString {
+                            append(if (result.success) "ok" else "fail")
+                            append(' ').append(name)
+                            val snippet = result.output.replace('\n', ' ').trim().take(80)
+                            if (snippet.isNotEmpty()) append(" · ").append(snippet)
+                        })
+                    }
+                    appendTimeline(timeline, turn, name, preview, result)
                     resultParts.add(
                         AgentContentPart.ToolResult(
                             id = id,
@@ -182,24 +198,67 @@ object SubAgentRunner {
             // kept calling tools to the last turn). Hand back the accumulated
             // partial report instead of a bare "hit the cap" string.
             val partial = report.toString().trim()
-            val out = if (partial.isNotEmpty()) {
-                "$partial\n\n---\n(reached the $turns-turn budget — partial report above)"
+            val footer = if (partial.isNotEmpty()) {
+                "(reached the $turns-turn budget — partial report above)"
             } else {
                 "(sub-agent reached the $turns-turn budget with no findings to report)"
             }
-            return ToolExecutionResult(truncate(out), true)
+            return ToolExecutionResult(composeOutput(partial, timeline.toString(), footer), true)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            val prefix = report.toString().trim()
-            val msg = buildString {
-                if (prefix.isNotEmpty()) {
-                    append(prefix)
-                    append("\n\n")
-                }
-                append("Sub-agent failed: ${e.message ?: e.javaClass.simpleName}")
+            return ToolExecutionResult(
+                composeOutput(
+                    report.toString(),
+                    timeline.toString(),
+                    "Sub-agent failed: ${e.message ?: e.javaClass.simpleName}",
+                ),
+                false,
+            )
+        }
+    }
+
+    fun composeOutput(report: String, timeline: String, footer: String = ""): String {
+        val body = report.trim()
+        val trace = timeline.trim()
+        val note = footer.trim()
+        val composed = buildString {
+            if (trace.isNotEmpty()) {
+                append("## Trace\n")
+                append(trace)
             }
-            return ToolExecutionResult(truncate(msg), false)
+            if (body.isNotEmpty()) {
+                if (isNotEmpty()) append("\n\n")
+                append("## Report\n")
+                append(body)
+            }
+            if (note.isNotEmpty()) {
+                if (isNotEmpty()) append("\n\n")
+                append(note)
+            }
+            if (isEmpty()) append("(sub-agent finished with empty output)")
+        }
+        return truncate(composed)
+    }
+
+    private fun appendTimeline(
+        timeline: StringBuilder,
+        turn: Int,
+        name: String,
+        preview: String,
+        result: ToolExecutionResult,
+    ) {
+        timeline.append("- turn ").append(turn).append(": ").append(name)
+        if (preview.isNotBlank()) {
+            timeline.append(" `").append(preview.replace('`', '\'')).append("`")
+        }
+        timeline.append('\n')
+        val snippet = result.output.replace('\n', ' ').trim().take(160)
+        if (snippet.isNotEmpty()) {
+            timeline.append("  ")
+            if (!result.success) timeline.append("fail: ") else timeline.append("→ ")
+            timeline.append(snippet)
+            timeline.append('\n')
         }
     }
 

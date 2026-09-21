@@ -19,8 +19,11 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -891,6 +894,7 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun ProcessSummaryBar(
     thinkingCount: Int,
@@ -898,8 +902,11 @@ internal fun ProcessSummaryBar(
     expanded: Boolean,
     hasFailure: Boolean,
     onToggle: () -> Unit,
+    processTools: List<ProcessToolRef> = emptyList(),
+    onOpenTool: ((String) -> Unit)? = null,
 ) {
     val accent = if (hasFailure) Color(0xFFFF3B30) else Color(0xFF007AFF)
+    val showToolChips = !expanded && processTools.isNotEmpty() && onOpenTool != null
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -939,6 +946,36 @@ internal fun ProcessSummaryBar(
                 tint = accent.copy(alpha = 0.5f),
                 modifier = Modifier.size(14.dp),
             )
+        }
+        if (showToolChips) {
+            Spacer(modifier = Modifier.height(8.dp))
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                processTools.take(10).forEach { tool ->
+                    val chipColor = when (tool.status) {
+                        ToolBlockStatus.FAILED, ToolBlockStatus.TIMEOUT -> Color(0xFFFF3B30)
+                        ToolBlockStatus.CANCELLED -> Color(0xFF8E8E93)
+                        ToolBlockStatus.RUNNING, ToolBlockStatus.STREAMING, ToolBlockStatus.PENDING -> Color(0xFF007AFF)
+                        else -> accent
+                    }
+                    Text(
+                        text = tool.title,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = chipColor,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(chipColor.copy(alpha = 0.12f))
+                            .clickable { onOpenTool?.invoke(tool.id) }
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
+                }
+            }
         }
     }
 }

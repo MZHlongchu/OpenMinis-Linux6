@@ -1,7 +1,10 @@
 package com.openminis.app.agent
 
+import com.openminis.app.data.model.AgentContentPart
+import com.openminis.app.data.model.LLMMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -111,5 +114,56 @@ class PersonaPromptLibraryTest {
         assertEquals(PersonaPromptLogic.BUILTIN_ID, index.selectedId)
         assertTrue(index.providerSelections.isEmpty())
         assertEquals(1, index.prompts.size)
+    }
+
+    @Test
+    fun `history steering skipped on first user turn`() {
+        val history = listOf(LLMMessage(role = LLMMessage.Role.USER, content = "hi"))
+        assertSame(history, PersonaPromptLogic.applyHistorySteering(history))
+    }
+
+    @Test
+    fun `history steering prefixes latest user text after assistant turns`() {
+        val history = listOf(
+            LLMMessage(role = LLMMessage.Role.USER, content = "old"),
+            LLMMessage(role = LLMMessage.Role.ASSISTANT, content = "generic"),
+            LLMMessage(role = LLMMessage.Role.USER, content = "now speak as a pirate"),
+        )
+        val out = PersonaPromptLogic.applyHistorySteering(history)
+        assertEquals("old", out[0].content)
+        assertTrue(out[2].content.contains(PersonaPromptLogic.HISTORY_STEERING_PREFIX))
+        assertTrue(out[2].content.contains("now speak as a pirate"))
+        assertFalse(out[2].content.contains("old"))
+    }
+
+    @Test
+    fun `history steering skips tool-result-only user turns`() {
+        val history = listOf(
+            LLMMessage(role = LLMMessage.Role.USER, content = "do it"),
+            LLMMessage(role = LLMMessage.Role.ASSISTANT, content = "ok"),
+            LLMMessage(
+                role = LLMMessage.Role.USER,
+                content = "",
+                contentParts = listOf(
+                    AgentContentPart.ToolResult(id = "t1", name = "bash", content = "done"),
+                ),
+            ),
+        )
+        val out = PersonaPromptLogic.applyHistorySteering(history)
+        assertTrue(out[0].content.contains(PersonaPromptLogic.HISTORY_STEERING_PREFIX))
+        assertEquals("", out[2].content)
+        assertTrue(out[2].contentParts.single() is AgentContentPart.ToolResult)
+    }
+
+    @Test
+    fun `history steering is idempotent`() {
+        val history = listOf(
+            LLMMessage(role = LLMMessage.Role.USER, content = "a"),
+            LLMMessage(role = LLMMessage.Role.ASSISTANT, content = "b"),
+            LLMMessage(role = LLMMessage.Role.USER, content = "c"),
+        )
+        val once = PersonaPromptLogic.applyHistorySteering(history)
+        val twice = PersonaPromptLogic.applyHistorySteering(once)
+        assertEquals(1, twice[2].content.split(PersonaPromptLogic.HISTORY_STEERING_PREFIX).size - 1)
     }
 }

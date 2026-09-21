@@ -98,10 +98,9 @@ import kotlinx.coroutines.withContext
  *     page to view/edit. Import (+) copies .md/.txt into the private
  *     personas directory; a dropdown selects the active file. Each
  *     provider can bind its own prompt.
- *   - "Restore Default" with confirmation dialog
- *   - "Save" writes identity to SOUL.md via [SoulStore.save] and refreshes
- *     the in-memory metadata cache so chat bubble headers update without a
- *     restart.
+ *   - "Restore Default" with confirmation dialog; identity (name / style /
+ *     icon) auto-saves on leave. Prompt file switches persist immediately.
+ *     The nested editor keeps its own Save.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -256,8 +255,6 @@ fun SoulSettingsScreen(
     val isDirty = loaded && baseline != null && (
         currentFile.metadata != baseline?.metadata || pendingRestoreBody != null
     )
-    var showDiscardDialog by remember { mutableStateOf(false) }
-
     val promptRevision by PersonaPromptLibrary.revision.collectAsState()
     val providerConfig by providerRepository.config.collectAsState()
     var promptIndex by remember { mutableStateOf(PersonaPromptLogic.emptyIndex()) }
@@ -267,29 +264,33 @@ fun SoulSettingsScreen(
         }
     }
 
-    val save: () -> Unit = {
-        scope.launch {
-            try {
-                withContext(Dispatchers.IO) {
-                    val diskBody = SoulStore.load(context)?.body.orEmpty()
-                    val bodyToWrite = pendingRestoreBody ?: diskBody
-                    SoulStore.save(context, currentFile.copy(body = bodyToWrite))
-                }
-                onBack()
-            } catch (t: Throwable) {
-                saveError = t.message ?: "save failed"
+    val persistIdentity: suspend () -> Boolean = {
+        try {
+            val snapshot = currentFile
+            val restore = pendingRestoreBody
+            withContext(Dispatchers.IO) {
+                val diskBody = SoulStore.load(context)?.body.orEmpty()
+                SoulStore.save(context, snapshot.copy(body = restore ?: diskBody))
             }
+            true
+        } catch (t: Throwable) {
+            saveError = t.message ?: "save failed"
+            false
         }
-        Unit
     }
 
-    // [T-android-soul-save-in-appbar] Leaving with unsaved edits asks first.
-    // Routed through one lambda so the app bar's back arrow and the system
-    // back gesture cannot disagree about whether the guard applies.
+    // Prompt switches already persist on select. Identity (name / style / icon)
+    // and Restore Default auto-save on leave — no app-bar Save on this page.
     val attemptBack: () -> Unit = {
-        if (isDirty) showDiscardDialog = true else onBack()
+        if (!isDirty) {
+            onBack()
+        } else {
+            scope.launch {
+                if (persistIdentity()) onBack()
+            }
+        }
     }
-    BackHandler(enabled = isDirty && editingPromptId == null) { showDiscardDialog = true }
+    BackHandler(enabled = editingPromptId == null) { attemptBack() }
 
     if (editingPromptId != null) {
         SoulPromptEditorScreen(
@@ -302,16 +303,6 @@ fun SoulSettingsScreen(
     SettingsScaffold(
         title = stringResource(R.string.soul_settings_title),
         onBack = attemptBack,
-        actions = {
-            // Save lives in the app bar, where a top-level commit action
-            // belongs and where it stays reachable without scrolling the
-            // (long) prompt editor to the bottom.
-            MinisTextButton(
-                onClick = save,
-                // [persona-unlimited] No length cap — dirty + loaded is enough.
-                enabled = loaded && isDirty,
-            ) { Text(stringResource(R.string.soul_save)) }
-        },
     ) {
         SettingsSection(
             header = stringResource(R.string.soul_section_preview),
@@ -494,42 +485,10 @@ fun SoulSettingsScreen(
             ) {
                 MinisOutlinedButton(
                     onClick = { showRestoreDialog = true },
-                    // [T-android-soul-save-in-appbar] Full width now that Save
-                    // has moved to the app bar and this is the only button left
-                    // in the row.
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text(stringResource(R.string.soul_restore_default)) }
             }
         }
-    }
-
-    // [T-android-soul-save-in-appbar] Unsaved-changes guard.
-    //
-    // Each button leads with the verdict and then names the consequence
-    // ("OK, discard" / "Cancel, keep editing"), so the row scans correctly
-    // whether the user reads the leading word or the trailing one — a bare
-    // "Discard"/"Keep editing" pair reads fine but gives no cue about which
-    // side is the safe one.
-    //
-    // Dismissing the dialog by tapping outside keeps the edits — the
-    // conservative reading of an ambiguous gesture.
-    if (showDiscardDialog) {
-        AlertDialog(
-            onDismissRequest = { showDiscardDialog = false },
-            title = { Text(stringResource(R.string.soul_discard_confirm_title)) },
-            text = { Text(stringResource(R.string.soul_discard_confirm_body)) },
-            confirmButton = {
-                MinisTextButton(onClick = {
-                    showDiscardDialog = false
-                    onBack()
-                }) { Text(stringResource(R.string.soul_discard_confirm)) }
-            },
-            dismissButton = {
-                MinisTextButton(onClick = { showDiscardDialog = false }) {
-                    Text(stringResource(R.string.soul_discard_cancel))
-                }
-            },
-        )
     }
 
     if (showRestoreDialog) {
