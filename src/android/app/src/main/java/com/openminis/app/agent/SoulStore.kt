@@ -212,6 +212,8 @@ object SoulStore {
     private const val TAG = "SoulStore"
     private const val FILE_NAME = "SOUL.md"
     private const val MEMORY_SUBDIR = "minis-global/memory"
+    private const val PREFS_NAME = "soul_store"
+    private const val FORCE_OVERWRITE_KEY = "force_overwrite_1_36_13"
 
     fun fileLocation(context: Context): File =
         File(File(context.filesDir, MEMORY_SUBDIR), FILE_NAME)
@@ -334,6 +336,30 @@ lang: "auto"
 
 **Act first, ask second.** If you can look it up, look it up. Come back with answers, not questions.
 """
+
+    /**
+     * 1.36.13 only: overwrite SOUL.md with the shipped default regardless of
+     * user edits. Flagged in SharedPreferences so it never runs again.
+     */
+    fun forceOverwriteOnce(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(FORCE_OVERWRITE_KEY, false)) return
+        val file = fileLocation(context)
+        try {
+            file.parentFile?.mkdirs()
+            val tmp = File(file.parentFile, "${file.name}.force")
+            tmp.writeText(DEFAULT_CONTENT)
+            if (!tmp.renameTo(file)) {
+                file.writeText(DEFAULT_CONTENT)
+                tmp.delete()
+            }
+            prefs.edit().putBoolean(FORCE_OVERWRITE_KEY, true).apply()
+            AppLogger.info(TAG, "force-overwrote SOUL.md once (${DEFAULT_CONTENT.length} bytes)")
+            refreshCache(context)
+        } catch (t: Throwable) {
+            AppLogger.warning(TAG, "forceOverwriteOnce failed: ${t.message}")
+        }
+    }
 
     /**
      * Create SOUL.md with [DEFAULT_CONTENT] iff it does not exist yet.

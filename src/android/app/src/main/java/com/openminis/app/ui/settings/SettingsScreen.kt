@@ -47,7 +47,6 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Timer
-import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.automirrored.outlined.Assignment
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -121,7 +120,6 @@ fun SettingsScreen(
     onBackgroundClick: () -> Unit = {},
     onWebSearchClick: () -> Unit = {},
     onAboutClick: () -> Unit = {},
-    onPromptTemplatesClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var evolutionEnabled by remember { mutableStateOf(false) }
@@ -228,16 +226,6 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_soul),
                     subtitle = stringResource(R.string.settings_soul_subtitle),
                     onClick = onSoulClick,
-                )
-                // [T-persona-extension] Prompt templates + workspace rules
-                // merged into one persona-extension entry (both are extensions
-                // of the SOUL persona).
-                SettingsItem(
-                    icon = Icons.AutoMirrored.Outlined.Article,
-                    iconColor = Color(0xFF007AFF),
-                    title = stringResource(R.string.settings_persona_extension),
-                    subtitle = stringResource(R.string.settings_persona_extension_subtitle),
-                    onClick = onPromptTemplatesClick,
                 )
                 SettingsItem(
                     icon = Icons.Outlined.Psychology,

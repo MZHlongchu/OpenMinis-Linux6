@@ -292,9 +292,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         // Activity context.
         com.openminis.app.data.AutoCompactPrefs.prime(this)
         com.openminis.app.data.PlanDiscussionPrefs.prime(this)
-        com.openminis.app.data.PromptTemplateStore.prime(this)
         com.openminis.app.data.ToolLimitPrefs.prime(this)
-        com.openminis.app.agent.WorkspaceRulesStore.prime(this)
         com.openminis.app.security.SecurityGateHolder.load(this)
 
         // T283: install NDK signal handler for native crashes (SIGSEGV/
@@ -444,7 +442,7 @@ class MinisApp : Application(), ImageLoaderFactory {
             )
         }
         database = AppDatabase.getInstance(this)
-        chatRepository = ChatRepository(database.chatDao())
+        chatRepository = ChatRepository(database.chatDao(), filesDir)
         providerRepository = ProviderRepository(this)
         envVarRepository = EnvVarRepository(this)
         // [T-android-safemode-lateinit-crash-147] SkillRepository parses
@@ -492,20 +490,16 @@ class MinisApp : Application(), ImageLoaderFactory {
             return
         }
 
-        // [T-soul-md] Seed SOUL.md with the default content on first launch
-        // so the Soul settings page and chat bubble identity have a real
-        // file to read. Safe no-op on subsequent launches — never
-        // overwrites existing user edits. Cache refresh primes the
-        // synchronous metadata read-path (chat header / system prompt).
+        // Load assets first so DEFAULT_CONTENT is the shipped persona, then
+        // force-overwrite SOUL.md once for 1.36.13 (even if the user edited it).
+        com.openminis.app.agent.SoulStore.loadDefaultFromAssets(this)
+        com.openminis.app.agent.SoulStore.forceOverwriteOnce(this)
         com.openminis.app.agent.SoulStore.ensureExists(this)
         com.openminis.app.agent.SoulStore.upgradeStaleDefault(this)
         com.openminis.app.agent.SoulStore.refreshCache(this)
 
-        // [T-global-md-seed + T-default-assets] Load default copy from
-        // assets/ (edit those .md files to customize the shipped defaults),
-        // then seed GLOBAL.md starter template on first launch
-        // (create-only; user edits are never overwritten).
-        com.openminis.app.agent.SoulStore.loadDefaultFromAssets(this)
+        // [T-global-md-seed + T-default-assets] Seed GLOBAL.md starter template
+        // on first launch (create-only; user edits are never overwritten).
         com.openminis.app.agent.SystemPromptBuilder.loadIdentityFromAssets(this)
         com.openminis.app.data.repository.MemoryRepository.loadGlobalDefaultFromAssets(this)
         com.openminis.app.data.repository.MemoryRepository.ensureGlobalExists(this)

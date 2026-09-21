@@ -145,7 +145,6 @@ import com.openminis.app.ui.settings.SettingsSwitch
 import com.openminis.app.BuildConfig
 import com.openminis.app.R
 import com.openminis.app.security.InterceptFeedback
-import com.openminis.app.ui.settings.PromptTemplatePickerSheet
 import com.openminis.app.data.FileMentionIndex
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.text.BoundedText
@@ -880,7 +879,6 @@ fun ChatScreen(
     var showAttachMenu by remember { mutableStateOf(false) }
     var showChatMenu by remember { mutableStateOf(false) }
     var showSkillsSheet by remember { mutableStateOf(false) }
-    var showPromptTemplateSheet by remember { mutableStateOf(false) }
     // [T-mcp-integration-android] MCPs-in-Session sheet visibility.
     var showMcpsSheet by remember { mutableStateOf(false) }
     var showTokenUsageSheet by remember { mutableStateOf(false) }
@@ -2978,16 +2976,6 @@ fun ChatScreen(
                                 },
                                 leadingIcon = {
                                     Icon(Icons.Default.Share, contentDescription = null)
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.chat_menu_prompt_template)) },
-                                onClick = {
-                                    showChatMenu = false
-                                    showPromptTemplateSheet = true
-                                },
-                                leadingIcon = {
-                                    Icon(Icons.Default.Description, contentDescription = null)
                                 },
                             )
                             MinisMenuDivider()
@@ -7002,13 +6990,6 @@ fun ChatScreen(
             skillRepository = skillRepository,
             sessionId = sessionId,
             onDismiss = { showSkillsSheet = false },
-        )
-    }
-
-    if (showPromptTemplateSheet) {
-        PromptTemplatePickerSheet(
-            sessionId = viewModel.realSessionId.ifEmpty { sessionId },
-            onDismiss = { showPromptTemplateSheet = false },
         )
     }
 

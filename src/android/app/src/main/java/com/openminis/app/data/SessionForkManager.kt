@@ -4,6 +4,7 @@ import android.content.Context
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.data.repository.SkillRepository
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.sandbox.SessionWorkspace
 import java.io.File
 
 /**
@@ -157,6 +158,16 @@ class SessionForkManager(
             AppLogger.info(TAG, "duplicateSession: copied $copied/${markers.size} compact marker(s) to ${new.id}")
         }
 
+        runCatching {
+            val src = SessionWorkspace.base(filesDir, sessionId)
+            val dst = SessionWorkspace.base(filesDir, new.id)
+            if (src.exists() && src.isDirectory) {
+                src.copyRecursively(dst, overwrite = true)
+            }
+        }.onFailure {
+            AppLogger.warning(TAG, "duplicateSession: workspace copy failed: ${it.message}")
+        }
+
         AppLogger.info(
             TAG,
             "duplicated session $sessionId → ${new.id} (${messages.size} msgs, " +
@@ -180,17 +191,17 @@ class SessionForkManager(
     }
 
     /**
-     * Persist a memory note (plain Markdown / text) under
-     * `<filesDir>/minis-global/memory/<fileName>`. Mirrors iOS
-     * `SessionForkManager.copyRemoteMemory` which writes under
-     * `minisMemoryPersistentDir`. Overwrites if the file already exists.
+     * Persist a memory note into [sessionId]'s workspace memory dir.
+     * Overwrites if the file already exists.
      */
-    fun copyMemory(fileName: String, content: String): Boolean {
-        if (fileName.contains("/") || fileName.contains("..")) {
-            AppLogger.warning(TAG, "copyMemory: rejecting unsafe fileName '$fileName'")
+    fun copyMemory(sessionId: String, fileName: String, content: String): Boolean {
+        if (fileName.contains("/") || fileName.contains("..") ||
+            sessionId.contains("/") || sessionId.contains("\\") || sessionId.contains("..")
+        ) {
+            AppLogger.warning(TAG, "copyMemory: rejecting unsafe path '$sessionId'/'$fileName'")
             return false
         }
-        val dir = File(filesDir, "minis-global/memory").apply { mkdirs() }
+        val dir = SessionWorkspace.memoryDir(filesDir, sessionId).apply { mkdirs() }
         return try {
             File(dir, fileName).writeText(content)
             true

@@ -6,10 +6,16 @@ import com.openminis.app.data.db.ChatSessionEntity
 import com.openminis.app.data.db.FolderEntity
 import com.openminis.app.data.db.MessageEntity
 import com.openminis.app.data.model.ModelAttributionSnapshot
+import com.openminis.app.sandbox.ExecutionCoordinator
+import com.openminis.app.sandbox.SessionWorkspace
 import kotlinx.coroutines.flow.Flow
+import java.io.File
 import java.util.UUID
 
-class ChatRepository(internal val dao: ChatDao) {
+class ChatRepository(
+    internal val dao: ChatDao,
+    private val filesDir: File? = null,
+) {
 
     fun observeSessions(): Flow<List<ChatSessionEntity>> = dao.observeSessions()
 
@@ -111,6 +117,11 @@ class ChatRepository(internal val dao: ChatDao) {
     suspend fun deleteSession(id: String) {
         dao.deleteMessages(id)
         dao.deleteSession(id)
+        val dir = filesDir
+        if (dir != null) {
+            runCatching { ExecutionCoordinator.sessionDidTerminate(id) }
+            SessionWorkspace.deleteEntire(dir, id)
+        }
     }
 
     // ─── Session groups ("folders") ────────────────────────────────────────

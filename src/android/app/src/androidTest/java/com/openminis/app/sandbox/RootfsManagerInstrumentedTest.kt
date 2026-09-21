@@ -187,7 +187,7 @@ class RootfsManagerInstrumentedTest {
         val sessionBase = File(context.filesDir, "minis-sessions/$sessionId")
         assertTrue(sessionBase.exists())
 
-        val expectedSubdirs = listOf("attachments", "offloads", "workspace", "browser")
+        val expectedSubdirs = listOf("attachments", "offloads", "workspace", "browser", "memory")
         for (subdir in expectedSubdirs) {
             val dir = File(sessionBase, subdir)
             assertTrue("$subdir should exist", dir.exists())

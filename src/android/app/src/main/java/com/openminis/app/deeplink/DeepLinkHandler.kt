@@ -35,8 +35,6 @@ import com.openminis.app.ui.navigation.Routes
  *                                               → Environment variables
  *   minis://settings/rootfs                     → Rootfs management (mirror config lives here)
  *   minis://settings/mirrors                    → alias for rootfs (mirrors live inside Rootfs UI)
- *   minis://settings/prompt-templates           → Per-session prompt templates
- *   minis://settings/workspace-rules            → Workspace rule library
  *   minis://settings/tool-limits                → Shell / file_read / sub-agent caps
  *
  * Unknown settings paths fall back to Settings home rather than
@@ -202,10 +200,10 @@ object DeepLinkHandler {
             "appearance" -> DeepLinkAction.OpenSettingsScreen(Routes.APPEARANCE)
             "background" -> DeepLinkAction.OpenSettingsScreen(Routes.BACKGROUND)
             "search", "web-search", "web_search" -> DeepLinkAction.OpenSettingsScreen(Routes.WEB_SEARCH)
-            // [T-persona-extension] Both prompt-templates and workspace-rules
-            // deep links land on the merged persona-extension page.
-            "prompt-templates", "prompt_templates" -> DeepLinkAction.OpenSettingsScreen(Routes.PERSONA_EXTENSION)
-            "workspace-rules", "workspace_rules" -> DeepLinkAction.OpenSettingsScreen(Routes.PERSONA_EXTENSION)
+            // Removed 人格扩展: old deep links land on Soul.
+            "prompt-templates", "prompt_templates",
+            "workspace-rules", "workspace_rules",
+            "persona-extension", "persona_extension" -> DeepLinkAction.OpenSettingsScreen(Routes.SOUL)
             "tool-limits", "tool_limits" -> DeepLinkAction.OpenSettingsScreen(Routes.TOOL_LIMITS)
             "about" -> DeepLinkAction.OpenSettingsScreen(Routes.ABOUT)
             "permissions" -> DeepLinkAction.OpenPermissionSettings

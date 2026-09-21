@@ -87,20 +87,13 @@ class ExecutionCoordinatorInstrumentedTest {
 
         ExecutionCoordinator.execute("session-mounts", "echo test")
 
-        // Should have session-level + global bind mounts
-        // Session: attachments, offloads, workspace, browser (4)
-        // Global: memory, skills (2)
-        assertEquals(6, PRootKernel.bindMounts.size)
-
-        // Verify session-level mounts
         assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/attachments"))
         assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/offloads"))
         assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/workspace"))
         assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/browser"))
-
-        // Verify global mounts
         assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/memory"))
         assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/skills"))
+        assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/shared"))
     }
 
     @Test
@@ -112,13 +105,13 @@ class ExecutionCoordinatorInstrumentedTest {
 
         // Verify session host directories exist
         val sessionBase = File(context.filesDir, "minis-sessions/$sessionId")
-        for (subdir in listOf("attachments", "offloads", "workspace", "browser")) {
+        for (subdir in listOf("attachments", "offloads", "workspace", "browser", "memory")) {
             assertTrue("$subdir should exist", File(sessionBase, subdir).isDirectory)
         }
 
         // Verify global host directories exist
         val globalBase = File(context.filesDir, "minis-global")
-        for (subdir in listOf("memory", "skills")) {
+        for (subdir in listOf("skills", "shared")) {
             assertTrue("$subdir should exist", File(globalBase, subdir).isDirectory)
         }
     }
@@ -136,10 +129,14 @@ class ExecutionCoordinatorInstrumentedTest {
             PRootKernel.bindMounts["/var/minis/workspace"]
         )
 
+        assertEquals(
+            File(sessionBase, "memory").absolutePath,
+            PRootKernel.bindMounts["/var/minis/memory"]
+        )
         val globalBase = File(context.filesDir, "minis-global")
         assertEquals(
-            File(globalBase, "memory").absolutePath,
-            PRootKernel.bindMounts["/var/minis/memory"]
+            File(globalBase, "skills").absolutePath,
+            PRootKernel.bindMounts["/var/minis/skills"]
         )
     }
 
@@ -304,21 +301,23 @@ class ExecutionCoordinatorInstrumentedTest {
     }
 
     @Test
-    fun globalDirsAreSharedAcrossSessions() = runBlocking {
+    fun sessionMemoryIsIsolatedSkillsAreShared() = runBlocking {
         skipIfNoBoot()
 
-        // Write file to global memory in session A
         ExecutionCoordinator.execute(
-            "session-global-A",
-            "echo 'shared' > /var/minis/memory/shared.txt"
+            "session-mem-A",
+            "echo 'from A' > /var/minis/memory/note.txt && echo 'skill' > /var/minis/skills/shared-tool.txt"
         )
-
-        // Read from session B — should see the same file
-        val result = ExecutionCoordinator.execute(
-            "session-global-B",
-            "cat /var/minis/memory/shared.txt"
+        val memB = ExecutionCoordinator.execute(
+            "session-mem-B",
+            "cat /var/minis/memory/note.txt"
         )
-        assertTrue("Global dirs should be shared", result.output.contains("shared"))
+        assertFalse("Session B must not see A's memory", memB.output.contains("from A"))
+        val skillB = ExecutionCoordinator.execute(
+            "session-mem-B",
+            "cat /var/minis/skills/shared-tool.txt"
+        )
+        assertTrue("Skills stay shared", skillB.output.contains("skill"))
     }
 
     // ==================== Helpers ====================

@@ -205,15 +205,16 @@ object PRootKernel {
     /**
      * Register the global (session-independent) Minis bind mounts so direct
      * file I/O tools (file_read, file_edit) can resolve
-     * `/var/minis/{memory,skills,shared}/...` without needing PRoot to be
-     * booted or any shell to have started. Safe to call repeatedly.
+     * `/var/minis/{skills,shared}/...` without needing PRoot to be
+     * booted or any shell to have started. Memory is per-session.
+     * Safe to call repeatedly.
      */
     fun registerGlobalBindMounts(context: Context) {
-        val globalBase = File(context.filesDir, "minis-global")
-        // [T-mcp-integration-android] mcp-servers is global (like memory/skills):
+        val globalBase = File(context.filesDir, SessionWorkspace.GLOBAL_DIR)
+        // [T-mcp-integration-android] mcp-servers is global (like skills):
         // binding it here makes the in-PRoot minis-mcp-cli read/write the SAME
         // servers.json the Android Settings UI does (host: minis-global/mcp-servers).
-        listOf("memory", "skills", "shared", "mcp-servers").forEach { subdir ->
+        SessionWorkspace.GLOBAL_BIND_SUBDIRS.forEach { subdir ->
             val hostDir = File(globalBase, subdir).also { it.mkdirs() }
             bindMounts["/var/minis/$subdir"] = hostDir.absolutePath
         }
@@ -723,7 +724,7 @@ object PRootKernel {
     }
 
     /** Subdirs that live under `minis-sessions/<sessionId>/` rather than the global pool. */
-    private val perSessionSubdirs = setOf("attachments", "offloads", "workspace", "browser")
+    private val perSessionSubdirs = SessionWorkspace.SESSION_SUBDIRS.toSet()
 
     /**
      * Resolve a `/var/minis/...` Linux path directly against a specific session's
@@ -733,7 +734,7 @@ object PRootKernel {
      * so its answer is last-writer-wins rather than "this session's view".
      *
      * Falls back to [resolveHostPath] for paths outside `/var/minis/` or for the
-     * shared subdirs (memory/skills/shared) which don't depend on sessionId.
+     * shared subdirs (skills/shared) which don't depend on sessionId.
      */
     fun resolveSessionHostPath(sessionId: String, linuxPath: String, context: Context): File? {
         if (!linuxPath.startsWith("/var/minis/")) return resolveHostPath(linuxPath)

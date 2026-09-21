@@ -60,6 +60,11 @@ class MemoryRecallEngine(
          * Build an engine bound to the app's /var/minis/memory directory.
          * Returns null if the directory doesn't exist (memory feature disabled / not set up).
          */
+        fun fromDir(memoryDir: File): MemoryRecallEngine? {
+            if (!memoryDir.exists()) memoryDir.mkdirs()
+            return if (memoryDir.isDirectory) MemoryRecallEngine { memoryDir } else null
+        }
+
         fun fromContext(context: Context): MemoryRecallEngine? {
             // Canonical host directory backing the sandbox's /var/minis/memory.
             // MinisApp wires MemoryRepository(File(filesDir, "minis-global/memory")),

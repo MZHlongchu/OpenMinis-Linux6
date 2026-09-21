@@ -123,6 +123,16 @@ class ChatViewModel(
     val mcpRepository: com.openminis.app.data.repository.MCPRepository? = null,
 ) : ViewModel(), com.openminis.app.session.ChatSessionPort {
 
+    /** Daily logs and session GLOBAL.md live in this chat's workspace. */
+    private fun sessionMemoryRepo(): MemoryRepository {
+        val sid = com.openminis.app.sandbox.ExecutionCoordinator.ownerSessionId(
+            realSessionId.ifEmpty { sessionId },
+        )
+        return MemoryRepository(
+            com.openminis.app.sandbox.SessionWorkspace.memoryDir(context.filesDir, sid),
+        )
+    }
+
     companion object {
         internal const val TAG = "ChatViewModel"
         internal val HTTP_5XX_STATUS_RE = Regex("""\[5\d{2}\]""")
@@ -1318,8 +1328,7 @@ class ChatViewModel(
      * op-log row are mutated.
      */
     fun revokeMemoryRecord(record: MemoryToolRecord): com.openminis.app.data.repository.MemoryRepository.EntryMutationResult {
-        val repo = memoryRepository
-            ?: return com.openminis.app.data.repository.MemoryRepository.EntryMutationResult.IOError("Memory not available")
+        val repo = sessionMemoryRepo()
         val written = record.writtenContent
             ?: return com.openminis.app.data.repository.MemoryRepository.EntryMutationResult.NotFound
         val result = repo.revokeEntry(written)
@@ -1346,7 +1355,6 @@ class ChatViewModel(
      * still get pulled from the in-memory record list.
      */
     private fun revokeMemoryWritesInDeletedMessages(deletedMessages: List<ChatMessage>) {
-        if (memoryRepository == null) return
         val deletedContents = mutableListOf<String>()
         for (msg in deletedMessages) {
             for (block in msg.toolBlocks) {
@@ -1382,8 +1390,7 @@ class ChatViewModel(
         record: MemoryToolRecord,
         newContent: String,
     ): com.openminis.app.data.repository.MemoryRepository.EntryMutationResult {
-        val repo = memoryRepository
-            ?: return com.openminis.app.data.repository.MemoryRepository.EntryMutationResult.IOError("Memory not available")
+        val repo = sessionMemoryRepo()
         val old = record.writtenContent
             ?: return com.openminis.app.data.repository.MemoryRepository.EntryMutationResult.NotFound
         val result = repo.replaceEntryBody(old, newContent)
@@ -1681,8 +1688,8 @@ class ChatViewModel(
 
     // ── @ file-mention picker (mirrors iOS AIChatViewModel mention*) ─────
     /**
-     * Per-app singleton — scans /var/minis/{workspace,attachments,shared,
-     * skills,memory}/<sessionId>/ on demand, ranks matches by basename
+     * Per-app singleton — scans this chat's workspace/attachments/memory plus
+     * shared skills and /var/minis/shared on demand, ranks matches by basename
      * fuzzy score + scope priority. The composer hooks update*MentionMenu*
      * on every keystroke; the popup composes against [mentionEntries].
      */
@@ -4067,7 +4074,7 @@ class ChatViewModel(
         if (!draftBase.isDirectory) return
         val realBase = java.io.File(base, toReal).apply { mkdirs() }
 
-        listOf("attachments", "offloads", "workspace", "browser").forEach { subdir ->
+        com.openminis.app.sandbox.SessionWorkspace.SESSION_SUBDIRS.forEach { subdir ->
             val src = java.io.File(draftBase, subdir)
             if (!src.isDirectory) return@forEach
             val dst = java.io.File(realBase, subdir).apply { mkdirs() }
@@ -10020,7 +10027,7 @@ class ChatViewModel(
     }
 
     private fun executeMemoryWriteTool(argsJson: String): ToolExecutionResult {
-        val repo = memoryRepository ?: return ToolExecutionResult("Error: Memory not available", false)
+        val repo = sessionMemoryRepo()
         if (!_memoryEnabled.value) {
             val msg = "Memory writes are disabled for this session (user toggled /memory off). Reads remain available."
             return ToolExecutionResult(msg, false, toolTitle = "Memory (disabled)")
@@ -10041,7 +10048,7 @@ class ChatViewModel(
     }
 
     private fun executeMemoryGetTool(argsJson: String): ToolExecutionResult {
-        val repo = memoryRepository ?: return ToolExecutionResult("Error: Memory not available", false)
+        val repo = sessionMemoryRepo()
         val result = MemoryTools.executeMemoryGet(argsJson, repo)
         val keywords = try {
             JSONObject(argsJson).optString("keywords", "")
@@ -10316,12 +10323,13 @@ class ChatViewModel(
             """
 
 Memory system (currently ENABLED):
-- memory_write writes to today's daily log (YYYY-MM-DD.md) — use it for session notes, key facts, project context, things learned, and action items.
-- GLOBAL.md (/var/minis/memory/GLOBAL.md) stores persistent preferences, settings, and general-purpose conventions. To read it, use file_read (NOT memory_get). To update it, use file_read first then file_edit. If GLOBAL.md does not exist yet, use file_write to create it directly.
-- IMPORTANT: Only write to GLOBAL.md when the user explicitly asks (e.g. 'remember this globally', 'save to global memory'). Before editing, deduplicate and clean up — avoid ambiguity, repetition, or daily-log-style entries. GLOBAL.md should contain only concise, reusable knowledge (preferences, settings, conventions), NOT session logs or transient context.
+- This chat has its own memory at /var/minis/memory/. Other chats cannot see it. Deleting this chat deletes that directory.
+- memory_write writes to today's daily log (YYYY-MM-DD.md) in THIS chat's workspace — use it for session notes, key facts, project context, things learned, and action items.
+- /var/minis/memory/GLOBAL.md is THIS chat's standing notes (deleted with the chat). Settings → Memory is a separate app-wide file, not that path.
+- IMPORTANT: Only write to /var/minis/memory/GLOBAL.md when the user explicitly wants standing notes for this conversation. Before editing, deduplicate and clean up — avoid daily-log-style entries.
 - Use memory_get to recall past knowledge before starting tasks — check if there are relevant memories that can help.
 - Proactively save memories (via memory_write to daily log) when you discover user preferences or important patterns — don't wait to be asked.
-- When the user says 'remember this' or similar, use memory_write to persist to the daily log. Only write to GLOBAL.md if the user specifically asks for global/persistent storage.
+- When the user says 'remember this' or similar, use memory_write to persist to this chat's daily log.
 - What NOT to remember: passwords, API keys, tokens, secrets, or any sensitive credentials. Warn the user about the risk first; only proceed if they explicitly confirm.
 - Keep memories concise, factual, and general-purpose — avoid noise that won't be useful later."""
         } else {
@@ -10351,9 +10359,10 @@ Shared directory /var/minis/ (bidirectional read/write between shell and app):
   /var/minis/workspace/   — Working files (scripts, data, configs). Link with [name](minis://workspace/filename).
   /var/minis/offloads/    — Auto-saved large outputs. Read with file_read.
   /var/minis/browser/     — Browser screenshots and extracts.
+  /var/minis/skills/      — Skills and tool packs shared by every chat. Install tools here (not in this workspace) so other sessions can call them.
   /var/minis/shared/      — Cross-session shared storage for artifacts and documents. Organize by project or topic (e.g. shared/myproject/, shared/datasets/). Do NOT store temporary files here.
-  /var/minis/memory/GLOBAL.md    — Persistent global memory (read-only, user-maintained via Settings).
-  /var/minis/memory/YYYY-MM-DD.md — Daily memory log.
+  /var/minis/memory/             — THIS chat's memory only (daily YYYY-MM-DD.md). Deleted when the chat is deleted. Other chats cannot see it.
+  Settings → Memory GLOBAL.md    — Standing rules for every chat (not the same file as /var/minis/memory).
   /var/minis/mounts/<name>/      — User-mounted external folders from Settings → Mount External Folders. Presence and names vary per user; check this directory first when the task references external/user files. Some mounts may be read-only — file_write / file_edit will reject writes with a clear error message. When All Files Access is granted, `/sdcard`, `/storage/emulated/0`, and `/var/minis/mounts/sdcard` are POSIX bind-mounts of shared storage (not SAF DocumentFile).
 
 The minis:// URL scheme:
@@ -10424,7 +10433,7 @@ Interactive terminal: minis://open_terminal opens a terminal for tasks that requ
 Environment variables:
 - Shell environment variables may contain sensitive API keys, tokens, or passwords. NEVER echo, print, cat, or otherwise output their values to stdout/stderr. Always reference them by variable name (e.g. ${'$'}API_KEY) inside scripts or commands — never inline the literal value.
 - When a skill or task requires an environment variable that is not set, tell the user which variable is missing and provide a tappable deep link to create it: [Set ENV_NAME](minis://settings/environments?create_key=ENV_NAME&create_value=) — the user can tap it to open the Environment Variables page with the key pre-filled.
-- Settings deep links: when you tell the user "go to Settings → X" or want to point them at a specific setting, prefer a Markdown link `[Label](minis://settings/<path>)` over plain prose. Available paths: providers (list), providers/<instanceId> (one provider), model-groups (incl. Agent Loop), model-groups/<groupId>, usage (token usage), skills, plugins, mcp, memory, storage, shared-folders (Shared Folders: /var/minis/{shared,skills,memory}), mount-external (Mount External Folders), logs, appearance, background, about, permissions, environments[?create_key=K&create_value=V[&create_note=N]], rootfs (also reachable as mirrors), prompt-templates, workspace-rules, tool-limits. Unknown paths fall back to Settings home, but prefer the exact path so users land where they want. These settings/action links are app deep links — render them as Markdown links in chat (same action-vs-resource rule as the minis:// section above: only /var/minis resource URLs may go to browser_use).
+- Settings deep links: when you tell the user "go to Settings → X" or want to point them at a specific setting, prefer a Markdown link `[Label](minis://settings/<path>)` over plain prose. Available paths: providers (list), providers/<instanceId> (one provider), model-groups (incl. Agent Loop), model-groups/<groupId>, usage (token usage), skills, plugins, mcp, memory, storage, shared-folders (Shared Folders: /var/minis/{shared,skills}), mount-external (Mount External Folders), logs, appearance, background, about, permissions, environments[?create_key=K&create_value=V[&create_note=N]], rootfs (also reachable as mirrors), tool-limits. Unknown paths fall back to Settings home, but prefer the exact path so users land where they want. These settings/action links are app deep links — render them as Markdown links in chat (same action-vs-resource rule as the minis:// section above: only /var/minis resource URLs may go to browser_use).
 - To check if a variable is set, use `[ -n "${'$'}VAR" ] && echo 'set' || echo 'not set'`. NEVER use echo ${'$'}VAR, printenv VAR, or any command that would output the actual value into the conversation context.${memorySystemSection}
 
 Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended, so in-app scheduled scripts may not run as expected. For recurring tasks that must fire while the app is backgrounded, use the cronjob tool (AlarmManager) or minis-scheduled, or tell the user to set up a system-level schedule (Google Calendar event, Tasker automation, etc.). (Waiting or polling WITHIN the current turn is different — that is what shell_execute `delay` chains are for, per the shell_execute notes above.)"""
@@ -10452,13 +10461,25 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         // intentionally NOT gated by this toggle: skills are part of the
         // tool surface and SOUL.md is part of identity, both orthogonal
         // to the memory feature.
-        val globalMemoryFragment = if (memoryOn) memoryRepository?.loadGlobalMemoryFragment() else null
-        val dailyMemoryFragment = if (memoryOn) memoryRepository?.loadRecentDailyMemoryFragment() else null
+        val sessionMem = if (memoryOn) sessionMemoryRepo() else null
+        val standingGlobal = if (memoryOn) memoryRepository?.loadGlobalMemoryFragment() else null
+        val sessionGlobal = sessionMem?.loadGlobalMemoryFragment()
+        val globalMemoryFragment = if (memoryOn) {
+            listOfNotNull(standingGlobal, sessionGlobal).joinToString("\n\n").ifBlank { null }
+        } else null
+        val dailyMemoryFragment = sessionMem?.loadRecentDailyMemoryFragment()
         // [T-memory-recall] Lightweight FTS recall: search ALL historical memory
         // entries for keywords from the latest user message, inject top-4 hits.
         // No embedding service: keyword density + recency + recall-count scoring.
         val recalledMemoryFragment = if (memoryOn) {
-            val engine = com.openminis.app.data.repository.MemoryRecallEngine.fromContext(context)
+            val engine = com.openminis.app.data.repository.MemoryRecallEngine.fromDir(
+                com.openminis.app.sandbox.SessionWorkspace.memoryDir(
+                    context.filesDir,
+                    com.openminis.app.sandbox.ExecutionCoordinator.ownerSessionId(
+                        realSessionId.ifEmpty { sessionId },
+                    ),
+                ),
+            )
             val query = _messages.value.lastOrNull { it.role == "user" && !it.isQueued }?.content.orEmpty()
             val hits = engine?.recall(query) ?: emptyList()
             engine?.formatAsPromptFragment(hits) ?: ""
@@ -10513,13 +10534,6 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             // Runtime context goes last so the prefix above stays byte-stable
             // across requests within the same day. Keep ordering deterministic
             // (date → tz → lang → model count) — any reorder defeats the cache.
-            val sessionPrompt = com.openminis.app.data.PromptTemplateStore.renderForSession(
-                realSessionId.ifEmpty { sessionId },
-            )
-            if (!sessionPrompt.isNullOrBlank()) {
-                append("\n\n")
-                append(sessionPrompt)
-            }
             append("\n\nRuntime context:\n")
             append("- Current date: ").append(dateStr).append(" (").append(tzId).append(")\n")
             append("- Device language: ").append(lang).append("\n")
@@ -10533,7 +10547,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
     // ─── Legacy tool execution methods (kept for compatibility) ───────────
 
     fun executeMemoryWrite(argsJson: String): MemoryTools.ToolResult {
-        val repo = memoryRepository ?: return MemoryTools.ToolResult("Error: Memory not available", false)
+        val repo = sessionMemoryRepo()
         if (!_memoryEnabled.value) {
             return MemoryTools.ToolResult(
                 "Memory writes are disabled for this session. Reads are still available. The user can re-enable writes via the /memory slash command.",
@@ -10555,7 +10569,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
     }
 
     fun executeMemoryGet(argsJson: String): MemoryTools.ToolResult {
-        val repo = memoryRepository ?: return MemoryTools.ToolResult("Error: Memory not available", false)
+        val repo = sessionMemoryRepo()
         val result = MemoryTools.executeMemoryGet(argsJson, repo)
         val keywords = try {
             JSONObject(argsJson).optString("keywords", "")

@@ -251,11 +251,7 @@ class RootfsManager private constructor(private val context: Context) {
      * Ensure session-specific directories exist on the host filesystem.
      */
     fun ensureSessionDirs(sessionId: String) {
-        val sessionBase = File(context.filesDir, "minis-sessions/$sessionId")
-        val subdirs = listOf("attachments", "offloads", "workspace", "browser")
-        for (subdir in subdirs) {
-            File(sessionBase, subdir).mkdirs()
-        }
+        SessionWorkspace.ensureDirs(context.filesDir, sessionId)
     }
 
     /**

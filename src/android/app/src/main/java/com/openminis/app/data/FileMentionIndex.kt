@@ -21,7 +21,7 @@ import java.util.UUID
  *
  * ### Layers
  *   1. **Session roots** — `workspace/<sid>` + `attachments/<sid>`.
- *   2. **Shared roots** — `shared/`, `skills/`, `memory/`.
+ *   2. **Shared roots** — `shared/`, `skills/`. Session `memory/` is layer 1.
  *   3. **Mount roots** — each entry in [mountsProvider] (e.g. SAF-attached
  *      folders). Each mount always gets a self-entry so `@<mountName>` works.
  *
@@ -116,26 +116,27 @@ class FileMentionIndex(
         _isScanning.value = true
         val collected = mutableListOf<Entry>()
         try {
-            // Layer 1: session-local roots.
+            // Layer 1: this chat's workspace.
+            val sessionsRoot = File(filesDir.parentFile ?: filesDir, "minis-sessions")
             layerEntries(
                 sessionId = sessionId,
                 layers = listOf(
-                    File(filesDir, "workspace/$sessionId") to Scope.WORKSPACE,
-                    File(filesDir, "attachments/$sessionId") to Scope.ATTACHMENTS,
+                    File(sessionsRoot, "$sessionId/workspace") to Scope.WORKSPACE,
+                    File(sessionsRoot, "$sessionId/attachments") to Scope.ATTACHMENTS,
+                    File(sessionsRoot, "$sessionId/memory") to Scope.MEMORY,
                 ),
-                linuxRootFor = { scope -> "/var/minis/${scope.displayLabel}/$sessionId" },
+                linuxRootFor = { scope -> "/var/minis/${scope.displayLabel}" },
             ).let { newBatch ->
                 collected += newBatch
                 publish(token, collected)
             }
 
-            // Layer 2: shared roots.
+            // Layer 2: tools shared by every chat (not session memory).
             layerEntries(
                 sessionId = sessionId,
                 layers = listOf(
                     File(filesDir, "shared") to Scope.SHARED,
                     File(filesDir, "skills") to Scope.SKILLS,
-                    File(filesDir, "memory") to Scope.MEMORY,
                 ),
                 linuxRootFor = { scope -> "/var/minis/${scope.displayLabel}" },
             ).let { newBatch ->

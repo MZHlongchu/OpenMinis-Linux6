@@ -204,7 +204,7 @@ object ExecutionCoordinator {
         // Session-specific directories. Sub-agent lanes share the parent
         // session tree so files written by a teammate stay visible here.
         val sessionBase = File(filesDir, "minis-sessions/${ownerSessionId(sessionId)}")
-        listOf("attachments", "offloads", "workspace", "browser").forEach { subdir ->
+        SessionWorkspace.SESSION_SUBDIRS.forEach { subdir ->
             val hostDir = File(sessionBase, subdir).also { it.mkdirs() }
             val linuxPath = "/var/minis/$subdir"
             mounts[linuxPath] = hostDir.absolutePath
@@ -224,8 +224,8 @@ object ExecutionCoordinator {
         // server (the UI / debug.ls read via resolveHostPath, a separate map,
         // which is why they disagreed). Same trap as the external-mounts note
         // below.
-        val globalBase = File(filesDir, "minis-global")
-        listOf("memory", "skills", "shared", "mcp-servers").forEach { subdir ->
+        val globalBase = File(filesDir, SessionWorkspace.GLOBAL_DIR)
+        SessionWorkspace.GLOBAL_BIND_SUBDIRS.forEach { subdir ->
             val hostDir = File(globalBase, subdir).also { it.mkdirs() }
             val linuxPath = "/var/minis/$subdir"
             mounts[linuxPath] = hostDir.absolutePath

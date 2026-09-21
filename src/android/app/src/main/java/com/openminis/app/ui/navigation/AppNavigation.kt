@@ -136,12 +136,7 @@ object Routes {
     const val SKILL_FILE = "skill_file/{skillId}/{relativePath}"
     const val MINIS_SKILLS_BROWSER = "minis_skills_browser"
     const val WEB_SEARCH = "web_search"
-    const val PROMPT_TEMPLATES = "prompt_templates"
-    const val WORKSPACE_RULES = "workspace_rules"
     const val TOOL_LIMITS = "tool_limits"
-
-    /** [T-persona-extension] Merged prompt-templates + workspace-rules page. */
-    const val PERSONA_EXTENSION = "persona_extension"
 
     fun skillDetail(skillId: String) = "skill/$skillId"
     fun skillFile(skillId: String, relativePath: String = "SKILL.md"): String {
@@ -618,7 +613,7 @@ fun AppNavigation(
                 onAppearanceClick = { navController.safeNavigate(Routes.APPEARANCE) },
                 onBackgroundClick = { navController.safeNavigate(Routes.BACKGROUND) },
                 onWebSearchClick = { navController.safeNavigate(Routes.WEB_SEARCH) },
-                onPromptTemplatesClick = { navController.safeNavigate(Routes.PERSONA_EXTENSION) },
+
                 onLogsClick = { navController.safeNavigate(Routes.LOGS) },
                 onAboutClick = { navController.safeNavigate(Routes.ABOUT) },
                 onMountedFoldersClick = { navController.safeNavigate(Routes.MOUNTED_FOLDERS) },
@@ -798,14 +793,13 @@ fun AppNavigation(
                     val label = when (folderId) {
                         "shared" -> ctx.getString(com.openminis.app.R.string.shared_folder_name_shared)
                         "skills" -> ctx.getString(com.openminis.app.R.string.shared_folder_name_skills)
-                        "memory" -> ctx.getString(com.openminis.app.R.string.shared_folder_name_memory)
                         else -> folderId
                     }
                     FilePreviewHolder.fileBrowserViewModel = FileBrowserViewModel(
                         rootPath = hostPath,
                         rootLabel = label,
                         // Route reads through PRoot bind mounts so the host
-                        // dirs that back /var/minis/{shared,skills,memory}
+                        // dirs that back /var/minis/{shared,skills}
                         // resolve, matching how chat-files browse works.
                         linuxRootPath = "/var/minis/$folderId",
                         appContext = ctx.applicationContext,
@@ -1206,24 +1200,6 @@ fun AppNavigation(
 
         composable(Routes.MULTI_AGENT) {
             com.openminis.app.ui.settings.MultiAgentSettingsScreen(
-                onBack = { navController.safePopBackStack() },
-            )
-        }
-
-        composable(Routes.PROMPT_TEMPLATES) {
-            com.openminis.app.ui.settings.PromptTemplatesSettingsScreen(
-                onBack = { navController.safePopBackStack() },
-            )
-        }
-
-        composable(Routes.PERSONA_EXTENSION) {
-            com.openminis.app.ui.settings.PersonaExtensionScreen(
-                onBack = { navController.safePopBackStack() },
-            )
-        }
-
-        composable(Routes.WORKSPACE_RULES) {
-            com.openminis.app.ui.settings.WorkspaceRulesSettingsScreen(
                 onBack = { navController.safePopBackStack() },
             )
         }

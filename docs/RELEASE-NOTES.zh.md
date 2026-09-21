@@ -1,3 +1,23 @@
+# OpenMinis-Linux 1.36.13-linux
+
+- versionCode **66**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.12-linux：
+
+- **一会话一工作区**：每个会话独立 `workspace` / `memory` / 附件 / 浏览器缓存；技能、共享目录、MCP 配置装在工作区外，所有会话都能调用。
+- **删会话清工作区**：删除聊天会删除 `minis-sessions/<id>/` 整棵目录，包括记忆。
+- **内置人格重写**：详细版 Minis Ultra（工作区边界、共享工具、记忆范围）。
+- **本版覆盖一次 SOUL.md**：安装后不论用户是否改过，强制写成新内置人格，仅此一次。
+- **移除人格扩展**：设置页、提示词模板、工作区规则入口和相关代码已去掉。
+
+---
+
 # OpenMinis-Linux 1.36.12-linux
 
 - versionCode **65**
