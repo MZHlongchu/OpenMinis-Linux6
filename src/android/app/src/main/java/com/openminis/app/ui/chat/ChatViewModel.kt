@@ -938,7 +938,7 @@ class ChatViewModel(
                 fileName = name,
                 uri = android.net.Uri.fromFile(file),
                 mimeType = "text/plain",
-                kind = InputAttachment.Kind.DOCUMENT,
+                kind = com.openminis.app.session.InputAttachment.Kind.DOCUMENT,
             )
             addAttachment(attachment)
             AppLogger.info(
@@ -2163,7 +2163,7 @@ class ChatViewModel(
      * If the id can't be resolved to an agentHistory entry, this falls
      * back to compactAll() behaviour so the user's gesture isn't lost.
      */
-    override fun compactBefore(dbMessageId: String, includesBoundary: Boolean = false) {
+    override fun compactBefore(dbMessageId: String, includesBoundary: Boolean) {
         AppLogger.info(
             TAG,
             "[Compact] compactBefore() id=${dbMessageId.take(8)} includesBoundary=$includesBoundary " +
@@ -5226,8 +5226,8 @@ class ChatViewModel(
         val ext = file.extension.lowercase()
         val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
             ?: "application/octet-stream"
-        val kind = if (mime.startsWith("image/")) InputAttachment.Kind.IMAGE
-                   else InputAttachment.Kind.DOCUMENT
+        val kind = if (mime.startsWith("image/")) com.openminis.app.session.InputAttachment.Kind.IMAGE
+                   else com.openminis.app.session.InputAttachment.Kind.DOCUMENT
         // T185 fix: ChatScreen wipes the share-extension directory right
         // after this call returns (`SharedShareStore.cleanSharedFiles`),
         // so a `Uri.fromFile(<staged file>)` would dangle by the time the
@@ -5958,7 +5958,7 @@ class ChatViewModel(
                     fileName = name,
                     uri = uri,
                     mimeType = guessMimeType(name, fallback = "image/*"),
-                    kind = InputAttachment.Kind.IMAGE,
+                    kind = com.openminis.app.session.InputAttachment.Kind.IMAGE,
                 ),
             )
         }
@@ -5972,7 +5972,7 @@ class ChatViewModel(
                     fileName = name,
                     uri = uri,
                     mimeType = guessMimeType(name, fallback = "application/octet-stream"),
-                    kind = InputAttachment.Kind.DOCUMENT,
+                    kind = com.openminis.app.session.InputAttachment.Kind.DOCUMENT,
                 ),
             )
         }

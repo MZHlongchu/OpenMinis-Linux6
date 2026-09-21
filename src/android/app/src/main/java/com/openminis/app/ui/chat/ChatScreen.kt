@@ -941,7 +941,7 @@ fun ChatScreen(
                     // Videos are routed as DOCUMENT for now — vision pipeline only
                     // handles images today; videos still upload as raw files so
                     // tools that read them (e.g. ffmpeg) get the bytes.
-                    kind = if (isVideo) InputAttachment.Kind.DOCUMENT else InputAttachment.Kind.IMAGE,
+                    kind = if (isVideo) com.openminis.app.session.InputAttachment.Kind.DOCUMENT else com.openminis.app.session.InputAttachment.Kind.IMAGE,
                 ),
             )
         }
@@ -993,7 +993,7 @@ fun ChatScreen(
                     fileName = fileName,
                     uri = uri,
                     mimeType = "image/jpeg",
-                    kind = InputAttachment.Kind.IMAGE,
+                    kind = com.openminis.app.session.InputAttachment.Kind.IMAGE,
                 ),
             )
         } else {
@@ -1074,7 +1074,7 @@ fun ChatScreen(
         for (uri in limited) {
             val fileName = getFileName(context, uri) ?: "file"
             val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
-            val kind = if (mimeType.startsWith("image/")) InputAttachment.Kind.IMAGE else InputAttachment.Kind.DOCUMENT
+            val kind = if (mimeType.startsWith("image/")) com.openminis.app.session.InputAttachment.Kind.IMAGE else com.openminis.app.session.InputAttachment.Kind.DOCUMENT
             viewModel.addAttachment(
                 InputAttachment(fileName = fileName, uri = uri, mimeType = mimeType, kind = kind)
             )

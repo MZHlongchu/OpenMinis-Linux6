@@ -609,14 +609,16 @@ class AnthropicProvider(
                                 put("type", "text")
                                 put("text", part.content)
                             })
-                            if (part.imageData != null && part.imageMimeType != null) {
+                            val imageData = part.imageData
+                            val imageMimeType = part.imageMimeType
+                            if (imageData != null && imageMimeType != null) {
                                 // T-imgsize: belt-and-braces — history tool-result
                                 // screenshots can be raw 12-megapixel PNGs that
                                 // never went through the composer's budget pass.
                                 // Re-encode in-place if a single part already blows
                                 // the per-image cap so we don't 413 on replay.
-                                val safeBytes = ImageBudget.compressUnderBudget(part.imageData)
-                                val safeMime = if (safeBytes === part.imageData) part.imageMimeType else "image/jpeg"
+                                val safeBytes = ImageBudget.compressUnderBudget(imageData)
+                                val safeMime = if (safeBytes === imageData) imageMimeType else "image/jpeg"
                                 resultContent.put(JSONObject().apply {
                                     put("type", "image")
                                     put("source", JSONObject().apply {

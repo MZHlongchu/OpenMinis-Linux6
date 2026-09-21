@@ -218,16 +218,37 @@ object HangDetector {
         try {
             val am = context.getSystemService(ActivityManager::class.java) ?: return
             val myUid = Process.myUid()
-            am.addOnUidFrozenStateChangedListener(context.mainExecutor) { uids, states ->
-                for (i in uids.indices) {
-                    if (uids[i] == myUid &&
-                        states[i] == ActivityManager.UID_FROZEN_STATE_UNFROZEN
-                    ) {
-                        lastHeartbeatAt.set(nowElapsed())
-                        Log.i(TAG, "UID unfrozen — heartbeat reset")
+            // Reflect so compileSdk stubs that omit the API 35 freeze
+            // listener still compile; no-op if the method is missing.
+            val listenerClass = Class.forName(
+                "android.app.ActivityManager\$OnUidFrozenStateChangedListener",
+            )
+            val unfrozen = try {
+                ActivityManager::class.java.getField("UID_FROZEN_STATE_UNFROZEN").getInt(null)
+            } catch (_: Throwable) {
+                2
+            }
+            val proxy = java.lang.reflect.Proxy.newProxyInstance(
+                listenerClass.classLoader,
+                arrayOf(listenerClass),
+            ) { _, method, args ->
+                if (method.name == "onUidFrozenStateChanged" && args != null && args.size >= 2) {
+                    val uids = args[0] as IntArray
+                    val states = args[1] as IntArray
+                    for (i in uids.indices) {
+                        if (uids[i] == myUid && states[i] == unfrozen) {
+                            lastHeartbeatAt.set(nowElapsed())
+                            Log.i(TAG, "UID unfrozen — heartbeat reset")
+                        }
                     }
                 }
+                null
             }
+            ActivityManager::class.java.getMethod(
+                "addOnUidFrozenStateChangedListener",
+                java.util.concurrent.Executor::class.java,
+                listenerClass,
+            ).invoke(am, context.mainExecutor, proxy)
         } catch (t: Throwable) {
             Log.w(TAG, "failed to register freeze listener: ${t.message}")
         }

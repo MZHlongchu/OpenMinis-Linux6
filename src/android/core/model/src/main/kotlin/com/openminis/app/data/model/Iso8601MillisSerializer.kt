@@ -1,5 +1,6 @@
 package com.openminis.app.data.model
 
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
@@ -64,6 +65,7 @@ object Iso8601MillisNullableSerializer : KSerializer<Long?> {
     override val descriptor: SerialDescriptor =
         PrimitiveSerialDescriptor("Iso8601MillisNullable", PrimitiveKind.STRING)
 
+    @OptIn(ExperimentalSerializationApi::class)
     override fun serialize(encoder: Encoder, value: Long?) {
         if (value == null) encoder.encodeNull()
         else Iso8601MillisSerializer.serialize(encoder, value)

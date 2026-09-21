@@ -42,7 +42,7 @@ internal fun isRecognizedModelFamily(modelId: String, displayName: String = ""):
  * Unknown ids get 128k (with 256k context, thinking max, text modalities) rather
  * than the provider's 16k default.
  */
-internal fun inferredMaxOutputTokens(modelId: String, displayName: String = ""): Int? {
+fun inferredMaxOutputTokens(modelId: String, displayName: String = ""): Int? {
     return inferredFamilyMaxOutputTokens(modelId, displayName) ?: UNKNOWN_MAX_OUTPUT
 }
 
@@ -52,7 +52,7 @@ internal fun inferredMaxOutputTokens(modelId: String, displayName: String = ""):
  * 256k context, 128k output, thinking on (ceiling max), text modalities.
  * Never overwrites a field that is already set (catalog, family overlay, user).
  */
-internal fun applyUnrecognizedModelDefaults(model: LLMModel): LLMModel {
+fun applyUnrecognizedModelDefaults(model: LLMModel): LLMModel {
     return model.copy(
         contextWindow = model.contextWindow?.takeIf { it > 0 } ?: UNKNOWN_CONTEXT_WINDOW,
         maxOutputTokens = model.maxOutputTokens?.takeIf { it > 0 } ?: UNKNOWN_MAX_OUTPUT,
