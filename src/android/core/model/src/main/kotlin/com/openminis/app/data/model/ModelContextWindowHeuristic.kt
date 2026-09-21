@@ -65,7 +65,7 @@ fun applyUnrecognizedModelDefaults(model: LLMModel): LLMModel {
 }
 
 /** `gpt-6` / `GPT6` / `gpt-6免费`, but not `gpt-60`. */
-internal fun hasGptFamily(haystack: String, version: Int): Boolean {
+fun hasGptFamily(haystack: String, version: Int): Boolean {
     if ("gpt-$version" in haystack) return true
     val compact = haystack.replace("-", "").replace("_", "").replace(" ", "")
     val needle = "gpt$version"
