@@ -42,6 +42,15 @@ export TMPDIR=/tmp
 export TMP=/tmp
 export TEMP=/tmp
 
+# TLS: Android-injected bundle at /etc/ssl/certs/ca-certificates.crt
+export SSL_CERT_FILE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
+export SSL_CERT_DIR="${SSL_CERT_DIR:-/etc/ssl/certs}"
+export CURL_CA_BUNDLE="${CURL_CA_BUNDLE:-$SSL_CERT_FILE}"
+export REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-$SSL_CERT_FILE}"
+export GIT_SSL_CAINFO="${GIT_SSL_CAINFO:-$SSL_CERT_FILE}"
+export PIP_CERT="${PIP_CERT:-$SSL_CERT_FILE}"
+export NODE_EXTRA_CA_CERTS="${NODE_EXTRA_CA_CERTS:-$SSL_CERT_FILE}"
+
 # Toolchain paths (populated by minis-dev-setup / minis-android-sdk-setup).
 export ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk}"
 export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/opt/android-sdk}"

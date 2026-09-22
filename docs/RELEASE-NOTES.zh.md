@@ -1,3 +1,23 @@
+# OpenMinis-Linux 1.36.18-linux
+
+- versionCode **71**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.17-linux：
+
+- **CA 注入**：每次 overlay 后把 `AndroidCAStore` 写成客户机 `ca-certificates.crt`；Android 14+ 还会扫 conscrypt APEX（`/system/etc/security/cacerts` 为空时不算命中）。PRoot 里看不到主机 `/apex`，所以在主机侧拷贝，不在客户机里 `ln -s`。
+- **镜像探测**：`minis-mirror auto` 不依赖 curl；bash `/dev/tcp` HEAD 快筛，再用 `Dir::Etc::sourceparts=-` 的临时源做 apt 实测；HTTPS 失败改 HTTP。
+- **apt 锁**：主机 `SandboxResourceGate.aptMutex` 与客户机 `apt-lock.sh`（flock → 再清 dpkg 锁；flock 不可用则 mkdir）串行 `minis-mirror` / `minis-dev-setup` / 开机装包。
+- **种子包**：开机安装 curl、wget、python3、git、psmisc；nodejs/npm 尝试一次。`minis-dev-setup` 先装这些再装完整工具链，遇到 dpkg 锁会重试。
+- **打开链接**：PersistentShell 不是 TTY，以前 `minis-open` 会走 `android-open` 把界面切到 Chrome；现在默认 OSC 应用内预览，`--system` 才出系统浏览器。
+
+---
+
 # OpenMinis-Linux 1.36.17-linux
 
 - versionCode **70**

@@ -102,19 +102,21 @@ if [ $# -eq 0 ]; then
 fi
 
 for arg in "$@"; do
-    use_system=0
-    if [ "$SYSTEM" = 1 ] || [ ! -t 1 ]; then
-        case "$arg" in
-            http://*|https://*|intent:*|android-app:*|tel:*|mailto:*|geo:*|market:*)
-                use_system=1
-                ;;
-        esac
-    fi
-    if [ "$use_system" = 1 ]; then
+    # Always emit OSC for http(s)/minis so PersistentShell (not a TTY)
+    # still opens the in-app preview. android-open ACTION_VIEW would
+    # leave the Minis UI for Chrome. --system keeps the old path.
+    if [ "$SYSTEM" = 1 ]; then
         open_system "$arg"
-    else
-        emit "$arg"
+        continue
     fi
+    case "$arg" in
+        intent:*|android-app:*|tel:*|mailto:*|geo:*|market:*)
+            open_system "$arg"
+            ;;
+        *)
+            emit "$arg"
+            ;;
+    esac
 done
 
 exit 0

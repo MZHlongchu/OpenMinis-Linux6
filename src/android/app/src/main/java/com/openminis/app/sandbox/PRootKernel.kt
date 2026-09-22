@@ -80,6 +80,7 @@ object PRootKernel {
         // (they also serialize on RootfsManager.aptMutex).
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             runCatching { rootfsManager.runMinisMirrorAuto() }
+            runCatching { rootfsManager.seedNetworkTools() }
             runCatching { rootfsManager.retryFailedDpkgWorld() }
             runCatching { rootfsManager.retryFailedPipWorld() }
             runCatching { rootfsManager.dumpDpkgWorld() }
@@ -165,6 +166,16 @@ object PRootKernel {
         customEnvironment["TMPDIR"] = "/tmp"
         customEnvironment["TMP"] = "/tmp"
         customEnvironment["TEMP"] = "/tmp"
+
+        // Guest TLS: point every common client at the Android-injected bundle
+        // so HTTPS works even when ubuntu-base CA hash-symlinks did not extract.
+        customEnvironment["SSL_CERT_FILE"] = "/etc/ssl/certs/ca-certificates.crt"
+        customEnvironment["SSL_CERT_DIR"] = "/etc/ssl/certs"
+        customEnvironment["CURL_CA_BUNDLE"] = "/etc/ssl/certs/ca-certificates.crt"
+        customEnvironment["REQUESTS_CA_BUNDLE"] = "/etc/ssl/certs/ca-certificates.crt"
+        customEnvironment["GIT_SSL_CAINFO"] = "/etc/ssl/certs/ca-certificates.crt"
+        customEnvironment["PIP_CERT"] = "/etc/ssl/certs/ca-certificates.crt"
+        customEnvironment["NODE_EXTRA_CA_CERTS"] = "/etc/ssl/certs/ca-certificates.crt"
 
         // Inject device timezone so Alpine userspace sees local time.
         // Mirrors iOS ISHShellExecutor.m:335-353 — uses POSIX TZ format with a

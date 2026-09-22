@@ -5,3 +5,5 @@ DPkg::Options { "--force-confdef"; "--force-confold"; };
 Acquire::Languages "none";
 // Do not inherit Android's host cache dir via TMPDIR for apt-extracttemplates.
 APT::ExtractTemplates::TempDir "/tmp";
+Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";
+Acquire::Retries "3";

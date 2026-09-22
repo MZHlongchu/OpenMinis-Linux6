@@ -3,7 +3,11 @@ package com.openminis.app.sandbox
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.LinkProperties
+import android.util.Base64
 import android.util.Log
+import java.security.KeyStore
+import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -360,6 +364,138 @@ class RootfsManager private constructor(private val context: Context) {
     }
 
     /**
+     * Write the Android system trust store into the guest so apt/curl/git/pip
+     * have a CA bundle even when ubuntu-base hash-symlinks failed to extract
+     * or `ca-certificates` has never been configured.
+     *
+     * Must run on the **host**. PRoot cannot see `/apex/.../cacerts` unless we
+     * bind-mount it. Android 14+ moved CAs into the conscrypt APEX while
+     * `/system/etc/security/cacerts/` is often an empty stub — scanning only
+     * that path yields "no CA chain". [AndroidCAStore] is the public API that
+     * still works when the APEX dir is SELinux-blocked. Filesystem dirs are a
+     * fallback and also supply OpenSSL hash `.0` files (copied, never
+     * symlinked at Android paths the guest cannot follow).
+     */
+    private fun injectHostCaBundle() {
+        val pem = StringBuilder()
+        try {
+            val ks = KeyStore.getInstance("AndroidCAStore")
+            ks.load(null)
+            val aliases = ks.aliases()
+            while (aliases.hasMoreElements()) {
+                val cert = ks.getCertificate(aliases.nextElement()) as? X509Certificate ?: continue
+                appendPem(pem, cert)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "[CA] AndroidCAStore export failed: ${t.message}")
+        }
+        val guestCerts = File(rootfsDir, "etc/ssl/certs")
+        guestCerts.mkdirs()
+        var source = "AndroidCAStore"
+        if (pem.length < 2048) {
+            for (dirPath in HOST_CA_DIRS) {
+                val dir = File(dirPath)
+                val extra = loadPemFromHostDir(dir) ?: continue
+                pem.setLength(0)
+                pem.append(extra)
+                copyHostCaHashFiles(dir, guestCerts)
+                source = dirPath
+                Log.i(TAG, "[CA] AndroidCAStore empty; using filesystem $dirPath")
+                break
+            }
+        } else {
+            for (dirPath in HOST_CA_DIRS) {
+                if (copyHostCaHashFiles(File(dirPath), guestCerts) > 0) break
+            }
+        }
+        if (pem.length < 2048) {
+            Log.w(TAG, "[CA] host bundle too small (${pem.length}); leaving guest certs (HTTPS may fall back to HTTP)")
+            return
+        }
+        val dest = File(guestCerts, "ca-certificates.crt")
+        dest.writeText(pem.toString())
+        dest.setReadable(true, false)
+        val copies = listOf(
+            File(rootfsDir, "usr/lib/ssl/cert.pem"),
+            File(rootfsDir, "etc/ssl/cert.pem"),
+        )
+        for (copy in copies) {
+            try {
+                copy.parentFile?.mkdirs()
+                dest.copyTo(copy, overwrite = true)
+            } catch (t: Throwable) {
+                Log.w(TAG, "[CA] failed to copy bundle to ${copy.name}: ${t.message}")
+            }
+        }
+        File(rootfsDir, "usr/local/share/ca-certificates").mkdirs()
+        Log.i(TAG, "[CA] injected $source (${pem.length} bytes) → ${dest.absolutePath}")
+    }
+
+    private fun appendPem(pem: StringBuilder, cert: X509Certificate) {
+        pem.append("-----BEGIN CERTIFICATE-----\n")
+        pem.append(Base64.encodeToString(cert.encoded, Base64.DEFAULT).trim())
+        pem.append("\n-----END CERTIFICATE-----\n")
+    }
+
+    /**
+     * Read a host CA directory. Empty-but-present dirs (Android 14+
+     * `/system/etc/security/cacerts`) must not count as a hit.
+     */
+    private fun loadPemFromHostDir(dir: File): String? {
+        val files = try {
+            dir.listFiles()
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        if (files.isEmpty()) return null
+        val pem = StringBuilder()
+        val cf = try {
+            CertificateFactory.getInstance("X.509")
+        } catch (_: Exception) {
+            null
+        }
+        for (f in files) {
+            if (!f.isFile || f.length() == 0L) continue
+            val bytes = try {
+                f.readBytes()
+            } catch (_: Exception) {
+                continue
+            }
+            val text = String(bytes, Charsets.ISO_8859_1)
+            if (text.contains("BEGIN CERTIFICATE")) {
+                pem.append(text)
+                if (!text.endsWith("\n")) pem.append('\n')
+            } else if (cf != null) {
+                try {
+                    val cert = cf.generateCertificate(bytes.inputStream()) as? X509Certificate ?: continue
+                    appendPem(pem, cert)
+                } catch (_: Exception) {
+                }
+            }
+        }
+        return if (pem.length >= 2048) pem.toString() else null
+    }
+
+    private fun copyHostCaHashFiles(dir: File, guestCerts: File): Int {
+        val files = try {
+            dir.listFiles()
+        } catch (_: Exception) {
+            null
+        } ?: return 0
+        var n = 0
+        for (f in files) {
+            if (!f.isFile || f.length() == 0L) continue
+            try {
+                f.copyTo(File(guestCerts, f.name), overwrite = true)
+                n++
+            } catch (_: Exception) {
+            }
+        }
+        if (n > 0) Log.i(TAG, "[CA] copied $n hash certs from ${dir.path}")
+        return n
+    }
+
+    /**
      * Unpack vendored aarch64 aapt2/zipalign/adb into `/opt/android-sdk`.
      * Google's official build-tools are x86_64; these binaries are AOSP static
      * aarch64 builds (lzhiyong/android-sdk-tools 35.0.2).
@@ -497,6 +633,7 @@ class RootfsManager private constructor(private val context: Context) {
         try {
             fileCount = copyAssetDir(DEFAULT_MOUNT_ASSET, rootfsDir)
             configureUbuntuGuest()
+            injectHostCaBundle()
         } catch (t: Throwable) {
             Log.w(TAG, "[DefaultMount] overlay failed: ${t.message}", t)
             return@withContext
@@ -578,6 +715,13 @@ class RootfsManager private constructor(private val context: Context) {
         val entries = context.assets.list(assetPath) ?: return 0
         if (entries.isEmpty()) {
             // Leaf: asset is a file. Copy it.
+            // User-chosen apt/pip/npm mirrors are restored after overlay, but
+            // skip clobbering them when a .bak from applyMirror already exists
+            // so a failed restore cannot briefly revert to official HTTP.
+            if (prefix in OVERLAY_SKIP_IF_BAK && File(targetBase, "$prefix.bak").exists()) {
+                Log.i(TAG, "[DefaultMount] skip overlay of $prefix (user mirror bak present)")
+                return 0
+            }
             val dest = File(targetBase, prefix)
             dest.parentFile?.mkdirs()
             // [T-mcp-cli-readonly-android] A prior boot may have set this file
@@ -649,16 +793,30 @@ class RootfsManager private constructor(private val context: Context) {
                     outFile.mkdirs()
                 }
                 '2' -> {
-                    // Symbolic link
+                    // Symbolic link. Android app-private storage often rejects
+                    // createSymbolicLink; fall back to copying the referent so
+                    // /etc/ssl/certs hash names still resolve (otherwise apt/curl
+                    // report "no valid CA chain").
                     outFile.parentFile?.mkdirs()
+                    if (outFile.exists()) outFile.delete()
+                    val linkPath = Paths.get(linkName)
                     try {
-                        java.nio.file.Files.createSymbolicLink(
-                            outFile.toPath(),
-                            java.nio.file.Paths.get(linkName)
-                        )
+                        Files.createSymbolicLink(outFile.toPath(), linkPath)
                     } catch (_: Exception) {
-                        // Symlinks may fail on some Android versions; skip
-                        Log.w(TAG, "Failed to create symlink: $fullName -> $linkName")
+                        val dest = if (linkPath.isAbsolute) {
+                            File(targetDir, linkPath.toString().trimStart('/'))
+                        } else {
+                            File(outFile.parentFile, linkName)
+                        }
+                        try {
+                            if (dest.exists() && dest.isFile) {
+                                dest.copyTo(outFile, overwrite = true)
+                            } else {
+                                Log.w(TAG, "Failed to create symlink: $fullName -> $linkName")
+                            }
+                        } catch (t: Exception) {
+                            Log.w(TAG, "Failed to materialize symlink $fullName: ${t.message}")
+                        }
                     }
                 }
                 '0', '\u0000' -> {
@@ -780,7 +938,7 @@ class RootfsManager private constructor(private val context: Context) {
         }
     }
 
-    private val aptMutex = kotlinx.coroutines.sync.Mutex()
+    private val aptMutex get() = SandboxResourceGate.aptMutex
     private val pipWorldFile: File get() = File(context.filesDir, "pip-world.txt")
     private val pipWorldFailedFile: File get() = File(context.filesDir, "pip-world-failed.txt")
     private val dpkgWorldFile: File get() = File(context.filesDir, "dpkg-world.txt")
@@ -836,6 +994,14 @@ class RootfsManager private constructor(private val context: Context) {
         aptMutex.withLock { runMinisMirrorAutoLocked() }
     }
 
+    /**
+     * First-boot / heal path: install curl/wget/python3/git (and nodejs once)
+     * so agent tools work without waiting for the full minis-dev-setup toolchain.
+     */
+    suspend fun seedNetworkTools() = withContext(Dispatchers.IO) {
+        aptMutex.withLock { seedNetworkToolsLocked() }
+    }
+
     private fun runMinisMirrorAutoLocked() {
         val helper = File(rootfsDir, "usr/local/bin/minis-mirror")
         if (!helper.exists()) return
@@ -847,6 +1013,35 @@ class RootfsManager private constructor(private val context: Context) {
         )
         val r = runProotWithDeadline(cmd, prootLoaderEnv(), 180)
         Log.i(TAG, "[minis-mirror auto] exit=${r.exitCode}")
+    }
+
+    private fun seedNetworkToolsLocked() {
+        if (!prootBinary.exists()) return
+        val essentials = mutableListOf<String>()
+        val ca = File(rootfsDir, "etc/ssl/certs/ca-certificates.crt")
+        if (!ca.exists() || ca.length() < 1024L) essentials += "ca-certificates"
+        if (!File(rootfsDir, "usr/bin/curl").exists()) essentials += "curl"
+        if (!File(rootfsDir, "usr/bin/wget").exists()) essentials += "wget"
+        if (!File(rootfsDir, "usr/bin/python3").exists()) essentials += "python3"
+        if (!File(rootfsDir, "usr/bin/git").exists()) essentials += "git"
+        if (!File(rootfsDir, "usr/bin/fuser").exists()) essentials += "psmisc"
+        if (!File(rootfsDir, "usr/bin/unzip").exists()) essentials += "unzip"
+        if (essentials.isNotEmpty()) {
+            val seed = (essentials + listOf("ca-certificates", "python3-pip")).distinct()
+            Log.i(TAG, "[net-seed] installing ${seed.joinToString()}")
+            val r = runAptInstallInGuest(seed)
+            Log.i(TAG, "[net-seed] essentials exit=${r.exitCode}")
+        }
+        val node = File(rootfsDir, "usr/bin/node").takeIf { it.exists() }
+            ?: File(rootfsDir, "usr/bin/nodejs")
+        val nodeAttempted = File(rootfsDir, "var/lib/minis/node-seed.attempted")
+        if (!node.exists() && !nodeAttempted.exists()) {
+            nodeAttempted.parentFile?.mkdirs()
+            nodeAttempted.writeText("1\n")
+            Log.i(TAG, "[net-seed] installing nodejs npm")
+            val r = runAptInstallInGuest(listOf("nodejs", "npm"))
+            Log.i(TAG, "[net-seed] nodejs exit=${r.exitCode}")
+        }
     }
 
     private fun dumpDpkgWorldLocked() {
@@ -982,8 +1177,16 @@ class RootfsManager private constructor(private val context: Context) {
         val pkgs = pkgNames.filter { DPKG_PKG_NAME.matches(it) }
         if (pkgs.isEmpty()) return AptResult(0, "")
         val script = buildString {
-            append("DEBIAN_FRONTEND=noninteractive apt-get update -qq && ")
-            append("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-upgrade ")
+            append("export TMPDIR=/tmp TMP=/tmp TEMP=/tmp DEBIAN_FRONTEND=noninteractive ")
+            append("SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt ")
+            append("CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt; ")
+            append("mkdir -p /tmp /var/tmp /var/lock; ")
+            append("[ -f /usr/local/lib/minis/apt-lock.sh ] && . /usr/local/lib/minis/apt-lock.sh; ")
+            append("minis_acquire_apt_lock 120 || true; ")
+            append("DEBIAN_FRONTEND=noninteractive apt-get ")
+            append("-o Acquire::https::Verify-Peer=false ")
+            append("-o Acquire::https::Verify-Host=false update -qq || true; ")
+            append("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-upgrade --no-install-recommends ")
             append(pkgs.joinToString(" "))
         }
         val cmd = listOf(
@@ -1131,6 +1334,13 @@ class RootfsManager private constructor(private val context: Context) {
             "HOME" to "/root",
             "LANG" to "C.UTF-8",
             "DEBIAN_FRONTEND" to "noninteractive",
+            "SSL_CERT_FILE" to "/etc/ssl/certs/ca-certificates.crt",
+            "SSL_CERT_DIR" to "/etc/ssl/certs",
+            "CURL_CA_BUNDLE" to "/etc/ssl/certs/ca-certificates.crt",
+            "REQUESTS_CA_BUNDLE" to "/etc/ssl/certs/ca-certificates.crt",
+            "GIT_SSL_CAINFO" to "/etc/ssl/certs/ca-certificates.crt",
+            "PIP_CERT" to "/etc/ssl/certs/ca-certificates.crt",
+            "NODE_EXTRA_CA_CERTS" to "/etc/ssl/certs/ca-certificates.crt",
         )
         File(nativeLibDir, "libproot-loader.so").takeIf { it.exists() }?.let {
             env["PROOT_LOADER"] = it.absolutePath
@@ -1209,6 +1419,24 @@ class RootfsManager private constructor(private val context: Context) {
         private const val SDK_TOOLS_ASSET = "android-sdk-tools-aarch64.zip"
         private const val CMD_TOOLS_ASSET = "android-cmdline-tools.zip"
         private const val SDK_BUILD_TOOLS_REV = "35.0.2"
+
+        /**
+         * Android 14+ stores CAs in the conscrypt APEX; `/system/etc/security/cacerts`
+         * is often present but empty. Scan in this order; skip empty dirs.
+         */
+        private val HOST_CA_DIRS = listOf(
+            "/apex/com.android.conscrypt/cacerts",
+            "/system/etc/security/cacerts",
+            "/data/misc/user/0/cacerts-added",
+            "/system/etc/security/cacerts_original",
+        )
+
+        /** Overlay leaves these alone when applyMirror already wrote a .bak. */
+        private val OVERLAY_SKIP_IF_BAK = setOf(
+            "etc/apt/sources.list",
+            "etc/pip.conf",
+            "root/.npmrc",
+        )
 
         /**
          * Rootfs paths whose contents must be executable. Matches iOS

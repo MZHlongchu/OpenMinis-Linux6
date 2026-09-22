@@ -38,11 +38,11 @@ APPLY_USER="${SUDO_USER:-$(id -un)}"
 APPLY_GROUP="$(id -gn "$APPLY_USER" 2>/dev/null || echo "$APPLY_USER")"
 
 # Ordered fallback chain. First entry = preferred (default: TUNA, matching
-# the stock rootfs). Mirrors must serve /dists/noble/Release over HTTPS
-# (HTTP is acceptable pre-CA-bootstrap but this selector always has CA trust
-# available via the offline bootstrap debs, so we probe HTTPS directly).
+# the stock rootfs). cmd_auto uses apt-get itself as the health check so
+# curl is optional; HTTPS→HTTP rewrite is tried when CA verify fails.
 MIRRORS="tuna:https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ \
 ustc:https://mirrors.ustc.edu.cn/ubuntu-ports/ \
+sjtu:https://mirror.sjtu.edu.cn/ubuntu-ports/ \
 aliyun:https://mirrors.aliyun.com/ubuntu-ports/ \
 huawei:https://mirrors.huaweicloud.com/ubuntu-ports/ \
 tencent:https://mirrors.cloud.tencent.com/ubuntu-ports/ \
@@ -118,6 +118,7 @@ id_for_uri() {
         *cloud.tencent.com*) echo "tencent" ;;
         *nju.edu.cn*)        echo "nju" ;;
         *bfsu.edu.cn*)       echo "bfsu" ;;
+        *sjtu.edu.cn*)       echo "sjtu" ;;
         *ports.ubuntu.com*)  echo "official" ;;
         *)                   echo "unknown" ;;
     esac
@@ -133,13 +134,54 @@ id_position() {
 }
 
 # ── probing ──────────────────────────────────────────────────────────────────
+# bash /dev/tcp HEAD — no curl/wget. HTTPS is not TLS; we always hit :80.
+http_head() {
+    # $1=host $2=path $3=port
+    command -v bash >/dev/null 2>&1 || return 1
+    command -v timeout >/dev/null 2>&1 || return 1
+    _code=$(timeout "$PROBE_TIMEOUT" bash -c '
+        exec 3<>"/dev/tcp/$1/$3" 2>/dev/null || exit 1
+        printf "HEAD %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n" "$2" "$1" >&3
+        IFS=" " read -r -t 3 _ c _ <&3
+        exec 3<&- 3>&-
+        echo "$c"
+    ' _ "$1" "$2" "${3:-80}" 2>/dev/null) || return 1
+    [ "$_code" = "200" ] || [ "$_code" = "301" ] || [ "$_code" = "302" ]
+}
+
+probe_http_url() {
+    # $1 = base url (http or https). Fast TCP+HTTP filter on port 80.
+    _u="${1#http://}"
+    _u="${_u#https://}"
+    _host="${_u%%/*}"
+    _rest="/${_u#*/}"
+    _path="${_rest%/}/$PROBE_PATH"
+    http_head "$_host" "$_path" 80
+}
+
 probe_one() {
     # $1 = base url; prints "<ms> <http_code>" or "999999 000" on failure.
     _url="$1$PROBE_PATH"
-    _out="$(curl -sL -o /dev/null --max-time "$PROBE_TIMEOUT" \
-        -w '%{time_total} %{http_code}' "$_url" 2>/dev/null)" || true
-    [ -n "$_out" ] || _out="999999 000"
-    echo "$_out"
+    if command -v curl >/dev/null 2>&1; then
+        _out="$(curl -sL -o /dev/null --max-time "$PROBE_TIMEOUT" \
+            -w '%{time_total} %{http_code}' "$_url" 2>/dev/null)" || true
+        [ -n "$_out" ] || _out="999999 000"
+        echo "$_out"
+        return
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        if wget -q -O /dev/null --timeout="$PROBE_TIMEOUT" --tries=1 "$_url"; then
+            echo "1 200"
+        else
+            echo "999999 000"
+        fi
+        return
+    fi
+    if probe_http_url "$1"; then
+        echo "1 200"
+    else
+        echo "999999 000"
+    fi
 }
 
 mirror_ok() {
@@ -178,11 +220,15 @@ cmd_probe() {
     return 0
 }
 
-# ── apt serialization (mirrors the app's apt lock discipline) ────────────────
+# ── apt serialization (flock, then stale dpkg locks; mkdir fallback) ────────
 acquire_lock() {
-    # No flock in the minbase rootfs — use a mkdir lock (atomic on POSIX)
-    # with a stale-lock protocol keyed on the recorded PID.
     require_state_dir
+    if [ -f /usr/local/lib/minis/apt-lock.sh ]; then
+        # shellcheck source=/dev/null
+        . /usr/local/lib/minis/apt-lock.sh
+        minis_acquire_apt_lock 180 && return 0
+        die "another apt/mirror operation appears to hold the lock" 1
+    fi
     if mkdir "$LOCK_FILE.d" 2>/dev/null; then
         echo $$ > "$LOCK_FILE.d/pid"
         return 0
@@ -196,6 +242,9 @@ acquire_lock() {
 }
 
 release_lock() {
+    if type minis_release_apt_lock >/dev/null 2>&1; then
+        minis_release_apt_lock
+    fi
     rm -rf "$LOCK_FILE.d" 2>/dev/null
     return 0
 }
@@ -203,6 +252,10 @@ release_lock() {
 # ── apply ────────────────────────────────────────────────────────────────────
 apply_uri() {
     # $1 = uri; rewrite /etc/apt/sources.list atomically.
+    # Drop leftover deb822 ubuntu.sources so noble archive URIs cannot 404
+    # alongside the classic list (apt merges both and the error looks like
+    # the mirror we just selected is broken).
+    rm -f /etc/apt/sources.list.d/*.sources
     _tmp="$SOURCES_FILE.tmp.$$"
     gen_sources "$1" > "$_tmp"
     chown_apply "$_tmp"
@@ -218,11 +271,15 @@ apt_update_ok() {
     # apt's exit code alone is NOT a truth signal: a mirror that fails to
     # download only produces `W:`/`Err:` lines and apt still exits 0
     # (observed on noble). Treat error lines in the output as failure too.
+    export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
+    export SSL_CERT_FILE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
+    export CURL_CA_BUNDLE="${CURL_CA_BUNDLE:-$SSL_CERT_FILE}"
     _out="$(mktemp)"
+    _apt_opts="-o Acquire::https::Verify-Peer=false -o Acquire::https::Verify-Host=false"
     if [ -x "$APT_HELPER" ]; then
         timeout "$UPDATE_TIMEOUT" "$APT_HELPER" update > "$_out" 2>&1
     else
-        timeout "$UPDATE_TIMEOUT" apt-get update > "$_out" 2>&1
+        timeout "$UPDATE_TIMEOUT" apt-get $_apt_opts update > "$_out" 2>&1
     fi
     _rc=$?
     if [ $_rc = 0 ] && ! grep -qE '^Err:|^E: |^W: Some index files failed' "$_out"; then
@@ -233,6 +290,31 @@ apt_update_ok() {
     log "apt update failed (rc=$_rc), tail of output:"
     tail -5 "$_out" >&2
     rm -f "$_out"
+    return 1
+}
+
+apt_probe_uri() {
+    # End-to-end apt check against $1 without rewriting the live sources.
+    # Dir::Etc::sourceparts=- so ubuntu.sources leftovers cannot mask failure.
+    _list="/tmp/minis-probe.list"
+    gen_sources "$1" > "$_list"
+    _out="$(mktemp)"
+    timeout 20 apt-get \
+        -o Dir::Etc::sourcelist="$_list" \
+        -o Dir::Etc::sourceparts=- \
+        -o APT::Get::List-Cleanup=0 \
+        -o Acquire::Retries=0 \
+        -o Acquire::https::Verify-Peer=false \
+        -o Acquire::https::Verify-Host=false \
+        update > "$_out" 2>&1
+    _rc=$?
+    if [ $_rc = 0 ] && ! grep -qE '^Err:|^E: |^W: Some index files failed' "$_out"; then
+        rm -f "$_out" "$_list"
+        return 0
+    fi
+    log "apt probe failed for $1 (rc=$_rc)"
+    tail -3 "$_out" >&2
+    rm -f "$_out" "$_list"
     return 1
 }
 
@@ -252,31 +334,62 @@ cmd_auto() {
     ensure_stock
     require_state_dir
     cur="$(current_uri)"
-    [ -n "$cur" ] || cur="https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/"
+    [ -n "$cur" ] || cur="http://ports.ubuntu.com/ubuntu-ports/"
 
-    # Current mirror healthy? Probe; if 200 within timeout we are done.
-    if mirror_ok "$cur"; then
+    acquire_lock
+    # apt-get is always present; curl is not. Use apt update as the health
+    # check so a missing curl cannot strand HTTPS SJTU / TUNA sources.
+    if apt_update_ok; then
         log "current mirror OK ($(id_for_uri "$cur")) — no switch"
         write_state "{\"current\":\"$(id_for_uri "$cur")\",\"uri\":\"$cur\",\"probed\":\"$(now_iso)\",\"auto\":true,\"ok\":true}"
+        release_lock
         return 0
     fi
-    log "current mirror ($(id_for_uri "$cur")) unreachable — probing fallback chain"
 
+    case "$cur" in
+        https://*)
+            _http="http://${cur#https://}"
+            log "current HTTPS mirror failed — trying HTTP rewrite"
+            if switch_to "$(id_for_uri "$cur")" "$_http"; then
+                log "HTTP rewrite of current mirror works"
+                release_lock
+                return 0
+            fi
+            apply_uri "$cur"
+            ;;
+    esac
+
+    log "current mirror ($(id_for_uri "$cur")) unhealthy — walking fallback chain"
     for entry in $MIRRORS; do
         _id="${entry%%:*}"
         _url="${entry#*:}"
         [ "$_url" = "$cur" ] && continue
-        if mirror_ok "$_url"; then
-            acquire_lock
-            if switch_to "$_id" "$_url"; then
-                release_lock
-                log "fallback complete: now on $_id"
-                return 0
-            fi
-            release_lock
-            log "$_id probe passed but apt update failed — trying next"
+        # Fast TCP+HTTP filter when bash is present; skip dead hosts.
+        if command -v bash >/dev/null 2>&1; then
+            probe_http_url "$_url" || {
+                case "$_url" in
+                    https://*) probe_http_url "http://${_url#https://}" || continue ;;
+                    *) continue ;;
+                esac
+            }
         fi
+        if apt_probe_uri "$_url" && switch_to "$_id" "$_url"; then
+            log "fallback complete: now on $_id"
+            release_lock
+            return 0
+        fi
+        case "$_url" in
+            https://*)
+                _http="http://${_url#https://}"
+                if apt_probe_uri "$_http" && switch_to "$_id" "$_http"; then
+                    log "fallback complete: now on $_id (http)"
+                    release_lock
+                    return 0
+                fi
+                ;;
+        esac
     done
+    release_lock
     write_state "{\"current\":\"none\",\"uri\":\"\",\"updated\":\"$(now_iso)\",\"auto\":true,\"ok\":false}"
     die "no mirror in the chain is reachable" 1
 }

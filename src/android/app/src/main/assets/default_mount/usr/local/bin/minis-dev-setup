@@ -1,8 +1,17 @@
 #!/bin/sh
 # Install a developer toolchain into the Ubuntu PRoot guest.
 # Packages persist on the rootfs; safe to re-run.
-set -e
+#
+# Do not `set -e`: a stale dpkg lock or one failed package must not abort
+# the seed of curl/wget/python3/git/node.
+
 export DEBIAN_FRONTEND=noninteractive
+export SSL_CERT_FILE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
+export SSL_CERT_DIR="${SSL_CERT_DIR:-/etc/ssl/certs}"
+export CURL_CA_BUNDLE="${CURL_CA_BUNDLE:-$SSL_CERT_FILE}"
+export REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-$SSL_CERT_FILE}"
+export GIT_SSL_CAINFO="${GIT_SSL_CAINFO:-$SSL_CERT_FILE}"
+export NODE_EXTRA_CA_CERTS="${NODE_EXTRA_CA_CERTS:-$SSL_CERT_FILE}"
 
 # Android's process env leaks TMPDIR=/data/user/0/<pkg>/cache into PRoot.
 # That path is not a guest directory (and Android may have wiped it), so
@@ -13,32 +22,66 @@ export TEMP=/tmp
 mkdir -p /tmp /var/tmp
 chmod 1777 /tmp /var/tmp 2>/dev/null || true
 
-echo "minis-dev-setup: Ubuntu glibc toolchain (bash, gcc, python, git, ffmpeg, jdk, gradle)"
+echo "minis-dev-setup: Ubuntu glibc toolchain (bash, gcc, python, git, node, ffmpeg, jdk, gradle)"
 
 if ! command -v apt-get >/dev/null 2>&1; then
   echo "minis-dev-setup: apt-get not found — is this the Minis Linux Ubuntu guest?" >&2
   exit 1
 fi
 
-# Recover a half-configured dpkg database left by a previous TMPDIR failure.
+if [ -f /usr/local/lib/minis/apt-lock.sh ]; then
+  # shellcheck source=/dev/null
+  . /usr/local/lib/minis/apt-lock.sh
+  minis_acquire_apt_lock 300 || echo "minis-dev-setup: apt lock busy, continuing"
+  trap 'minis_release_apt_lock' EXIT INT TERM
+fi
+
+apt_try() {
+  n=0
+  while [ "$n" -lt 8 ]; do
+    if "$@"; then
+      return 0
+    fi
+    echo "minis-dev-setup: command failed (try $n), repairing dpkg"
+    minis_clear_stale_dpkg_locks 2>/dev/null || {
+      rm -f /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend \
+            /var/cache/apt/archives/lock /var/lib/apt/lists/lock
+      dpkg --configure -a || true
+    }
+    apt-get -f install -y --no-install-recommends || true
+    n=$((n + 1))
+    sleep 2
+  done
+  return 1
+}
+
 echo "minis-dev-setup: repairing broken/incomplete dpkg state (if any)"
 dpkg --configure -a || true
 apt-get -f install -y --no-install-recommends || true
 
-# First update may hit HTTPS ubuntu mirrors before ca-certificates exists.
-apt-get -o Acquire::https::Verify-Peer=false -o Acquire::https::Verify-Host=false update \
-  || apt-get update
+echo "minis-dev-setup: apt-get update"
+apt_try apt-get -o Acquire::https::Verify-Peer=false -o Acquire::https::Verify-Host=false update \
+  || apt_try apt-get update \
+  || true
 
-# Certs first so later HTTPS (GitHub, SDK mirrors) works.
-apt-get install -y --no-install-recommends ca-certificates || true
+# Wave 0: everyday CLI tools so later HTTPS (GitHub, SDK) works even if
+# the rest of the toolchain fails.
+echo "minis-dev-setup: seeding ca-certificates curl wget python3 git nodejs"
+apt_try apt-get install -y --no-install-recommends \
+  ca-certificates curl wget python3 python3-pip git git-lfs nodejs npm \
+  || apt_try apt-get install -y --no-install-recommends \
+       ca-certificates curl wget python3 git nodejs \
+  || true
 update-ca-certificates 2>/dev/null || true
 apt-get update || true
 
-apt-get install -y --no-install-recommends \
+echo "minis-dev-setup: installing developer toolchain"
+apt_try apt-get install -y --no-install-recommends \
   bash bash-completion \
   build-essential gcc g++ make cmake ninja-build pkg-config \
   python3 python3-pip python3-venv python3-dev \
   git git-lfs \
+  nodejs npm \
   ffmpeg \
   openjdk-21-jdk-headless \
   unzip curl wget ca-certificates \
@@ -48,9 +91,10 @@ apt-get install -y --no-install-recommends \
   rsync \
   sqlite3 \
   golang-go \
-  gradle || apt-get install -y --no-install-recommends \
-    bash build-essential python3 python3-pip git ffmpeg \
-    openjdk-21-jdk-headless unzip curl wget ca-certificates ninja-build golang-go
+  gradle \
+  || apt_try apt-get install -y --no-install-recommends \
+       bash build-essential python3 python3-pip git nodejs ffmpeg \
+       openjdk-21-jdk-headless unzip curl wget ca-certificates ninja-build golang-go
 
 dpkg --configure -a || true
 apt-get -f install -y --no-install-recommends || true
@@ -69,6 +113,12 @@ cat > /etc/profile.d/minis-dev.sh <<EOF
 export TMPDIR=/tmp
 export TMP=/tmp
 export TEMP=/tmp
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export SSL_CERT_DIR=/etc/ssl/certs
+export CURL_CA_BUNDLE=\$SSL_CERT_FILE
+export REQUESTS_CA_BUNDLE=\$SSL_CERT_FILE
+export GIT_SSL_CAINFO=\$SSL_CERT_FILE
+export NODE_EXTRA_CA_CERTS=\$SSL_CERT_FILE
 ${JAVA_HOME:+export JAVA_HOME=$JAVA_HOME}
 export ANDROID_HOME=/opt/android-sdk
 export ANDROID_SDK_ROOT=/opt/android-sdk
@@ -84,6 +134,10 @@ echo "  bash:    $(command -v bash 2>/dev/null || echo missing)"
 echo "  gcc:     $(command -v gcc 2>/dev/null || echo missing)"
 echo "  python3: $(command -v python3 2>/dev/null || echo missing)"
 echo "  git:     $(command -v git 2>/dev/null || echo missing)"
+echo "  node:    $(command -v node 2>/dev/null || command -v nodejs 2>/dev/null || echo missing)"
+echo "  npm:     $(command -v npm 2>/dev/null || echo missing)"
+echo "  curl:    $(command -v curl 2>/dev/null || echo missing)"
+echo "  wget:    $(command -v wget 2>/dev/null || echo missing)"
 echo "  ffmpeg:  $(command -v ffmpeg 2>/dev/null || echo missing)"
 echo "  java:    $(command -v java 2>/dev/null || echo missing)"
 echo "  gradle:  $(command -v gradle 2>/dev/null || echo missing)"

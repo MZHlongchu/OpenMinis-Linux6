@@ -10,7 +10,12 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object SandboxResourceGate {
     private val apkLock = Mutex()
-    private val aptLock = Mutex()
+    /**
+     * Shared with [RootfsManager] so boot-time `minis-mirror` / dpkg-world
+     * restore cannot race an agent `apt-get` / `minis-dev-setup` on the guest
+     * dpkg lock files.
+     */
+    val aptMutex = Mutex()
     private val named = ConcurrentHashMap<String, Mutex>()
 
     fun isApkBuild(command: String): Boolean {
@@ -29,13 +34,14 @@ object SandboxResourceGate {
         val c = command.lowercase()
         return c.contains("apt-get") || c.contains("apt ") ||
             c.contains("dpkg") || c.contains("sdkmanager") ||
-            c.contains("minis-dev-setup") || c.contains("minis-android-sdk-setup")
+            c.contains("minis-dev-setup") || c.contains("minis-android-sdk-setup") ||
+            c.contains("minis-mirror")
     }
 
     suspend fun <T> withCommandLock(command: String, block: suspend () -> T): T {
         return when {
             isApkBuild(command) -> apkLock.withLock { block() }
-            isPackageManager(command) -> aptLock.withLock { block() }
+            isPackageManager(command) -> aptMutex.withLock { block() }
             else -> block()
         }
     }
