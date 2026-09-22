@@ -2,11 +2,11 @@
 
 **Minis Ultra** 是 OpenMinis 的 Linux 沙箱 Android 分支：保留 Agent + PRoot 沙箱，加上偏 Linux 的工具链、主机 `su` 直通、POSIX 共享存储挂载，以及独立包名，因此可以和官方 OpenMinis **并排安装**。
 
-启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。当前版本 **1.36.16-linux**（versionCode 69）。
+启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。当前版本 **1.36.17-linux**（versionCode 70）。
 
 滚动 APK：GitHub Releases 标签 `android-latest`，文件名 `minis-ultra-com.openminis.linux.apk`。关于页 / 检查更新走 fork `tall-1997/OpenMinis-Linux`；滚动包用 release body 里的 `versionCode` / `versionName`（以及 APK `updated_at`）判断是否比本机新。
 
-正式发行包：[Releases `1.36.16-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.16-linux)。1.36.16：Termux 终端、提供商置顶/并行刷新、dpkg+pip 世界快照、一级设置无返回箭头、选中文字分享、技能 requirements 与平台环境变量；并含 1.36.15 的工作区归档与原子写文件。详见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
+正式发行包：[Releases `1.36.17-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.17-linux)。1.36.17：工作区半归档收敛、移出/解散分组拷回文件、会话列表单 FAB。详见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ## 沙箱当服务器
 

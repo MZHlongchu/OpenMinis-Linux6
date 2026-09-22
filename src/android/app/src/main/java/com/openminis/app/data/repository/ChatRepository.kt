@@ -6,9 +6,13 @@ import com.openminis.app.data.db.ChatSessionEntity
 import com.openminis.app.data.db.FolderEntity
 import com.openminis.app.data.db.MessageEntity
 import com.openminis.app.data.model.ModelAttributionSnapshot
+import com.openminis.app.logging.AppLogger
 import com.openminis.app.sandbox.ExecutionCoordinator
 import com.openminis.app.sandbox.SessionWorkspace
+import com.openminis.app.sandbox.WorkspaceMover
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
@@ -180,6 +184,26 @@ class ChatRepository(
     }
 
     /**
+     * Every launch: if a session is filed in a project but still holds private
+     * copies of the shared subdirs (the 1.36.14 partial-filing leftover), move
+     * those copies into the project. Idempotent; unfiled sessions are skipped.
+     */
+    suspend fun reconcileWorkspaceFiles() {
+        val dir = filesDir ?: return
+        val sessions = dao.listSessions()
+        withContext(Dispatchers.IO) {
+            for (s in sessions) {
+                val target = s.folderId ?: continue
+                runCatching {
+                    WorkspaceMover.moveSessionIntoProject(dir, s.id, target)
+                }.onFailure {
+                    AppLogger.warning(TAG, "reconcile failed for ${s.id}: ${it.message}")
+                }
+            }
+        }
+    }
+
+    /**
      * Rename / re-describe. The UUID key is untouched, so members never move —
      * that is the whole reason the group is keyed by UUID and not by name.
      *
@@ -224,6 +248,10 @@ class ChatRepository(
         dao.clearFolderForSessions(id)
         dao.deleteFolder(id)
         for (sid in memberIds) SessionWorkspace.rememberFolder(sid, null)
+        val dir = filesDir
+        if (dir != null && memberIds.isNotEmpty()) {
+            copyBackAndMaybeDropProjects(dir, memberIds.associateWith { id })
+        }
         return memberIds
     }
 
@@ -237,12 +265,31 @@ class ChatRepository(
      */
     suspend fun setFolderForSessions(folderId: String?, sessionIds: List<String>) {
         if (sessionIds.isEmpty()) return
+        val leavingProject = if (folderId == null) {
+            sessionIds.associateWith { SessionWorkspace.folderIdFor(it) }
+                .mapNotNull { (sid, fid) -> fid?.let { sid to it } }
+                .toMap()
+        } else {
+            emptyMap()
+        }
         for (sid in sessionIds) {
             dao.setSessionFolder(sid, folderId)
             SessionWorkspace.rememberFolder(sid, folderId)
         }
+        val dir = filesDir ?: return
         if (folderId != null) {
-            filesDir?.let { SessionWorkspace.ensureProjectDirs(it, folderId) }
+            SessionWorkspace.ensureProjectDirs(dir, folderId)
+            withContext(Dispatchers.IO) {
+                for (sid in sessionIds) {
+                    runCatching {
+                        WorkspaceMover.moveSessionIntoProject(dir, sid, folderId)
+                    }.onFailure {
+                        AppLogger.warning(TAG, "file-move failed for $sid: ${it.message}")
+                    }
+                }
+            }
+        } else {
+            copyBackAndMaybeDropProjects(dir, leavingProject)
         }
     }
 
@@ -257,9 +304,60 @@ class ChatRepository(
         val n = dao.setSessionFolderIfUnfiled(sessionId, folderId)
         if (n > 0) {
             SessionWorkspace.rememberFolder(sessionId, folderId)
-            filesDir?.let { SessionWorkspace.ensureProjectDirs(it, folderId) }
+            val d = filesDir
+            if (d != null) {
+                SessionWorkspace.ensureProjectDirs(d, folderId)
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        WorkspaceMover.moveSessionIntoProject(d, sessionId, folderId)
+                    }.onFailure {
+                        AppLogger.warning(TAG, "file-move failed for $sessionId: ${it.message}")
+                    }
+                }
+            }
         }
         return n > 0
+    }
+
+    /**
+     * Copy a project's shared files into each leaving session's private dir.
+     * Drop the project tree only when no remaining member exists AND every
+     * leaver copied back without refusal, exception, or conflict. A conflict
+     * means the private subdir already had files, so deleting the project
+     * would throw away the shared copy.
+     */
+    private suspend fun copyBackAndMaybeDropProjects(
+        filesDir: File,
+        leavingProject: Map<String, String>,
+    ) {
+        if (leavingProject.isEmpty()) return
+        withContext(Dispatchers.IO) {
+            val independent = mutableSetOf<String>()
+            for ((sid, oldProject) in leavingProject) {
+                val result = runCatching {
+                    WorkspaceMover.copyProjectToSession(filesDir, sid, oldProject)
+                }.onFailure {
+                    AppLogger.warning(TAG, "copy-back failed for $sid: ${it.message}")
+                }.getOrNull()
+                if (result != null && result.independent) independent.add(sid)
+            }
+            for (proj in leavingProject.values.toSet()) {
+                val remaining = dao.sessionIdsInFolder(proj)
+                if (remaining.isNotEmpty()) continue
+                val leavers = leavingProject.filterValues { it == proj }.keys
+                val blocked = leavers - independent
+                if (blocked.isNotEmpty()) {
+                    AppLogger.info(
+                        TAG,
+                        "keeping project $proj; copy-back incomplete for $blocked",
+                    )
+                    continue
+                }
+                if (SessionWorkspace.deleteProject(filesDir, proj)) {
+                    AppLogger.info(TAG, "dropped empty project $proj after copy-back")
+                }
+            }
+        }
     }
 
     /**
@@ -763,6 +861,8 @@ class ChatRepository(
     }
 
     companion object {
+        private const val TAG = "ChatRepository"
+
         // Session-list preview only needs ~100 chars. Regex.replace on a
         // 500 KB parts_json body was a leftover ICU Matcher.reset path.
         private const val PREVIEW_CLEAN_CHARS = 400

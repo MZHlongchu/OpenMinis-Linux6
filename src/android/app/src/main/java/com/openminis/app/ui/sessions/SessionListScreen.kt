@@ -65,7 +65,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.outlined.AddComment
-import androidx.compose.material.icons.outlined.Chat
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.FolderOff
@@ -1260,12 +1259,6 @@ fun SessionListScreen(
                     searchQuery = searchQuery,
                     isSearching = isSearching,
                     hasSessions = sessions.isNotEmpty() || isSearchActive,
-                    onNewChat = {
-                        scope.launch {
-                            val sessionId = viewModel.createNewWorkspaceSession()
-                            if (sessionId != null) onNewChatGuarded(sessionId)
-                        }
-                    },
                     onCreateFolder = { name, description ->
                         scope.launch {
                             viewModel.createWorkspaceFolder(name, description)
@@ -1506,7 +1499,6 @@ private fun DualFabRow(
     searchQuery: String,
     isSearching: Boolean,
     hasSessions: Boolean,
-    onNewChat: () -> Unit,
     onCreateFolder: (String, String?) -> Unit,
     onNewChatWithGroup: (String) -> Unit,
     modelGroups: List<com.openminis.app.data.model.ModelGroup>,
@@ -1569,30 +1561,6 @@ private fun DualFabRow(
                     )
                 },
         ) {
-            // Secondary FAB: new chat. Sits ABOVE the main FAB so the primary
-            // thumb target stays the bottom-right button.
-            //
-            // The main FAB used to be the new-chat button, and that is what
-            // made this addition necessary: turning it into "new folder" would
-            // otherwise have removed the only way to start a conversation.
-            // Long-press on the main FAB keeps its group menu, so the two
-            // gestures never collide.
-            FloatingActionButton(
-                onClick = onNewChat,
-                shape = CircleShape,
-                containerColor = ChatColors.secondaryBg,
-                modifier = Modifier
-                    .size(40.dp)
-                    .padding(bottom = 12.dp),
-                elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 4.dp),
-            ) {
-                Icon(
-                    Icons.Outlined.Chat,
-                    contentDescription = stringResource(R.string.sessionlist_fab_new_session),
-                    tint = if (isDark) Color.White else Color.Black,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
             FloatingActionButton(
                 onClick = { showNewFolderDialog = true },
                 shape = CircleShape,

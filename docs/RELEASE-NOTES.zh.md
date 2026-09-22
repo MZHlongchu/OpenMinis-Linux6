@@ -1,3 +1,22 @@
+# OpenMinis-Linux 1.36.17-linux
+
+- versionCode **70**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版
+
+相对 1.36.16-linux：
+
+- **工作区收敛**：每次启动把已归档、但仍留在会话私有目录的共享文件搬进项目工作区。修 1.36.14 只写了 `folder_id`、没搬文件的半归档。
+- **移出 / 解散分组**：共享文件拷回该会话私有目录（拷贝，不搬项目里其他人的）。拷回冲突或失败时不删项目树，避免把唯一副本扔掉。
+- **自动归档也搬文件**：`setFolderIfUnfiled` 在写库的同时 `moveSessionIntoProject`。
+- **会话列表 FAB**：右下角只留「新建文件夹」；新对话从文件夹卡片或长按选模型组进入，去掉会挡住主按钮的小 FAB。
+
+---
+
 # OpenMinis-Linux 1.36.16-linux
 
 - versionCode **69**

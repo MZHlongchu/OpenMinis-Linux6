@@ -6,7 +6,7 @@
 
 **端侧私人 AI Agent。** 把 Claude、GPT、Gemini 等模型接到手机里的一台真 Linux：Ubuntu 24.04 沙箱、浏览器自动化、技能与记忆、多智能体调度。
 
-本仓库是 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 **Linux 沙箱 Android 分支**。启动器名称 **Minis Ultra**，包名 `com.openminis.linux`，可与官方 OpenMinis **并排安装**。当前 **1.36.16-linux**（versionCode 69）。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。
+本仓库是 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 **Linux 沙箱 Android 分支**。启动器名称 **Minis Ultra**，包名 `com.openminis.linux`，可与官方 OpenMinis **并排安装**。当前 **1.36.17-linux**（versionCode 70）。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。
 
 ## 仓库介绍
 
@@ -15,6 +15,7 @@
 - **模型参数自动补全（1.36.1）**：先查 models.dev（去厂商前缀、统一大小写和 `./_` → `-`，再按精确 ID → 归一化 ID → 全库多数票），没有的洞用 DataLearner 补，中转站脏名（如 `GPT-6免费` / `免费GPT-6 Astra`）按命中最多的字匹配。目录和家族都认不出的 id 默认 **256k 上下文 / 128k 输出 / 开启思考（最高 max）/ 文本模态**。
 - **多智能体**：主会话当协调者，设置 → 多智能体（`minis://settings/multi-agent`）。
 - **签名与国内编译**：[docs/SIGNING.md](docs/SIGNING.md)、[docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)（切勿覆盖 aarch64 aapt2）。
+- **1.36.17**：已归档会话每次启动收敛到项目工作区；移出/解散分组会把共享文件拷回会话；会话列表只留一个「新建文件夹」FAB。
 - **1.36.16**：Termux 终端、提供商置顶与并行刷新、dpkg/pip 世界快照、一级设置无返回箭头、选中文字分享、技能 requirements 与平台环境变量；并带上 1.36.15 的工作区归档与原子写文件。
 - **1.36.14**：项目工作区、折叠条只显示过程摘要、旧日记迁入会话、multipart 直通。
 - **1.36.13**：会话工作区隔离；内置人格重写并在本版安装时覆盖一次 SOUL.md；移除人格扩展。
@@ -24,10 +25,14 @@
 
 ## 下载
 
-- **本版发行包（1.36.16-linux / versionCode 69）**：[Releases `1.36.16-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.16-linux) → `minis-ultra-com.openminis.linux.apk`
+- **本版发行包（1.36.17-linux / versionCode 70）**：[Releases `1.36.17-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.17-linux) → `minis-ultra-com.openminis.linux.apk`
 - **滚动构建**：[Releases `android-latest`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest)（main 每次成功构建都会覆盖）
 
 侧载前允许「安装未知应用」。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本，见 [docs/SIGNING.md](docs/SIGNING.md)。
+
+### 1.36.17 要点
+
+已归入项目的会话每次启动都会把仍留在私有目录的共享文件搬进项目工作区（修 1.36.14 只写了 `folder_id`、没搬文件的半归档）。从分组移出或解散分组时，共享文件会拷回该会话私有目录；有冲突则保留项目副本，避免误删。会话列表右下角只留一个「新建文件夹」FAB，新对话从文件夹卡片或长按选模型组进入。完整说明：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ### 1.36.16 要点
 

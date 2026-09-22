@@ -23,6 +23,12 @@ import java.io.File
  * nearly all of them, so the default workspace came up almost empty while
  * every session kept its own private copy. Filing them now moves the files
  * across with [WorkspaceMover], so nothing is orphaned.
+ *
+ * This one-shot pass only covers sessions that were NEVER filed. Sessions that
+ * 1.36.14 filed with the old rule carry a `folder_id` but still hold their
+ * files privately (a partial filing — the DB row was written, the move was
+ * not); those are converged by [ChatRepository.reconcileWorkspaceFiles], which
+ * runs on every launch and needs no marker key.
  */
 object LegacyWorkspaceMigrator {
     private const val PREFS = "workspace_layout"

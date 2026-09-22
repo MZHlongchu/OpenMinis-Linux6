@@ -471,7 +471,6 @@
     <string name="group_create">建立</string>
     <string name="group_section_header">工作區</string>
     <string name="group_default_workspace">工作區</string>
-    <string name="sessionlist_new_workspace_session">新建工作區會話</string>
     <string name="group_none">暫不分組</string>
     <string name="group_none_subtitle">將會話移出目前分組</string>
     <string name="group_n_chats">%1$d 個會話</string>

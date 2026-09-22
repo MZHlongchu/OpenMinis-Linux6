@@ -628,9 +628,7 @@
     <string name="group_create">Create</string>
     <string name="group_section_header">Workspaces</string>
     <string name="group_default_workspace">Workspace</string>
-    <string name="sessionlist_new_workspace_session">New workspace session</string>
     <string name="sessionlist_fab_new_folder">New workspace folder</string>
-    <string name="sessionlist_fab_new_session">New chat</string>
     <string name="sessionlist_new_folder_title">New workspace folder</string>
     <string name="sessionlist_new_folder_hint">Folder name</string>
     <string name="sessionlist_new_folder_desc_hint">Description (optional)</string>

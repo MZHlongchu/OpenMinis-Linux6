@@ -513,6 +513,9 @@ class MinisApp : Application(), ImageLoaderFactory {
             }.onFailure {
                 android.util.Log.e("MinisApp", "workspace staging recovery failed", it)
             }
+            runCatching { chatRepository.reconcileWorkspaceFiles() }.onFailure {
+                android.util.Log.e("MinisApp", "workspace reconcile failed", it)
+            }
             runCatching {
                 com.openminis.app.sandbox.LegacyWorkspaceMigrator.run(this@MinisApp, chatRepository)
             }.onFailure {

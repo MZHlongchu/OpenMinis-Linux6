@@ -50,6 +50,18 @@ object WorkspaceMover {
         val alreadyInPlace: List<String>,
     )
 
+    data class CopyResult(
+        val copiedSubdirs: List<String>,
+        val bytesCopied: Long,
+        val skippedEmpty: List<String>,
+        val conflicts: List<String>,
+        val refused: Boolean = false,
+    ) {
+        /** True iff this session no longer needs the project tree to keep its files. */
+        val independent: Boolean
+            get() = !refused && conflicts.isEmpty()
+    }
+
     /**
      * Move [sessionId]'s shared subdirs into [folderId]'s project directory.
      *
@@ -106,6 +118,100 @@ object WorkspaceMover {
                 "bytes=$bytes skipped=$skipped",
         )
         return MoveResult(moved, bytes, skipped)
+    }
+
+    /**
+     * Copy a project's shared subdirs back into [sessionId]'s private dir, for
+     * the moment a session is REMOVED from that project: its [SessionWorkspace.hostDir]
+     * starts resolving to the private dir again, so without this the session
+     * comes up looking empty.
+     *
+     * COPY, not move — the project tree is shared by its other members and must
+     * survive this call untouched. Whether the project copy is then redundant
+     * is the caller's call (it depends on whether any member is left), not
+     * ours.
+     *
+     * Same staging protocol as [moveSessionIntoProject]: copy to `<dst>.staging`,
+     * verify byte counts, then rename into place. An interruption leaves either
+     * nothing or a complete tree in the private dir — never a half-written one
+     * the session would boot with.
+     *
+     * A non-empty private subdir is a [CopyResult.conflicts] entry, not a
+     * success: overwriting it would destroy the session's own files, and the
+     * caller must not delete the project while that shared copy is the only
+     * remaining one.
+     */
+    fun copyProjectToSession(
+        filesDir: File,
+        sessionId: String,
+        folderId: String,
+    ): CopyResult {
+        if (!SessionWorkspace.isSafeId(sessionId) || !SessionWorkspace.isSafeId(folderId)) {
+            AppLogger.warning(TAG, "refusing copy-back: unsafe id session=$sessionId folder=$folderId")
+            return CopyResult(emptyList(), 0L, emptyList(), emptyList(), refused = true)
+        }
+        val projectRoot = SessionWorkspace.projectBase(filesDir, folderId)
+        val sessionRoot = SessionWorkspace.base(filesDir, sessionId)
+
+        val copied = mutableListOf<String>()
+        val skippedEmpty = mutableListOf<String>()
+        val conflicts = mutableListOf<String>()
+        var bytes = 0L
+
+        for (sub in SessionWorkspace.SHARED_SUBDIRS) {
+            val src = File(projectRoot, sub)
+            if (!src.isDirectory() || src.listFiles().isNullOrEmpty()) {
+                skippedEmpty.add(sub)
+                continue
+            }
+            val dst = File(sessionRoot, sub)
+            if (dst.isDirectory() && !dst.listFiles().isNullOrEmpty()) {
+                AppLogger.warning(
+                    TAG,
+                    "copy-back conflict for $sub (session=$sessionId folder=$folderId); " +
+                        "private copy kept, shared tree untouched",
+                )
+                conflicts.add(sub)
+                continue
+            }
+            bytes += copyTreeVerified(src, dst)
+            copied.add(sub)
+        }
+
+        AppLogger.info(
+            TAG,
+            "copy-back folder=$folderId to session=$sessionId subdirs=$copied " +
+                "bytes=$bytes skippedEmpty=$skippedEmpty conflicts=$conflicts",
+        )
+        return CopyResult(copied, bytes, skippedEmpty, conflicts)
+    }
+
+    /**
+     * Copy [src] to [dst] via a sibling `.staging` dir, verified by byte count.
+     * Never touches the source.
+     */
+    private fun copyTreeVerified(src: File, dst: File): Long {
+        val parent = dst.parentFile ?: error("no parent for $dst")
+        val staging = File(parent, dst.name + STAGING_SUFFIX)
+        if (staging.exists()) staging.deleteRecursively()
+
+        val bytes = copyTree(src, staging)
+        val srcBytes = treeSize(src)
+        if (bytes != srcBytes) {
+            staging.deleteRecursively()
+            throw IllegalStateException(
+                "staging copy incomplete for ${src.name}: copied $bytes of $srcBytes bytes",
+            )
+        }
+        if (dst.exists() && !dst.deleteRecursively()) {
+            staging.deleteRecursively()
+            throw IllegalStateException("could not clear ${dst.absolutePath} before rename")
+        }
+        if (!staging.renameTo(dst)) {
+            // Leave staging in place for [recoverInterrupted]; the source is intact.
+            throw IllegalStateException("could not move ${src.name} into place")
+        }
+        return bytes
     }
 
     /**
@@ -175,13 +281,14 @@ object WorkspaceMover {
         root.walkTopDown().filter { it.isFile() }.sumOf { it.length() }
 
     /**
-     * Find `.staging` trees left behind by an interrupted move.
+     * Find `.staging` trees left behind by an interrupted move or copy-back.
      *
-     * A staging tree is authoritative for its own destination (the source was
-     * already deleted when it was created), so recovery is: finish the rename.
-     * A staging tree whose real destination already exists is ambiguous — both
-     * trees exist and neither is provably newer — so it is reported and left
-     * for the caller to resolve, never auto-deleted.
+     * If the real destination is missing, finish the rename. For a move the
+     * source may already be gone, so the staging tree is the remaining copy.
+     * For a copy-back the source is still intact; finishing the rename is still
+     * the right recovery. A staging tree whose real destination already exists
+     * is ambiguous — both trees exist and neither is provably newer — so it is
+     * reported and left for the caller to resolve, never auto-deleted.
      */
     fun recoverInterrupted(filesDir: File): List<File> {
         val found = mutableListOf<File>()
