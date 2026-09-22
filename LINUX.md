@@ -1,12 +1,12 @@
 # Minis Ultra（OpenMinis-Linux 分支）
 
-**Minis Ultra** 是 OpenMinis 的 Linux 沙箱 Android 分支：保留 Agent + PRoot 沙箱，加上偏 Linux 的工具链、主机 `su` 直通、POSIX 共享存储挂载，以及独立包名，因此可以和官方 OpenMinis **并排安装**。
+**Minis Ultra** 是本仓库的 Android 应用：Agent 加 Ubuntu 24.04 PRoot 沙箱，带 Linux 工具链、主机 `su` 直通和 POSIX 共享存储挂载。包名独立，可以和官方 OpenMinis **并排安装**。
 
-启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。当前版本 **1.36.20-linux**（versionCode 73）。
+启动器名称是 **Minis Ultra**，`applicationId` 为 `com.openminis.linux`。当前版本 **1.36.21-linux**（versionCode 74）。
 
 滚动 APK：GitHub Releases 标签 `android-latest`，文件名 `minis-ultra-com.openminis.linux.apk`。关于页 / 检查更新走 fork `tall-1997/OpenMinis-Linux`；滚动包用 release body 里的 `versionCode` / `versionName`（以及 APK `updated_at`）判断是否比本机新。
 
-正式发行包：[Releases `1.36.20-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.20-linux)。1.36.20：工具权限与系统权限分开、会话隔离、非 root 也能用注入的 CA。详见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
+正式发行包：[Releases `1.36.21-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.21-linux)。1.36.21：已有会话不再弹键盘、人格导入冲突确认、子代理卡片与芯片、Rhino 桩、沙箱自编译不再空成功。详见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ## 沙箱当服务器
 

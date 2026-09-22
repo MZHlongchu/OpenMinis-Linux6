@@ -1,3 +1,37 @@
+# OpenMinis-Linux 1.36.21-linux
+
+- versionCode **74**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版（1.36.21-linux，2026-09-22）
+
+相对 1.36.20-linux。
+
+### 输入
+
+打开已有会话会清掉焦点并收起键盘。只有这次访问里助手确实流式输出过、且用户没有把列表滚走，回复结束后才重新聚焦输入框。新建草稿会话仍会在短暂延迟后聚焦。
+
+### 人格提示词
+
+导入时先比正文，再比文件名。正文相同（含名称也相同）弹出「该提示词文件与××文件内容一致，是否导入」，确认后另存，不覆盖。名称相同、正文不同弹出「该提示词文件与××文件名称一致，是否覆盖」；确认只覆盖私有文件，取消则加后缀另存。内置 `SOUL.md` 不能删除，也不能被覆盖。下拉列表只给非内置项显示删除，删除的是 `minis-global/memory/personas` 里的文件。
+
+### 子代理
+
+同一批并行子代理不再共用一张卡片、也不再把日志堆进同一枚芯片。每个子代理有自己的卡片和芯片；芯片限宽，显示角色和类型。卡片与详情只保留当前步骤。子代理结束或用户停止后，芯片从栏上消失。单个子代理的 `Throwable` 不会取消同一批里的其它子代理。
+
+### 界面与脚本
+
+点工具卡片、导出长文本或打开 Markdown 媒体时，只有当前 Context 不是 Activity 才加 `FLAG_ACTIVITY_NEW_TASK`，避免把正在使用的界面送回桌面。
+
+`execute_code` 仍走 `Context.javaToJS`。APK 内置 `javax.lang.model.SourceVersion`，`latestSupported()` 固定返回 `RELEASE_8`，这样 Rhino 1.7.14 不会去加载依赖 `java.lang.Module` 的实现。R8 保留 `javax.lang.model.**` 和 `org.json.**`。
+
+设置里的实验性自编译会接住异常，并把输出写到该设置项。客户机脚本在找不到 `scripts/build_apk_aarch64.sh` 时以非零退出；找到挂载的源码树后，先跑 `minis-android-sdk-setup`，再执行该脚本。
+
+---
+
 # OpenMinis-Linux 1.36.20-linux
 
 - versionCode **73**

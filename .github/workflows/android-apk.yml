@@ -214,14 +214,14 @@ jobs:
           generate_release_notes: false
           files: dist/*
           body: |
-            Rolling Android build from `${{ github.sha }}`.
+            来自 `${{ github.sha }}` 的滚动 Android 构建。正式版请看带版本号的 Release。
 
-            - applicationId: `com.openminis.linux`
-            - launcher name: **Minis Ultra**
-            - arm64-v8a (release-signed with src/android/release.keystore unless overridden)
-            - versionName: `${{ steps.appver.outputs.name }}`
-            - versionCode: ${{ steps.appver.outputs.code }}
-            - signing: see docs/SIGNING.md
+            - 包名：`com.openminis.linux`
+            - 启动器名称：**Minis Ultra**
+            - 架构：arm64-v8a
+            - versionName：`${{ steps.appver.outputs.name }}`
+            - versionCode：${{ steps.appver.outputs.code }}
+            - 签名说明见 docs/SIGNING.md
 
       - name: Select versioned release notes
         if: startsWith(github.ref, 'refs/tags/')

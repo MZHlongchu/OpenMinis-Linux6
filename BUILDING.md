@@ -1,308 +1,68 @@
-# Building Minis
+# 构建 Minis Ultra
 
-> **This fork (OpenMinis-Linux / Minis Ultra) is Android-only.** The `src/ios/`
-> tree has been removed. Skip the iOS section below; it is leftover documentation
-> from upstream OpenMinis. Use the Android Gradle path and
-> `src/android/app/provider-customization.properties` only.
+本仓库只构建 **Android arm64** 应用（启动器名 Minis Ultra，包名 `com.openminis.linux`）。没有 iOS 工程。第一次构建要先编 PRoot 并准备 Ubuntu rootfs，大约 30–60 分钟；之后产物会缓存在磁盘上。
 
-Minis ships a full Linux sandbox inside the app, so a first build is not just
-"open the project and press Run": the native dependencies (iSH on iOS, PRoot on
-Android, FFmpeg, LAME) and the Alpine rootfs are **built from source by the
-scripts in `deps/`**, not committed as binaries. Budget ~30–60 minutes for the
-first build; afterwards the artifacts are cached on disk and normal builds are
-fast.
+## 环境
 
-Read the section for your platform end to end before starting — the steps are
-ordered by dependency, and skipping one produces confusing link errors later.
+| 工具 | 版本 |
+|---|---|
+| JDK | **17** |
+| Android SDK | compileSdk 36，targetSdk 35，minSdk 26 |
+| Android NDK | **r28+**，设置 `ANDROID_NDK_HOME` |
+| CMake | 3.22.1（用 SDK Manager 安装） |
+| 其它 | `curl`、`tar`、`make`、`awk`、`sed` |
 
----
+Gradle 使用仓库里的 wrapper（Gradle 8.11.1，AGP 8.7.3，Kotlin 2.1.0），不要另外安装。只打 `arm64-v8a`。
 
-## Common setup
-
-Clone with submodules — the iSH and PRoot forks are submodules, and a clone
-without them will fail at the native build step:
+## 取得源码
 
 ```sh
-git clone --recurse-submodules https://github.com/OpenMinis/OpenMinis.git
-cd OpenMinis
-
-# Already cloned without --recurse-submodules?
+git clone --recurse-submodules https://github.com/tall-1997/OpenMinis-Linux.git
+cd OpenMinis-Linux
 git submodule update --init --recursive
 ```
 
-| Submodule | Repository | Used by |
-|---|---|---|
-| `deps/ish` | [OpenMinis/ish-arm64](https://github.com/OpenMinis/ish-arm64) | iOS sandbox kernel |
-| `deps/proot` | [OpenMinis/proot](https://github.com/OpenMinis/proot) | Android sandbox |
+Android 沙箱用的是子模块 `deps/proot`。`deps/ish` 是历史子模块，本仓库的安装包不编译它。
 
-### Build-time customization
-
-Some values are injected at build time and are **not** in this repository.
-Copy the templates before building:
+构建前复制一份可空的配置即可编译运行：
 
 ```sh
-cp src/ios/Configs/ProviderCustomization.xcconfig.example \
-   src/ios/Configs/ProviderCustomization.xcconfig
-
 cp src/android/app/provider-customization.properties.example \
    src/android/app/provider-customization.properties
 ```
 
-Leaving the values empty is fine — **the app compiles and runs**. A value is
-only required by the feature that uses it, and that feature fails loudly at
-runtime when it is missing. API-key based sign-in works without any
-customization.
+用 API Key 登录不需要填这项。只有走 Claude OAuth 时，才需要自己提供 `ANTHROPIC_OAUTH_IDENTIFIER_PROMPT`；本仓库不内置该值。
 
-### `ANTHROPIC_OAUTH_IDENTIFIER_PROMPT`
-
-Only relevant if you want to **sign in with Claude OAuth credentials** rather
-than an Anthropic API key.
-
-When a request is authenticated with OAuth, Anthropic's endpoint expects the
-system prompt to begin with the identifying line that Claude Code itself
-sends; without it the request is rejected. The build injects that line from
-this value, so OAuth sign-in fails at runtime while it is empty.
-
-We do not ship a value. Supply your own if you need this path — other
-open-source projects that talk to the same endpoint declare the same
-identifier, for example
-[claude-relay-service](https://github.com/Wei-Shaw/claude-relay-service),
-which you can consult for the exact wording.
-
-Everything else — Anthropic API keys, and every other provider — works
-without setting this.
-
----
-
-## iOS
-
-### Requirements
-
-| Tool | Version / notes |
-|---|---|
-| macOS | Apple Silicon strongly recommended (see the simulator note below) |
-| Xcode | With the iOS SDK; the project targets **iOS 26.2** and **Swift 6.0** |
-| Homebrew packages | `brew install ninja llvm libarchive pkg-config` |
-| Python 3 + Meson | `pip3 install meson` |
-
-`llvm` is needed to compile the guest VDSO, `libarchive` to unpack the rootfs,
-and Meson/Ninja to build the iSH kernel.
-
-### 1. Build the native dependencies
-
-Run these from the repository root, **in this order** — FFmpeg links against
-LAME, so LAME must exist first or MP3 encoding is silently dropped:
+国内网络可以先选镜像，不要把某一个镜像地址提交进仓库：
 
 ```sh
-./deps/build_lame.sh          # → deps/lame-build/lib/libmp3lame.a
-./deps/build_ffmpeg.sh        # → deps/frameworks/*.framework  (LGPL config)
-./deps/build_ish.sh           # → deps/libs/*.a, deps/include/, deps/resources/
-./deps/prepare_alpine_rootfs.sh   # → deps/resources/alpine-rootfs.zip
+python scripts/pick_build_mirrors.py
+set MINIS_BUILD_MIRRORS=cn
 ```
 
-What each produces:
-
-- **`build_lame.sh`** — LAME 3.100 as a static library for arm64.
-- **`build_ffmpeg.sh`** — FFmpeg 6.1.2 as per-library `.framework` bundles plus
-  an umbrella `FFmpeg.framework`. Configured **LGPL**: do not add
-  `--enable-gpl` or `--enable-nonfree` — see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
-- **`build_ish.sh`** — `libish`, `libish_emu`, `libfakefs` from the `deps/ish`
-  submodule, plus headers and the VDSO.
-- **`prepare_alpine_rootfs.sh`** — downloads Alpine aarch64 minirootfs and
-  converts it to iSH's fakefs format.
-
-The Xcode project references `deps/libs/`, `deps/include/`, `deps/frameworks/`
-and `deps/resources/` relative to the project, so nothing needs to be copied
-by hand.
-
-`rclone.aar` is gitignored. A missing AAR no longer fails `:app:compile*Kotlin`:
-the stub under `src/rcloneStub` compiles instead. Rebuild the real binding only
-when you need remote backup destinations (`./deps/build_rclone_android.sh`,
-requires Go 1.22+ and gomobile on the **host**, not on first APK compile).
-
-### 2. Build the app
+## 编原生依赖和安装包
 
 ```sh
-open src/ios/Minis.xcodeproj
-```
-
-Select the **Minis** scheme and build. For a device build, set your own team
-under *Signing & Capabilities* — the project ships with an empty
-`DEVELOPMENT_TEAM`.
-
-From the command line:
-
-```sh
-xcodebuild -project src/ios/Minis.xcodeproj -scheme Minis \
-           -configuration Debug -destination 'generic/platform=iOS' \
-           CODE_SIGNING_ALLOWED=NO build
-```
-
-> **Simulator builds need simulator-architecture dependencies.** The scripts
-> above build for **device arm64**. Linking a simulator build against them
-> fails with `building for 'iOS-simulator', but linking in object file built
-> for 'iOS'` (or a missing-symbol error for x86_64 on Intel Macs). Build for a
-> device destination, or rebuild the native deps for the simulator SDK.
-
-### Targets
-
-`Minis` (app), `MinisShare` (share extension), `AgentWidgetExtension`,
-`MinisFileProvider`, plus `MinisTests` / `MinisUITests`.
-
----
-
-## Android
-
-### Requirements
-
-| Tool | Version / notes |
-|---|---|
-| JDK | **17** (`sourceCompatibility`/`targetCompatibility` are 17) |
-| Android SDK | **compileSdk 36**, targetSdk 35, **minSdk 26** |
-| Android NDK | **r28+** — set `$ANDROID_NDK_HOME`, or install via Android Studio |
-| CMake | 3.22.1 (install through the SDK Manager) |
-| Shell tools | `curl`, `tar`, `make`, `awk`, `sed` |
-
-Gradle itself comes from the wrapper (Gradle 8.11.1, AGP 8.7.3, Kotlin 2.1.0) —
-do not install it separately.
-
-First-build downloads (wrapper ZIP, AGP, Kotlin, Compose, Google Maven) should
-not be pinned to a single mirror. From a China-reachable network:
-
-```
-python scripts/pick_build_mirrors.py          # writes src/android/mirrors.local.properties
-set MINIS_BUILD_MIRRORS=cn                    # Windows cmd
-# export MINIS_BUILD_MIRRORS=cn               # bash
-```
-
-`settings.gradle.kts` prepends several Aliyun / Huawei / Tencent candidates, then
-still falls back to `google()` and `mavenCentral()`. Override the candidate list
-with `MINIS_MAVEN_URLS` (comma-separated). `MINIS_BUILD_MIRRORS=off` uses official
-only. If `services.gradle.org` is blocked, `python scripts/pick_build_mirrors.py --fetch-gradle`
-prints a reachable Gradle distribution URL — point `gradle-wrapper.properties`
-`distributionUrl` at it locally (do not commit a single pinned mirror).
-
-Only `arm64-v8a` is built (`abiFilters`), so use an arm64 device or emulator
-image.
-
-### 1. Build the native dependencies
-
-```sh
-./deps/build_proot.sh              # → assets/proot-aarch64, jniLibs/arm64-v8a/*.so
-./scripts/prepare_android_sandbox.sh   # → ubuntu-base + aarch64 aapt2 + slim sdkmanager
-```
-
-- **`build_proot.sh`** cross-compiles a static `libtalloc` and the
-  `deps/proot` fork with the NDK, then installs into the app's `assets/` and
-  `jniLibs/arm64-v8a/`: the proot binary itself plus **`libproot-loader.so`
-  and `libproot-loader32.so`**. The script verifies all of them at the end and
-  fails the build if any is missing.
-
-  The loaders are required, not optional. Android 10+ enforces W^X for
-  `untrusted_app`: nothing labelled `app_data_file` — which includes the whole
-  extracted Alpine rootfs under the app's `files/` dir — can ever be executed.
-  Only `nativeLibraryDir`, populated from `lib/**/*.so` in the APK, is
-  executable, so the loader lives there and maps guest binaries itself instead
-  of relying on the kernel's `execve`. (proot can normally extract an embedded
-  loader at runtime, but on Android it writes it into the app's temp dir and
-  hits the same W^X wall.) That is also why they carry a `.so` suffix despite
-  being executables rather than shared objects — only `*.so` gets extracted.
-
-  Artifacts are **not** byte-identical across NDK releases; the loader's code
-  differs between toolchain generations. Functionally equivalent — don't expect
-  checksums to match someone else's build.
-- **`prepare_android_sandbox.sh`** downloads Ubuntu 24.04 arm64 `ubuntu-base`
-  into `assets/ubuntu-base.tar.gz`, plus the aarch64 aapt2 zip and a slimmed
-  Google `sdkmanager` (`assets/android-cmdline-tools.zip`, ~20MB).
-
-`ubuntu-base.tar.gz` is gitignored (too large). The aapt2 and sdkmanager zips
-are committed so a clone can build the APK without hitting Google.
-
-### Android SDK（中国大陆 / 客户机架构）
-
-在 **x86_64 的 GitHub-hosted runner 或开发机** 上，用官方 `sdkmanager` 装 NDK、CMake、platforms 是安全的——那是编译主机。
-
-在 **aarch64 PRoot 客户机** 里：
-
-- 用 APK 捆绑的 aarch64 `aapt2` / `zipalign` / `adb`（`minis-android-sdk-setup`）
-- `sdkmanager` 只拉 `platforms;android-35`（android.jar）
-- **不要**执行 `sdkmanager "build-tools;…"`，也不要解压 Google 的 `build-tools_r*-linux.zip`：那是 x86_64，会覆盖 aapt2
-
-`dl.google.com` 在境内经常超时。镜像与自助查找方法见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md) 和内置技能 `android-sdk-mirrors`。`ubuntu-base.tar.gz` 太大不进 git，CI 必须现拉；不要 vendor 完整 Google cmdline-tools（约 146MB）。
-
-
-The small JNI libraries in `src/main/cpp/` (`pty_bridge`, the crash handler,
-`jieba_jni`) are built by CMake as part of the normal Gradle build; no separate
-step is needed.
-
-### 2. Build the app
-
-```sh
+./deps/build_proot.sh
+./scripts/prepare_android_sandbox.sh
 cd src/android
-./gradlew :app:assembleDebug          # → app/build/outputs/apk/debug/
-./gradlew :app:installDebug           # install onto a connected device
+./gradlew :app:assembleRelease
 ```
 
-Release builds (`:app:assembleRelease`) sign with `src/android/release.keystore`
-when `src/android/signing.properties` is present (the default in this tree).
-See [docs/SIGNING.md](docs/SIGNING.md). Debug builds still use the debug
-keystore.
+- `build_proot.sh` 用 NDK 交叉编译 PRoot，并放入 `assets/` 和 `jniLibs/arm64-v8a/`。`libproot-loader.so` 与 `libproot-loader32.so` 必须在 APK 里，否则客户机命令会报 `[Shell not running]`。
+- `prepare_android_sandbox.sh` 下载 Ubuntu 24.04 arm64 的 `ubuntu-base.tar.gz`（不进 git），并准备 aarch64 aapt2 与精简 sdkmanager。
+- 在 aarch64 客户机里不要用 Google 的 x86_64 `build-tools` 覆盖 aapt2。见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。
+- Release 签名见 [docs/SIGNING.md](docs/SIGNING.md)。仓库里有 `src/android/release.keystore` 和 `signing.properties` 时，`:app:assembleRelease` 用这套证书。
 
-### Tests
+`src/android/app/src/main/cpp/` 里的 JNI 由 Gradle 的 CMake 一起编译，不用单独跑。
 
-```sh
-./gradlew :app:testDebugUnitTest        # JVM unit tests
-./gradlew :app:connectedAndroidTest     # instrumented; needs a device/emulator
-```
+## 排错
 
----
+- `deps/proot` 是空的：执行 `git submodule update --init --recursive`。
+- `Android NDK not found`：把 `ANDROID_NDK_HOME` 指到 NDK r28+。
+- 应用能开、终端不能跑：重跑 `./deps/build_proot.sh` 和 `./scripts/prepare_android_sandbox.sh` 后再编译。
+- 每条命令都是 `[Shell not running] (exit code: -1)`：检查 `src/android/app/src/main/jniLibs/arm64-v8a/` 里是否有 `libproot-loader.so` 和 `libproot-loader32.so`。只看到沙箱启动日志不够，要实际跑一条命令并确认退出码为 0。
 
-## Troubleshooting
+## 许可
 
-**`deps/ish` or `deps/proot` is empty** — the submodules were not initialised:
-`git submodule update --init --recursive`.
-
-**iOS: `Undefined symbols … _vstats_version` / `symbol(s) not found`** — FFmpeg
-was not built, or was built for a different architecture than the one you are
-linking. Rerun `./deps/build_ffmpeg.sh` and build for a device destination.
-
-**iOS: `linking in object file built for 'iOS'` on a simulator build** — see
-the simulator note above.
-
-**iOS: MP3 encoding unavailable** — `build_lame.sh` did not run before
-`build_ffmpeg.sh`. Rerun both in order.
-
-**Android: `Android NDK not found`** — set `ANDROID_NDK_HOME` to your NDK r28+
-installation, e.g.
-`export ANDROID_NDK_HOME=~/Library/Android/sdk/ndk/28.0.12433566`.
-
-**Android: app starts but the shell does not** — the sandbox assets are
-missing. Rerun `./deps/build_proot.sh` and
-`./scripts/prepare_android_sandbox.sh`, then rebuild.
-
-**Android: every command returns `[Shell not running] (exit code: -1)`** —
-the proot ELF loaders are missing from the APK. Check that
-`src/android/app/src/main/jniLibs/arm64-v8a/` contains `libproot-loader.so`
-(and `libproot-loader32.so`); if not, rerun `./deps/build_proot.sh`, which
-now verifies them, and rebuild. Confirm with
-`unzip -l app-debug.apk | grep libproot` — all three `.so` files must be
-present.
-
-This failure is deliberately hard to spot from the outside: proot still
-launches and logs its `native_offload` initialisation, so the sandbox looks
-healthy and any "does it start?" check passes. Only the first
-`execve("/bin/sh")` fails, with `Permission denied` in logcat under the
-`PRootStderr` tag. When touching this area, verify by **running a command and
-asserting exit code 0** — starting the sandbox is not enough.
-
-**A feature throws about a missing configuration value** — that value comes
-from the customization file; see [Build-time customization](#build-time-customization).
-
----
-
-## Licensing note
-
-Minis is **GPLv3** because it links iSH (GPLv3) and PRoot (GPLv2). If you
-change how the native dependencies are built, keep FFmpeg on its LGPL
-configuration and preserve the vendored `LICENSE` files. See
-[LICENSE](LICENSE) and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+本仓库以 **GPLv3** 分发，因为链接了 PRoot（GPLv2）。见 [LICENSE](LICENSE) 和 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。

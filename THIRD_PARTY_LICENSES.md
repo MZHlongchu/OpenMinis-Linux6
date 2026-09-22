@@ -1,34 +1,17 @@
-# Third-Party Licenses
+# 第三方许可
 
-OpenMinis bundles, links, or depends on the following third-party components. Versions reflect the current source tree; license types were verified against each project's repository (GitHub license metadata / LICENSE files).
+本仓库（Minis Ultra）安装包实际链接或在构建时下载的第三方组件如下。本安装包不包含 iOS 应用，也不链接 iSH、FFmpeg 或 Alpine rootfs。
 
 ## Native C/C++ dependencies (`deps/`)
 
 | Component | Version / Source | License | Notes |
 |---|---|---|---|
-| [iSH](https://github.com/OpenMinis/ish-arm64) (ARM64 fork) | git submodule `deps/ish` | **GPL-3.0** (post-`0e3a414` contributions also under GPL-2.0), with an App Store distribution exception (`LICENSE.IOS`) | x86 Linux usermode emulation on iOS; core reason the app is GPLv3 |
 | [proot](https://github.com/OpenMinis/proot) (fork) | git submodule `deps/proot` | **GPL-2.0** | Linux sandbox on Android (`libproot.so`, `proot-aarch64`) |
-| [FFmpeg](https://ffmpeg.org) | 6.1.2, built by `deps/build_ffmpeg.sh` | **LGPL-2.1-or-later** (built without `--enable-gpl` / `--enable-nonfree`) | Dynamic frameworks on iOS; keep the LGPL configuration |
-| [LAME](https://lame.sourceforge.io) | 3.100, vendored at `deps/lame-3.100` | **LGPL-2.0-or-later** | MP3 encoder, linked into FFmpeg via `--enable-libmp3lame` |
 | [talloc](https://talloc.samba.org) (Samba) | vendored at `deps/talloc` | **LGPL-3.0-or-later** | Memory allocator required by proot |
-| [cppjieba](https://github.com/yanyiwu/cppjieba) | vendored (iOS `Vendor/cppjieba`, Android `jieba_jni`) | **MIT** | Chinese word segmentation (header-only + dictionaries) |
-| Alpine Linux minirootfs | downloaded at build time by `deps/prepare_alpine_rootfs.sh` | Aggregate of package licenses (musl **MIT**, BusyBox **GPL-2.0**, etc.) | iOS iSH guest only; not stored in this repo |
+| [cppjieba](https://github.com/yanyiwu/cppjieba) | Android `jieba_jni` | **MIT** | 中文分词 |
 | Ubuntu 24.04 base (noble arm64) | downloaded by `scripts/prepare_android_sandbox.sh` | Canonical / Ubuntu package licenses (glibc **LGPL-2.1**, apt **GPL-2.0**, etc.) | Android PRoot guest; not stored in this repo |
 | [android-sdk-tools](https://github.com/lzhiyong/android-sdk-tools) aarch64 (aapt2, zipalign, adb, aidl) | 35.0.2 static | **Apache-2.0** (AOSP) | Vendored as `assets/android-sdk-tools-aarch64.zip`; unpacked to `/opt/android-sdk` |
 | Android SDK Command-line Tools (`sdkmanager`) | 12.0 (`commandlinetools-linux-11076708`) | **Apache-2.0** (Google / AOSP) | Slimmed to the sdkmanager classpath as `assets/android-cmdline-tools.zip`; lint/R8/kotlin-compiler omitted |
-
-## iOS — Swift Package Manager dependencies
-
-Direct packages declared in `src/ios/Minis.xcodeproj`:
-
-| Package | Version | Repository | License |
-|---|---|---|---|
-| SwiftAnthropic | 2.2.0 (exact) | https://github.com/jamesrochabrun/SwiftAnthropic | **MIT** |
-| swift-cmark (`cmark-gfm`, `cmark-gfm-extensions`) | 0.7.1 | https://github.com/swiftlang/swift-cmark | **BSD-2-Clause** (with some MIT-licensed vendored files, see its `COPYING`) |
-| SwiftMath | 1.7.3 | https://github.com/mgriebling/SwiftMath | **MIT** |
-| RealTimeCutVADLibrary | 1.0.14 | https://github.com/helloooideeeeea/RealTimeCutVADLibrary | **MIT** |
-
-Transitive packages (pinned in `Package.resolved`), all **Apache-2.0**, maintained by Apple / the Swift Server Workgroup: `async-http-client`, `swift-algorithms`, `swift-asn1`, `swift-async-algorithms`, `swift-atomics`, `swift-certificates`, `swift-collections`, `swift-crypto`, `swift-distributed-tracing`, `swift-http-structured-headers`, `swift-http-types`, `swift-log`, `swift-nio` (+ `-extras`, `-http2`, `-ssl`, `-transport-services`), `swift-numerics`, `swift-service-context`, `swift-service-lifecycle`, `swift-system`.
 
 ## Android — Gradle dependencies
 
@@ -52,7 +35,7 @@ Test-only dependencies: JUnit 4.13.2 (**EPL-1.0**), MockWebServer 4.12.0 (**Apac
 | Asset | Location | License |
 |---|---|---|
 | KaTeX | Android `app/src/main/assets/katex/` | **MIT** |
-| jieba dictionaries | iOS bundle / Android `assets/jieba/` | **MIT** (cppjieba distribution) |
+| jieba dictionaries | Android `assets/jieba/` | **MIT**（随 cppjieba 分发） |
 
 ## Removed / historical
 
