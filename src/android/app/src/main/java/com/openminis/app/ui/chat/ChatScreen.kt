@@ -2234,6 +2234,26 @@ fun ChatScreen(
                     "auto-focus skipped: FocusRequester not attached (likely activity recreate / theme switch): ${e.message}",
                 )
             }
+        } else {
+            focusManager.clearFocus(force = true)
+            keyboardController?.hide()
+        }
+    }
+    var sawStreamingThisVisit by remember(sessionId) { mutableStateOf(false) }
+    LaunchedEffect(isStreaming, sessionId) {
+        if (isStreaming) {
+            sawStreamingThisVisit = true
+            return@LaunchedEffect
+        }
+        if (!sawStreamingThisVisit) return@LaunchedEffect
+        sawStreamingThisVisit = false
+        if (userScrolledAway) return@LaunchedEffect
+        kotlinx.coroutines.delay(200)
+        if (userScrolledAway) return@LaunchedEffect
+        try {
+            inputFocusRequester.requestFocus()
+        } catch (e: IllegalStateException) {
+            AppLogger.debug(tagScroll, "post-reply focus skipped: ${e.message}")
         }
     }
 

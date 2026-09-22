@@ -42,6 +42,34 @@ enum class PersonaImportError {
     BAD_TYPE,
 }
 
+enum class PersonaImportConflictKind {
+    NONE,
+    SAME_CONTENT,
+    SAME_NAME,
+}
+
+data class PersonaPromptFingerprint(
+    val fileName: String,
+    val body: String,
+    val builtin: Boolean,
+)
+
+data class PersonaImportConflict(
+    val kind: PersonaImportConflictKind,
+    val existingName: String = "",
+    val canOverwrite: Boolean = false,
+)
+
+sealed class PersonaImportPreview {
+    data class Ready(
+        val fileName: String,
+        val body: String,
+        val conflict: PersonaImportConflict,
+    ) : PersonaImportPreview()
+
+    data class Failure(val reason: PersonaImportError) : PersonaImportPreview()
+}
+
 sealed class PersonaImportResult {
     data class Success(val entry: PersonaPromptEntry) : PersonaImportResult()
     data class Failure(val reason: PersonaImportError) : PersonaImportResult()
@@ -100,6 +128,40 @@ object PersonaPromptLogic {
             if (candidate !in existing) return candidate
             n++
         }
+    }
+
+    fun normalizePromptBody(body: String): String =
+        body.removePrefix("\uFEFF").replace("\r\n", "\n").replace('\r', '\n').trim()
+
+    /**
+     * Same body (any name, including both the same) asks whether to import a
+     * suffixed copy. Same name and different body asks whether to overwrite.
+     * Builtin SOUL.md is never an overwrite target.
+     */
+    fun classifyImportConflict(
+        incomingName: String,
+        incomingBody: String,
+        existing: List<PersonaPromptFingerprint>,
+    ): PersonaImportConflict {
+        val body = normalizePromptBody(incomingBody)
+        val name = incomingName.trim()
+        val sameBody = existing.firstOrNull { normalizePromptBody(it.body) == body }
+        if (sameBody != null) {
+            return PersonaImportConflict(
+                kind = PersonaImportConflictKind.SAME_CONTENT,
+                existingName = sameBody.fileName,
+                canOverwrite = false,
+            )
+        }
+        val sameName = existing.firstOrNull { it.fileName == name }
+        if (sameName != null) {
+            return PersonaImportConflict(
+                kind = PersonaImportConflictKind.SAME_NAME,
+                existingName = sameName.fileName,
+                canOverwrite = !sameName.builtin,
+            )
+        }
+        return PersonaImportConflict(PersonaImportConflictKind.NONE)
     }
 
     fun extractImportedBody(raw: String): String {
@@ -426,6 +488,129 @@ object PersonaPromptLibrary {
             )
             return PersonaImportResult.Success(entry)
         }
+    }
+
+    fun previewImport(context: Context, uri: Uri): PersonaImportPreview {
+        val read = readImport(context, uri)
+        if (read is PersonaImportPreview.Failure) return read
+        val ready = read as PersonaImportPreview.Ready
+        val conflict = synchronized(lock) {
+            PersonaPromptLogic.classifyImportConflict(
+                ready.fileName,
+                ready.body,
+                fingerprintsLocked(context),
+            )
+        }
+        return ready.copy(conflict = conflict)
+    }
+
+    /**
+     * @param overwrite replace a private file with the same display name.
+     *   Builtin SOUL.md is never overwritten; a colliding builtin name is
+     *   stored as a suffixed private copy instead.
+     */
+    fun commitPrepared(
+        context: Context,
+        displayName: String,
+        body: String,
+        overwrite: Boolean,
+    ): PersonaImportResult {
+        val cleanBody = PersonaPromptLogic.extractImportedBody(body)
+        if (cleanBody.isBlank()) {
+            return PersonaImportResult.Failure(PersonaImportError.EMPTY)
+        }
+        synchronized(lock) {
+            val index = loadIndexLocked(context)
+            val desired = if (PersonaPromptLogic.isImportableName(displayName)) {
+                displayName
+            } else {
+                "$displayName.md"
+            }
+            if (overwrite) {
+                val target = index.prompts.find { it.fileName == desired && !it.builtin }
+                if (target != null) {
+                    atomicWrite(File(filesDir(context), target.storedName), cleanBody)
+                    persistLocked(context, index.copy(selectedId = target.id))
+                    return PersonaImportResult.Success(target)
+                }
+            }
+            val fileName = PersonaPromptLogic.uniqueDisplayName(
+                desired,
+                index.prompts.map { it.fileName }.toSet(),
+            )
+            val id = UUID.randomUUID().toString()
+            val storedName = "$id.md"
+            atomicWrite(File(filesDir(context), storedName), cleanBody)
+            val entry = PersonaPromptEntry(
+                id = id,
+                fileName = fileName,
+                storedName = storedName,
+                builtin = false,
+            )
+            persistLocked(
+                context,
+                index.copy(prompts = index.prompts + entry, selectedId = id),
+            )
+            return PersonaImportResult.Success(entry)
+        }
+    }
+
+    private fun fingerprintsLocked(context: Context): List<PersonaPromptFingerprint> {
+        val index = loadIndexLocked(context)
+        return index.prompts.map { entry ->
+            PersonaPromptFingerprint(
+                fileName = entry.fileName,
+                body = readBodyLocked(context, entry.id),
+                builtin = entry.builtin,
+            )
+        }
+    }
+
+    private fun readImport(context: Context, uri: Uri): PersonaImportPreview {
+        val resolver = context.contentResolver
+        val displayRaw = queryDisplayName(context, uri)
+        val mime = resolver.getType(uri)
+        val sanitized = PersonaPromptLogic.sanitizeFileName(
+            displayRaw.ifBlank {
+                when {
+                    mime == "text/markdown" || mime == "text/x-markdown" -> "persona.md"
+                    else -> "persona.txt"
+                }
+            },
+        )
+        if (!PersonaPromptLogic.isImportableName(sanitized) &&
+            !PersonaPromptLogic.isImportableMime(mime)
+        ) {
+            return PersonaImportPreview.Failure(PersonaImportError.BAD_TYPE)
+        }
+        val stream = try {
+            resolver.openInputStream(uri)
+        } catch (t: Throwable) {
+            AppLogger.warning(TAG, "import open failed: ${t.message}")
+            return PersonaImportPreview.Failure(PersonaImportError.UNREADABLE)
+        } ?: return PersonaImportPreview.Failure(PersonaImportError.UNREADABLE)
+        val bytes = try {
+            stream.use { readLimited(it, PersonaPromptLogic.MAX_IMPORT_BYTES) }
+        } catch (t: Throwable) {
+            AppLogger.warning(TAG, "import read failed: ${t.message}")
+            return PersonaImportPreview.Failure(PersonaImportError.UNREADABLE)
+        } ?: return PersonaImportPreview.Failure(PersonaImportError.TOO_LARGE)
+        val text = try {
+            String(bytes, Charsets.UTF_8)
+        } catch (t: Throwable) {
+            AppLogger.warning(TAG, "import decode failed: ${t.message}")
+            return PersonaImportPreview.Failure(PersonaImportError.UNREADABLE)
+        }
+        val body = PersonaPromptLogic.extractImportedBody(text)
+        if (body.isBlank()) {
+            return PersonaImportPreview.Failure(PersonaImportError.EMPTY)
+        }
+        val fileName = if (PersonaPromptLogic.isImportableName(sanitized)) sanitized else "$sanitized.md"
+        return PersonaImportPreview.Ready(
+            fileName = fileName,
+            body = body,
+            conflict = PersonaImportConflict(PersonaImportConflictKind.NONE),
+        )
     }
 
     fun deleteImported(context: Context, promptId: String): Boolean {

@@ -33,6 +33,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -70,7 +71,9 @@ import com.openminis.app.R
 import com.openminis.app.ui.components.MinisButton
 import com.openminis.app.ui.components.MinisOutlinedButton
 import com.openminis.app.ui.components.MinisTextButton
+import com.openminis.app.agent.PersonaImportConflictKind
 import com.openminis.app.agent.PersonaImportError
+import com.openminis.app.agent.PersonaImportPreview
 import com.openminis.app.agent.PersonaImportResult
 import com.openminis.app.agent.PersonaPromptEntry
 import com.openminis.app.agent.PersonaPromptLibrary
@@ -118,6 +121,8 @@ fun SoulSettingsScreen(
     var loaded by remember { mutableStateOf(false) }
     var editingPromptId by remember { mutableStateOf<String?>(null) }
     var importError by remember { mutableStateOf<String?>(null) }
+    var pendingImport by remember { mutableStateOf<PersonaImportPreview.Ready?>(null) }
+    var pendingDelete by remember { mutableStateOf<PersonaPromptEntry?>(null) }
     var showRestoreDialog by remember { mutableStateOf(false) }
     var saveError by remember { mutableStateOf<String?>(null) }
     // Preserve the raw `emoji` field exactly as it appears in SOUL.md so
@@ -179,27 +184,55 @@ fun SoulSettingsScreen(
     val importEmptyMsg = stringResource(R.string.soul_prompt_import_empty)
     val importTooLargeMsg = stringResource(R.string.soul_prompt_import_too_large)
     val importUnreadableMsg = stringResource(R.string.soul_prompt_import_unreadable)
+    suspend fun commitPromptImport(
+        ready: PersonaImportPreview.Ready,
+        overwrite: Boolean,
+    ) {
+        val result = withContext(Dispatchers.IO) {
+            PersonaPromptLibrary.commitPrepared(
+                context,
+                ready.fileName,
+                ready.body,
+                overwrite = overwrite && ready.conflict.canOverwrite,
+            )
+        }
+        when (result) {
+            is PersonaImportResult.Success -> {
+                Toast.makeText(
+                    context,
+                    context.getString(R.string.soul_prompt_import_ok, result.entry.fileName),
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+            is PersonaImportResult.Failure -> importError = when (result.reason) {
+                PersonaImportError.BAD_TYPE -> importUnsupportedMsg
+                PersonaImportError.EMPTY -> importEmptyMsg
+                PersonaImportError.TOO_LARGE -> importTooLargeMsg
+                PersonaImportError.UNREADABLE -> importUnreadableMsg
+            }
+        }
+    }
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                PersonaPromptLibrary.importFromUri(context, uri)
+            val preview = withContext(Dispatchers.IO) {
+                PersonaPromptLibrary.previewImport(context, uri)
             }
-            when (result) {
-                is PersonaImportResult.Success -> {
-                    Toast.makeText(
-                        context,
-                        context.getString(R.string.soul_prompt_import_ok, result.entry.fileName),
-                        Toast.LENGTH_SHORT,
-                    ).show()
-                }
-                is PersonaImportResult.Failure -> importError = when (result.reason) {
+            when (preview) {
+                is PersonaImportPreview.Failure -> importError = when (preview.reason) {
                     PersonaImportError.BAD_TYPE -> importUnsupportedMsg
                     PersonaImportError.EMPTY -> importEmptyMsg
                     PersonaImportError.TOO_LARGE -> importTooLargeMsg
                     PersonaImportError.UNREADABLE -> importUnreadableMsg
+                }
+                is PersonaImportPreview.Ready -> {
+                    if (preview.conflict.kind == PersonaImportConflictKind.NONE) {
+                        commitPromptImport(preview, overwrite = false)
+                    } else {
+                        pendingImport = preview
+                    }
                 }
             }
         }
@@ -437,6 +470,7 @@ fun SoulSettingsScreen(
                             PersonaPromptLibrary.setSelected(context, id)
                         }
                     },
+                    onDelete = { pendingDelete = it },
                 )
             }
         }
@@ -464,6 +498,7 @@ fun SoulSettingsScreen(
                                     )
                                 }
                             },
+                            onDelete = { pendingDelete = it },
                             followDefaultLabel = stringResource(
                                 R.string.soul_prompt_follow_default,
                                 selectedPrompt.fileName,
@@ -527,6 +562,82 @@ fun SoulSettingsScreen(
                 }
             },
         )
+    }
+
+    pendingImport?.let { ready ->
+        val sameContent = ready.conflict.kind == PersonaImportConflictKind.SAME_CONTENT
+        AlertDialog(
+            onDismissRequest = { pendingImport = null },
+            text = {
+                Text(
+                    stringResource(
+                        if (sameContent) {
+                            R.string.soul_prompt_import_same_content
+                        } else {
+                            R.string.soul_prompt_import_same_name
+                        },
+                        ready.conflict.existingName,
+                    ),
+                )
+            },
+            confirmButton = {
+                MinisTextButton(onClick = {
+                    val snapshot = ready
+                    pendingImport = null
+                    scope.launch {
+                        commitPromptImport(
+                            snapshot,
+                            overwrite = !sameContent && snapshot.conflict.canOverwrite,
+                        )
+                    }
+                }) {
+                    Text(
+                        stringResource(
+                            if (sameContent) R.string.soul_prompt_import_confirm
+                            else R.string.soul_prompt_overwrite_confirm,
+                        ),
+                    )
+                }
+            },
+            dismissButton = {
+                MinisTextButton(onClick = {
+                    val snapshot = ready
+                    pendingImport = null
+                    if (!sameContent) {
+                        scope.launch { commitPromptImport(snapshot, overwrite = false) }
+                    }
+                }) {
+                    Text(
+                        stringResource(
+                            if (sameContent) R.string.soul_cancel
+                            else R.string.soul_prompt_import_suffix,
+                        ),
+                    )
+                }
+            },
+        )
+    }
+
+    pendingDelete?.takeIf { !it.builtin }?.let { entry ->
+            AlertDialog(
+                onDismissRequest = { pendingDelete = null },
+                title = { Text(stringResource(R.string.soul_prompt_delete_title)) },
+                text = { Text(stringResource(R.string.soul_prompt_delete_body, entry.fileName)) },
+                confirmButton = {
+                    MinisTextButton(onClick = {
+                        val id = entry.id
+                        pendingDelete = null
+                        scope.launch(Dispatchers.IO) {
+                            PersonaPromptLibrary.deleteImported(context, id)
+                        }
+                    }) { Text(stringResource(R.string.soul_prompt_delete)) }
+                },
+                dismissButton = {
+                    MinisTextButton(onClick = { pendingDelete = null }) {
+                        Text(stringResource(R.string.soul_cancel))
+                    }
+                },
+            )
     }
 
     saveError?.let { err ->
@@ -832,6 +943,7 @@ private fun SoulPromptDropdown(
     prompts: List<PersonaPromptEntry>,
     selectedId: String,
     onSelect: (String) -> Unit,
+    onDelete: ((PersonaPromptEntry) -> Unit)? = null,
     followDefaultLabel: String? = null,
     leadingGlyph: Boolean = false,
     showDivider: Boolean = false,
@@ -889,10 +1001,33 @@ private fun SoulPromptDropdown(
                     }
                     prompts.forEach { prompt ->
                         DropdownMenuItem(
-                            text = { Text(prompt.fileName) },
+                            text = {
+                                Text(
+                                    prompt.fileName,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            },
                             onClick = {
                                 onSelect(prompt.id)
                                 expanded = false
+                            },
+                            trailingIcon = if (!prompt.builtin && onDelete != null) {
+                                {
+                                    IconButton(
+                                        onClick = {
+                                            expanded = false
+                                            onDelete(prompt)
+                                        },
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Delete,
+                                            contentDescription = stringResource(R.string.soul_prompt_delete),
+                                        )
+                                    }
+                                }
+                            } else {
+                                null
                             },
                         )
                     }

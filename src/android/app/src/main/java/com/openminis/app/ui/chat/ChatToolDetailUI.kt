@@ -107,7 +107,13 @@ internal fun ToolDetailSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var currentIdx by remember { mutableStateOf(initialIndex.coerceIn(0, toolBlocks.lastIndex.coerceAtLeast(0))) }
-    val block = toolBlocks.getOrNull(currentIdx) ?: return onDismiss()
+    val block = toolBlocks.getOrNull(currentIdx)
+    if (block == null) {
+        // Dismissing during composition crashes the activity and the foreground
+        // service leaves the process alive on the launcher.
+        androidx.compose.runtime.LaunchedEffect(Unit) { onDismiss() }
+        return
+    }
 
     val isLive = block.toolStatus == ToolBlockStatus.RUNNING ||
         block.toolStatus == ToolBlockStatus.STREAMING ||
@@ -702,7 +708,7 @@ internal fun ToolDetailSheet(
                         ) {
                             value = withContext(Dispatchers.IO) {
                                 block.imageFilePath?.let { path ->
-                                    try { android.graphics.BitmapFactory.decodeFile(path) } catch (_: Exception) { null }
+                                    try { android.graphics.BitmapFactory.decodeFile(path) } catch (_: Throwable) { null }
                                 } ?: run {
                                     val blockIdx = toolBlocks.indexOfFirst { it.id == block.id }
                                     if (blockIdx <= 0) null
@@ -711,7 +717,7 @@ internal fun ToolDetailSheet(
                                         if (prev.toolName == "browser_use" && prev.imageFilePath != null) {
                                             try {
                                                 android.graphics.BitmapFactory.decodeFile(prev.imageFilePath)
-                                            } catch (_: Exception) { null }
+                                            } catch (_: Throwable) { null }
                                         } else null
                                     }
                                 }

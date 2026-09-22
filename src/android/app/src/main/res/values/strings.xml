@@ -71,6 +71,8 @@
     <string name="check_update_self_build_confirm_title">Run in-device self-build?</string>
     <string name="check_update_self_build_confirm_body">This is experimental. It can download multi-GB toolchains into the sandbox and will not produce an APK that replaces a Play/CI-signed install (certificate mismatch). Overlay Stop still cancels the job.</string>
     <string name="check_update_self_build_run">Run minis-self-build</string>
+    <string name="check_update_self_build_running">Building in the sandbox…</string>
+    <string name="check_update_self_build_result">Self-build: %1$s</string>
 
     <!-- Permissions (Settings → Permissions) -->
     <string name="permissions_title">Permissions</string>
@@ -396,6 +398,11 @@
     <string name="soul_prompt_import_empty">That file was empty.</string>
     <string name="soul_prompt_import_too_large">That file is too large to import.</string>
     <string name="soul_prompt_import_unreadable">That file couldn\'t be read.</string>
+    <string name="soul_prompt_import_same_content">This prompt matches the contents of %1$s. Import it?</string>
+    <string name="soul_prompt_import_same_name">This prompt has the same name as %1$s. Overwrite it?</string>
+    <string name="soul_prompt_import_confirm">Import</string>
+    <string name="soul_prompt_overwrite_confirm">Overwrite</string>
+    <string name="soul_prompt_import_suffix">Save as copy</string>
     <string name="soul_prompt_delete">Delete prompt</string>
     <string name="soul_prompt_delete_title">Delete this prompt?</string>
     <string name="soul_prompt_delete_body">%1$s will be removed from the private persona folder. SOUL.md is not affected.</string>

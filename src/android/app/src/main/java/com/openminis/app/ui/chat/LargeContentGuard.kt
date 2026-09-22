@@ -360,10 +360,14 @@ private fun exportLargeContentToFile(
         type = "text/plain"
         putExtra(Intent.EXTRA_STREAM, uri)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (context !is android.app.Activity) {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
     }
     val chooser = Intent.createChooser(send, context.getString(R.string.chat_message_large_export))
-    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    if (context !is android.app.Activity) {
+        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
     context.startActivity(chooser)
     true
 } catch (t: Throwable) {

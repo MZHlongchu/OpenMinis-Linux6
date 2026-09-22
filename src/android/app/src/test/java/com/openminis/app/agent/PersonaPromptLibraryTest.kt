@@ -166,4 +166,38 @@ class PersonaPromptLibraryTest {
         val twice = PersonaPromptLogic.applyHistorySteering(once)
         assertEquals(1, twice[2].content.split(PersonaPromptLogic.HISTORY_STEERING_PREFIX).size - 1)
     }
+
+    @Test
+    fun `import conflict same body never overwrites`() {
+        val existing = listOf(
+            PersonaPromptFingerprint("voice.md", "Be terse.", builtin = false),
+            PersonaPromptFingerprint("SOUL.md", "builtin soul", builtin = true),
+        )
+        val sameName = PersonaPromptLogic.classifyImportConflict("other.md", "Be terse.", existing)
+        assertEquals(PersonaImportConflictKind.SAME_CONTENT, sameName.kind)
+        assertEquals("voice.md", sameName.existingName)
+        assertFalse(sameName.canOverwrite)
+
+        val bothSame = PersonaPromptLogic.classifyImportConflict("voice.md", "Be terse.\r\n", existing)
+        assertEquals(PersonaImportConflictKind.SAME_CONTENT, bothSame.kind)
+        assertFalse(bothSame.canOverwrite)
+    }
+
+    @Test
+    fun `import conflict same name different body can overwrite only private files`() {
+        val existing = listOf(
+            PersonaPromptFingerprint("voice.md", "old", builtin = false),
+            PersonaPromptFingerprint("SOUL.md", "builtin soul", builtin = true),
+        )
+        val privateHit = PersonaPromptLogic.classifyImportConflict("voice.md", "new body", existing)
+        assertEquals(PersonaImportConflictKind.SAME_NAME, privateHit.kind)
+        assertTrue(privateHit.canOverwrite)
+
+        val builtinHit = PersonaPromptLogic.classifyImportConflict("SOUL.md", "rewritten", existing)
+        assertEquals(PersonaImportConflictKind.SAME_NAME, builtinHit.kind)
+        assertFalse(builtinHit.canOverwrite)
+
+        val none = PersonaPromptLogic.classifyImportConflict("fresh.md", "new body", existing)
+        assertEquals(PersonaImportConflictKind.NONE, none.kind)
+    }
 }

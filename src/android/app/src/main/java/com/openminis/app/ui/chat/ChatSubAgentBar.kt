@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -20,6 +21,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,32 +57,25 @@ fun SubAgentLiveBar(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         mine.forEach { m ->
-            // A member is only ever on screen while RUNNING — finish() removes
-            // it from the roster. The colour is therefore a constant; the two
-            // terminal states used to be matched here before the bar learned to
-            // drop finished members.
+            // key(id) so a newly started sibling does not reuse the previous
+            // chip's slot and paint over it. widthIn keeps each chip from
+            // expanding to the full row and hiding the ones already running.
+            key(m.id) {
             val bg = Color(0xFF007AFF)
             val fg = Color.White
             val label = buildString {
                 if (m.index > 0 && m.total > 0) {
                     append("子代理 ${m.index}/${m.total}")
                 } else {
-                    append(m.title.take(28))
+                    append(m.title.take(18))
                 }
-                m.kind?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
-                    ?: m.role?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
-                append(" · run")
-                run {
-                    val cap = m.turnCap
-                    if (cap > 0) {
-                        append(" · turn ${m.turnIndex.coerceAtLeast(1)}/$cap")
-                    }
-                    m.currentTool.takeIf { it.isNotBlank() }?.let { append(" · $it") }
-                        ?: m.lastStep.takeIf { it.isNotBlank() && cap <= 0 }?.let {
-                            append(" · ")
-                            append(it.take(48))
-                        }
+                m.role?.takeIf { it.isNotBlank() }?.let { append(" · ").append(it) }
+                m.kind?.takeIf { it.isNotBlank() && it != m.role }?.let { append(" · ").append(it) }
+                val cap = m.turnCap
+                if (cap > 0) {
+                    append(" · ${m.turnIndex.coerceAtLeast(1)}/$cap")
                 }
+                m.currentTool.takeIf { it.isNotBlank() }?.let { append(" · ").append(it) }
             }
             Text(
                 text = label,
@@ -90,10 +85,12 @@ fun SubAgentLiveBar(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
+                    .widthIn(max = 168.dp)
                     .background(bg, RoundedCornerShape(999.dp))
                     .clickable { selectedId = m.id }
                     .padding(horizontal = 10.dp, vertical = 4.dp),
             )
+            }
         }
     }
     }
@@ -118,21 +115,24 @@ private fun SubAgentDetailSheet(
     val statusColor = Color(0xFF007AFF)
     val body = buildString {
         append(member.title)
-        member.kind?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
-        member.model?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
+        member.role?.takeIf { it.isNotBlank() }?.let { append(" · 角色 ").append(it) }
+        member.kind?.takeIf { it.isNotBlank() }?.let { append(" · 类型 ").append(it) }
+        member.model?.takeIf { it.isNotBlank() }?.let { append(" · ").append(it) }
         append('\n')
         append(statusLabel)
         if (member.turnCap > 0) {
             append(" · turn ${member.turnIndex.coerceAtLeast(0)}/${member.turnCap}")
         }
-        member.currentTool.takeIf { it.isNotBlank() }?.let { append(" · $it") }
+        member.currentTool.takeIf { it.isNotBlank() }?.let { append(" · ").append(it) }
         member.error?.takeIf { it.isNotBlank() }?.let {
             append("\nerror: ")
             append(it)
         }
         append("\n\n")
-        val transcript = member.transcript.ifBlank { member.lastStep }
-        if (transcript.isNotBlank()) append(transcript) else append("（暂无步骤日志，子代理刚启动）")
+        // Current step only. The accumulated transcript is for the model, not
+        // this sheet — opening a chip used to replay every earlier sibling.
+        val current = member.lastStep.ifBlank { member.currentTool }
+        if (current.isNotBlank()) append(current) else append("（当前还没有步骤）")
     }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(

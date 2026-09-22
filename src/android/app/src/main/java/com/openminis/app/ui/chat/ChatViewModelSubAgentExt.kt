@@ -156,6 +156,67 @@ internal suspend fun ChatViewModel.publishRunSubagentLog(
         }
     }
 
+internal fun subAgentCardId(parentToolId: String, index: Int): String = "$parentToolId#sub-$index"
+
+internal fun currentSubAgentLine(spawn: ChatSubAgentSpawn, index: Int, total: Int, step: String): String =
+    buildString {
+        val role = spawn.role?.takeIf { it.isNotBlank() }
+        if (role != null) append("角色 ").append(role).append(" · ")
+        append("类型 ").append(spawn.kind)
+        append(" · ").append(index).append('/').append(total)
+        if (step.isNotBlank()) append('\n').append(step)
+    }
+
+/**
+ * One card per sub-agent. A batch shares the parent tool id, so each member
+ * gets `$toolId#sub-$index`. A single spawn keeps the parent card and must
+ * not publish every live sibling's transcript into it.
+ */
+internal suspend fun ChatViewModel.publishSubAgentCard(
+    parentToolId: String,
+    cardIndex: Int?,
+    title: String,
+    assistantId: String,
+    currentText: String,
+    toolBlocks: MutableList<AssistantBlock>?,
+    log: String,
+    status: ToolBlockStatus = ToolBlockStatus.RUNNING,
+) {
+    if (parentToolId.isEmpty() || assistantId.isEmpty() || toolBlocks == null) return
+    val cardId = if (cardIndex != null) subAgentCardId(parentToolId, cardIndex) else parentToolId
+    synchronized(toolBlocks) {
+        val i = toolBlocks.indexOfFirst { it.id == cardId }
+        if (i >= 0) {
+            val existing = toolBlocks[i]
+            toolBlocks[i] = existing.copy(
+                content = log,
+                toolTitle = title.ifBlank { existing.toolTitle },
+                toolStatus = if (cardIndex == null) existing.toolStatus else status,
+            )
+        } else if (cardIndex != null) {
+            val parent = toolBlocks.indexOfFirst { it.id == parentToolId }
+            var at = if (parent >= 0) parent + 1 else toolBlocks.size
+            val prefix = "$parentToolId#sub-"
+            while (at < toolBlocks.size && toolBlocks[at].id.startsWith(prefix)) at++
+            toolBlocks.add(
+                at,
+                AssistantBlock(
+                    id = cardId,
+                    kind = "tool_use",
+                    content = log,
+                    toolStatus = status,
+                    toolTitle = title,
+                    toolName = "spawn_agent",
+                    startTimeMs = System.currentTimeMillis(),
+                ),
+            )
+        }
+    }
+    withContext(Dispatchers.Main) {
+        updateAssistantMessage(assistantId, currentText, true, toolBlocks.toList())
+    }
+}
+
 internal suspend fun ChatViewModel.executeRunSubAgent(
         argsJson: String,
         toolId: String = "",
@@ -191,32 +252,54 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
         if (spawns.size == 1) {
             val total = waveSize.coerceAtLeast(1)
             val index = if (total > 1) waveIndex + 1 else 1
-            return sem.withPermit {
-                runOneSubAgent(
-                    spawn = spawns[0],
-                    toolId = toolId,
-                    toolBlocks = toolBlocks,
-                    assistantId = assistantId,
-                    currentText = currentText,
-                    parallelWriters = writerTotal,
-                    index = index,
-                    total = total,
-                )
-            }
-        }
-        val results = supervisorScope {
-            spawns.mapIndexed { i, spawn ->
-                async {
+            return supervisorScope {
+                try {
                     sem.withPermit {
                         runOneSubAgent(
-                            spawn = spawn,
+                            spawn = spawns[0],
                             toolId = toolId,
                             toolBlocks = toolBlocks,
                             assistantId = assistantId,
                             currentText = currentText,
                             parallelWriters = writerTotal,
-                            index = i + 1,
-                            total = spawns.size,
+                            index = index,
+                            total = total,
+                            cardIndex = null,
+                        )
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (t: Throwable) {
+                    ToolExecutionResult(
+                        "Sub-agent failed: ${t.javaClass.simpleName}: ${t.message}",
+                        false,
+                    )
+                }
+            }
+        }
+        val results = supervisorScope {
+            spawns.mapIndexed { i, spawn ->
+                async {
+                    try {
+                        sem.withPermit {
+                            runOneSubAgent(
+                                spawn = spawn,
+                                toolId = toolId,
+                                toolBlocks = toolBlocks,
+                                assistantId = assistantId,
+                                currentText = currentText,
+                                parallelWriters = writerTotal,
+                                index = i + 1,
+                                total = spawns.size,
+                                cardIndex = i + 1,
+                            )
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (t: Throwable) {
+                        ToolExecutionResult(
+                            "Sub-agent ${i + 1} failed: ${t.javaClass.simpleName}: ${t.message}",
+                            false,
                         )
                     }
                 }
@@ -233,7 +316,13 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
                 append('\n')
             }
         }
-        publishRunSubagentLog(toolId, assistantId, currentText, toolBlocks, body)
+        publishRunSubagentLog(
+            toolId,
+            assistantId,
+            currentText,
+            toolBlocks,
+            "Dispatched ${results.size} sub-agents: $ok ok, ${results.size - ok} failed.",
+        )
         return ToolExecutionResult(
             output = body,
             success = results.any { it.success },
@@ -248,6 +337,7 @@ private suspend fun ChatViewModel.runOneSubAgent(
         assistantId: String,
         currentText: String,
         parallelWriters: Int,
+        cardIndex: Int? = null,
         index: Int,
         total: Int,
     ): ToolExecutionResult {
@@ -260,10 +350,18 @@ private suspend fun ChatViewModel.runOneSubAgent(
         val maxTurns = spawn.maxTurns
         val title = spawn.title.ifEmpty { "子代理 $index/$total" }
         if (SubAgentKind.requiresWritePaths(kind, parallelWriters) && writePaths.isEmpty()) {
-            return ToolExecutionResult(
-                "Error: parallel workers must declare non-overlapping write_paths so file_write/file_edit stay isolated.",
-                false,
+            val msg = "Error: parallel workers must declare non-overlapping write_paths so file_write/file_edit stay isolated."
+            publishSubAgentCard(
+                parentToolId = toolId,
+                cardIndex = cardIndex,
+                title = title,
+                assistantId = assistantId,
+                currentText = currentText,
+                toolBlocks = toolBlocks,
+                log = currentSubAgentLine(spawn, index, total, msg),
+                status = ToolBlockStatus.FAILED,
             )
+            return ToolExecutionResult(msg, false)
         }
         val config = providerRepository.config.value
         val pool = MultiAgentSettings.retainLive(
@@ -376,12 +474,15 @@ private suspend fun ChatViewModel.runOneSubAgent(
                 val important = toolName.isNotBlank()
                 if (!important && now - lastUiMs < 250L) return
                 lastUiMs = now
-                publishRunSubagentLog(
-                    toolId,
-                    assistantId,
-                    currentText,
-                    toolBlocks,
-                    com.openminis.app.service.SubAgentActivityTracker.combinedTranscript(parentSession),
+                val step = if (toolName.isNotBlank()) "turn $turn/$maxTurns · $toolName" else "turn $turn/$maxTurns"
+                publishSubAgentCard(
+                    parentToolId = toolId,
+                    cardIndex = cardIndex,
+                    title = title,
+                    assistantId = assistantId,
+                    currentText = currentText,
+                    toolBlocks = toolBlocks,
+                    log = currentSubAgentLine(spawn, index, total, step),
                 )
             }
             val result = com.openminis.app.tools.WritePathGuard.withPaths(writePaths) {
@@ -435,12 +536,15 @@ private suspend fun ChatViewModel.runOneSubAgent(
                 trackerId,
                 "---\n" + result.output,
             )
-            publishRunSubagentLog(
-                toolId,
-                assistantId,
-                currentText,
-                toolBlocks,
-                com.openminis.app.service.SubAgentActivityTracker.combinedTranscript(parentSession),
+            publishSubAgentCard(
+                parentToolId = toolId,
+                cardIndex = cardIndex,
+                title = title,
+                assistantId = assistantId,
+                currentText = currentText,
+                toolBlocks = toolBlocks,
+                log = currentSubAgentLine(spawn, index, total, result.output.trim()),
+                status = if (result.success) ToolBlockStatus.SUCCESS else ToolBlockStatus.FAILED,
             )
             com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, result.success)
             result.copy(toolTitle = title.ifEmpty { "Sub-agent · ${entry.model.displayName}" })
@@ -480,13 +584,41 @@ private suspend fun ChatViewModel.runOneSubAgent(
                 ) else attemptResult
             }
             }
-            ToolExecutionResult(
+            val failed = ToolExecutionResult(
                 "Sub-agent failed after $maxAttempts attempt(s): ${lastError?.message ?: "unknown error"}",
                 false,
             )
-        } catch (e: Exception) {
+            publishSubAgentCard(
+                parentToolId = toolId,
+                cardIndex = cardIndex,
+                title = title,
+                assistantId = assistantId,
+                currentText = currentText,
+                toolBlocks = toolBlocks,
+                log = currentSubAgentLine(spawn, index, total, failed.output),
+                status = ToolBlockStatus.FAILED,
+            )
+            failed
+        } catch (e: CancellationException) {
             com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, false, e.message)
             throw e
+        } catch (t: Throwable) {
+            com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, false, t.message)
+            val failed = ToolExecutionResult(
+                "Sub-agent failed: ${t.javaClass.simpleName}: ${t.message}",
+                false,
+            )
+            publishSubAgentCard(
+                parentToolId = toolId,
+                cardIndex = cardIndex,
+                title = title,
+                assistantId = assistantId,
+                currentText = currentText,
+                toolBlocks = toolBlocks,
+                log = currentSubAgentLine(spawn, index, total, failed.output),
+                status = ToolBlockStatus.FAILED,
+            )
+            return failed
         } finally {
             subAgentDepth.decrementAndGet()
             withContext(NonCancellable) {

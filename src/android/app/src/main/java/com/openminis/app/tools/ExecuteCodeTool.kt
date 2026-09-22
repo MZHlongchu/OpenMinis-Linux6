@@ -108,8 +108,12 @@ object ExecuteCodeTool {
             val text = bridge.out.toString().ifBlank { "(no print output, ${bridge.toolCalls} tool calls)" }
             ToolExecutionResult(text.take(MAX_STDOUT), true, toolTitle = toolTitle)
             }
-        } catch (e: Exception) {
-            ToolExecutionResult("execute_code failed: ${e.message}", false, toolTitle = toolTitle)
+        } catch (t: Throwable) {
+            ToolExecutionResult(
+                "execute_code failed: ${t.javaClass.simpleName}: ${t.message}",
+                false,
+                toolTitle = toolTitle,
+            )
         }
     }
 }

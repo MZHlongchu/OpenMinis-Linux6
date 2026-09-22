@@ -9072,7 +9072,14 @@ class ChatViewModel(
                     } else {
                         result.output
                     }
-                    val finalContent = if (existingContent.length > resultContent.length) existingContent else resultContent
+                    val mergedContent = if (existingContent.length > resultContent.length) existingContent else resultContent
+                    val childPrefix = "$id#sub-"
+                    val childCount = allToolBlocks.count { it.id.startsWith(childPrefix) }
+                    val finalContent = if (childCount > 0) {
+                        "已分发 $childCount 个子代理，点开各自卡片查看当前运行。"
+                    } else {
+                        mergedContent
+                    }
                     // [T-truncated-args-visibility #119] A call built from
                     // truncated args must not render as a clean success — that
                     // silence is the reported bug. Show it with the same weight
@@ -11513,6 +11520,10 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         // Before `ensureSession()` that is the draft id; after, the real id.
         // Stopping the wrong one leaves a runaway yt-dlp/ffmpeg alive.
         ExecutionCoordinator.stopCurrentCommand(activeSessionId)
+        com.openminis.app.service.SubAgentActivityTracker.clearSession(activeSessionId)
+        if (sessionId != activeSessionId) {
+            com.openminis.app.service.SubAgentActivityTracker.clearSession(sessionId)
+        }
         if (isDraft && realSessionId.isNotEmpty() && activeSessionId != sessionId) {
             // Mid-turn rename: sweep any lingering draft shell too.
             ExecutionCoordinator.stopCurrentCommand(sessionId)
