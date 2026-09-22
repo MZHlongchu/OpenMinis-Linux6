@@ -2,6 +2,7 @@ package com.openminis.app.data
 
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
+import com.openminis.app.ui.chat.dropOrphanedToolParts
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -12,13 +13,11 @@ import org.junit.Test
  * rules that ChatViewModel's compaction path depends on (iOS c7f6a299e +
  * 5d346dc2e).
  *
- * Both production functions live on ChatViewModel, which needs a Context, a DB
- * and a provider to construct — so, following InLoopContextPolicyTest, these
- * cover the DECISION LOGIC rather than the coroutine plumbing. The algorithms
- * below are kept byte-for-byte equivalent to the production bodies; if one is
- * changed without the other, `orphan sweep repairs a slice that lost its call`
- * and `walk-back refuses a tool-result-carrying user message` are the tests
- * that fail.
+ * `dropOrphanedToolParts` is the production function (ChatViewModelHistoryExt).
+ * The walk-back predicate below is still mirrored, because that decision sits
+ * inside ChatViewModel and needs a session to construct. If the production
+ * walk-back changes, `walk-back refuses a tool-result-carrying user message`
+ * is the test that must move with it.
  *
  * Why this matters: an unmatched pair is a hard 400 on OpenAI-compatible APIs
  * ("No tool call found for function call output with call_id …"), and because
@@ -71,61 +70,7 @@ class CompactToolPairingTest {
         )
     }
 
-    // ── layer 2: orphan sweep (production: dropOrphanedToolParts) ──────────
-
-    private fun dropOrphanedToolParts(history: List<LLMMessage>): List<LLMMessage> {
-        val toolUseIds = HashSet<String>()
-        val toolResultIds = HashSet<String>()
-        for (msg in history) {
-            for (part in msg.contentParts) {
-                when (part) {
-                    is AgentContentPart.ToolUse -> toolUseIds.add(part.id)
-                    is AgentContentPart.ToolResult -> toolResultIds.add(part.id)
-                    else -> {}
-                }
-            }
-        }
-        val orphanedResults = toolResultIds - toolUseIds
-        val orphanedUses = HashSet(toolUseIds - toolResultIds)
-
-        val last = history.lastOrNull()
-        if (last != null && last.role == LLMMessage.Role.ASSISTANT) {
-            for (part in last.contentParts) {
-                if (part is AgentContentPart.ToolUse) orphanedUses.remove(part.id)
-            }
-        }
-        if (orphanedResults.isEmpty() && orphanedUses.isEmpty()) return history
-
-        val cleaned = ArrayList<LLMMessage>(history.size)
-        for (msg in history) {
-            val kept = msg.contentParts.filter { part ->
-                if (part is AgentContentPart.ToolResult) !orphanedResults.contains(part.id) else true
-            }
-            if (kept.isEmpty() && msg.contentParts.isNotEmpty()) continue
-            cleaned.add(if (kept.size == msg.contentParts.size) msg else msg.copy(contentParts = kept))
-
-            if (msg.role != LLMMessage.Role.ASSISTANT) continue
-            val unanswered = kept.filterIsInstance<AgentContentPart.ToolUse>()
-                .filter { orphanedUses.contains(it.id) }
-            if (unanswered.isNotEmpty()) {
-                cleaned.add(
-                    LLMMessage(
-                        role = LLMMessage.Role.USER,
-                        content = "",
-                        contentParts = unanswered.map {
-                            AgentContentPart.ToolResult(
-                                id = it.id,
-                                name = it.name,
-                                content = "Tool execution was interrupted by an unexpected error.",
-                                isError = true,
-                            )
-                        },
-                    ),
-                )
-            }
-        }
-        return cleaned
-    }
+    // ── layer 2: orphan sweep uses production dropOrphanedToolParts ────────
 
     private fun allIds(history: List<LLMMessage>): Pair<Set<String>, Set<String>> {
         val uses = HashSet<String>()

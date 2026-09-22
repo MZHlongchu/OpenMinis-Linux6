@@ -125,6 +125,9 @@ class SkillRepository(private val context: Context) {
     private val skillsDir: File
         get() = File(context.filesDir, "minis-global/skills")
 
+    /** Last disk signature that [loadAll] (or a skipped reload) published. */
+    private var diskSignatures: Map<String, String>? = null
+
     init {
         // [T-android-safemode-lateinit-crash-147] Never let a bad skill take
         // the whole app down. This constructor runs inline in
@@ -142,12 +145,13 @@ class SkillRepository(private val context: Context) {
         // from an external hub is exactly the kind of input that can throw.
         // Degrading to "some skills missing from the list" is always better
         // than an app that cannot start.
-        runCatching { loadAll() }.onFailure {
+        val loaded = runCatching { loadAll() }.onFailure {
             Log.e(TAG, "loadAll failed — continuing with ${_skills.value.size} skill(s): ${it.message}", it)
-        }
-        runCatching { installBundledSkills() }.onFailure {
+        }.isSuccess
+        val bundled = runCatching { installBundledSkills() }.onFailure {
             Log.e(TAG, "installBundledSkills failed — continuing: ${it.message}", it)
-        }
+        }.isSuccess
+        if (loaded && bundled) noteDisk()
     }
 
     // -- CRUD --
@@ -220,6 +224,7 @@ class SkillRepository(private val context: Context) {
         val dir = File(skillsDir, id)
         dir.deleteRecursively()
         _skills.value = _skills.value.filter { it.id != id }
+        noteDisk()
         Log.i(TAG, "Deleted skill: $id")
     }
 
@@ -248,7 +253,7 @@ class SkillRepository(private val context: Context) {
      * ids the user explicitly switched off (recorded in prefs) stay off.
      */
     fun refreshOnStartup() {
-        runCatching { loadAll() }.onFailure {
+        runCatching { reloadFromDisk() }.onFailure {
             Log.e(TAG, "startup refresh loadAll failed: ${it.message}", it)
         }
         runCatching { installBundledSkills() }.onFailure {
@@ -269,7 +274,14 @@ class SkillRepository(private val context: Context) {
             )
             Log.i(TAG, "startup refresh: ${if (enable) "enabled" else "disabled"} $id")
         }
-        if (changes.isNotEmpty()) loadAll()
+        if (changes.isNotEmpty()) {
+            val byId = changes.toMap()
+            _skills.value = _skills.value.map { skill ->
+                val enable = byId[skill.id] ?: return@map skill
+                skill.copy(isEnabled = enable)
+            }
+        }
+        noteDisk()
     }
 
     fun setEnabled(id: String, enabled: Boolean) {
@@ -1277,7 +1289,138 @@ class SkillRepository(private val context: Context) {
      * path), not overwriting any preserved DB toggle.
      */
     fun reloadFromDisk() {
+        val next = runCatching { SkillDiskIndex.signatures(skillsDir) }.getOrElse {
+            loadAll()
+            noteDisk()
+            return
+        }
+        val prev = diskSignatures
+        if (prev != null && prev == next) {
+            Log.i(TAG, "reloadFromDisk skipped — skill disk unchanged (${next.size})")
+            return
+        }
+        if (prev != null && _skills.value.isNotEmpty()) {
+            val delta = SkillDiskIndex.diff(prev, next)
+            if (applyDiskDelta(delta)) {
+                diskSignatures = next
+                Log.i(
+                    TAG,
+                    "reloadFromDisk incremental +${delta.added.size} -${delta.removed.size} ~${delta.changed.size}",
+                )
+                return
+            }
+            Log.w(TAG, "reloadFromDisk incremental miss — full loadAll")
+        }
         loadAll()
+        noteDisk()
+    }
+
+    private fun noteDisk() {
+        diskSignatures = runCatching { SkillDiskIndex.signatures(skillsDir) }.getOrNull()
+    }
+
+    /**
+     * Apply a disk delta onto the in-memory registry. Returns false when the
+     * snapshot cannot be trusted (a changed id is missing from memory), so
+     * the caller falls back to [loadAll]. Unchanged skills keep their DB
+     * flags, including `is_enabled` and `use_count`.
+     */
+    private fun applyDiskDelta(delta: SkillDiskIndex.Delta): Boolean {
+        if (delta.isEmpty) return true
+        val byId = _skills.value.associateBy { it.id }
+        val next = _skills.value.toMutableList()
+        for (id in delta.removed) {
+            val skill = byId[id]
+            if (skill == null) return false
+            if (skill.importSource == ImportSource.BUNDLED) {
+                val idx = next.indexOfFirst { it.id == id }
+                if (idx >= 0) next[idx] = skill.copy(body = "")
+                continue
+            }
+            db.execSQL("DELETE FROM skills WHERE id=?", arrayOf(id))
+            db.execSQL("DELETE FROM session_skill_overrides WHERE skill_id=?", arrayOf(id))
+            next.removeAll { it.id == id }
+            Log.i(TAG, "Pruned skill missing from disk: $id")
+        }
+        for (id in delta.changed) {
+            val skill = byId[id] ?: return false
+            val updated = rereadSkill(skill) ?: return false
+            val idx = next.indexOfFirst { it.id == id }
+            if (idx >= 0) next[idx] = updated
+        }
+        for (id in delta.added) {
+            if (next.any { it.id == id }) continue
+            val skill = discoverOne(id) ?: return false
+            insertDb(skill)
+            next.add(skill)
+            Log.i(TAG, "Auto-discovered skill: $id")
+        }
+        _skills.value = next
+        return true
+    }
+
+    private fun discoverOne(id: String): Skill? {
+        val skillMd = File(skillsDir, "$id/SKILL.md")
+        if (!skillMd.exists()) return null
+        val raw = runCatching { skillMd.readText() }.getOrNull() ?: ""
+        val parsed = parseSkillMd(raw)
+        return if (parsed != null) {
+            Skill(
+                id = id,
+                name = parsed.name,
+                description = parsed.description,
+                importSource = ImportSource.SESSION,
+                body = parsed.body,
+            )
+        } else {
+            Skill(
+                id = id,
+                name = id,
+                description = "",
+                importSource = ImportSource.SESSION,
+                body = raw,
+            )
+        }
+    }
+
+    private fun rereadSkill(skill: Skill): Skill? {
+        val skillMd = File(skillsDir, "${skill.id}/SKILL.md")
+        if (!skillMd.exists()) return null
+        val raw = runCatching { skillMd.readText() }.getOrNull() ?: return null
+        val parsed = parseSkillMd(raw)
+        var name = skill.name
+        var description = skill.description
+        var version = skill.version
+        val nameStale = name.isBlank()
+        val descStale = description == ">" || description == "|" || description.isBlank()
+        if (parsed != null && (descStale || nameStale || version.isBlank())) {
+            var changed = false
+            if (descStale && parsed.description.isNotBlank()) {
+                description = parsed.description
+                changed = true
+            }
+            if (nameStale && parsed.name.isNotBlank()) {
+                name = parsed.name
+                changed = true
+            }
+            if (version.isBlank()) {
+                version = parsed.version
+                changed = true
+            }
+            if (changed) {
+                db.execSQL(
+                    "UPDATE skills SET name=?, description=?, version=?, updated_at=? WHERE id=?",
+                    arrayOf<Any>(name, description, version, System.currentTimeMillis(), skill.id),
+                )
+                Log.i(TAG, "Self-healed skill name/description for ${skill.id}")
+            }
+        }
+        return skill.copy(
+            name = name,
+            description = description,
+            version = version,
+            body = parsed?.body ?: "",
+        )
     }
 
     // -- Internal --
@@ -1497,6 +1640,7 @@ class SkillRepository(private val context: Context) {
             append(skill.body)
         }
         File(dir, "SKILL.md").writeText(content)
+        noteDisk()
     }
 
     /**
