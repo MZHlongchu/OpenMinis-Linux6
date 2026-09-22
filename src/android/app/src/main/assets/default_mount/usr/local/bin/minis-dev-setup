@@ -32,8 +32,11 @@ fi
 if [ -f /usr/local/lib/minis/apt-lock.sh ]; then
   # shellcheck source=/dev/null
   . /usr/local/lib/minis/apt-lock.sh
-  minis_acquire_apt_lock 300 || echo "minis-dev-setup: apt lock busy, continuing"
-  trap 'minis_release_apt_lock' EXIT INT TERM
+  if minis_acquire_apt_lock 300; then
+    trap 'minis_release_apt_lock' EXIT INT TERM
+  else
+    echo "minis-dev-setup: apt lock busy after 300s, continuing anyway" >&2
+  fi
 fi
 
 apt_try() {

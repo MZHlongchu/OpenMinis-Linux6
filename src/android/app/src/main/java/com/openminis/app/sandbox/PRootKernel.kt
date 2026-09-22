@@ -80,11 +80,17 @@ object PRootKernel {
         // (they also serialize on RootfsManager.aptMutex).
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             runCatching { rootfsManager.runMinisMirrorAuto() }
+                .onFailure { Log.e(TAG, "[boot] mirror auto failed", it) }
             runCatching { rootfsManager.seedNetworkTools() }
+                .onFailure { Log.e(TAG, "[boot] seed network tools failed", it) }
             runCatching { rootfsManager.retryFailedDpkgWorld() }
+                .onFailure { Log.e(TAG, "[boot] retry dpkg world failed", it) }
             runCatching { rootfsManager.retryFailedPipWorld() }
+                .onFailure { Log.e(TAG, "[boot] retry pip world failed", it) }
             runCatching { rootfsManager.dumpDpkgWorld() }
+                .onFailure { Log.e(TAG, "[boot] dump dpkg world failed", it) }
             runCatching { rootfsManager.dumpPipWorld() }
+                .onFailure { Log.e(TAG, "[boot] dump pip world failed", it) }
         }
 
         // Refresh DNS from system (mirrors iOS ISHKernel.configureDns)

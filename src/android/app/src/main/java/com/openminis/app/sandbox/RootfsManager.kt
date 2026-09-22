@@ -400,7 +400,7 @@ class RootfsManager private constructor(private val context: Context) {
                 pem.append(extra)
                 copyHostCaHashFiles(dir, guestCerts)
                 source = dirPath
-                Log.i(TAG, "[CA] AndroidCAStore empty; using filesystem $dirPath")
+                Log.i(TAG, "[CA] AndroidCAStore insufficient (${pem.length} bytes); using filesystem $dirPath")
                 break
             }
         } else {
@@ -1027,9 +1027,8 @@ class RootfsManager private constructor(private val context: Context) {
         if (!File(rootfsDir, "usr/bin/fuser").exists()) essentials += "psmisc"
         if (!File(rootfsDir, "usr/bin/unzip").exists()) essentials += "unzip"
         if (essentials.isNotEmpty()) {
-            val seed = (essentials + listOf("ca-certificates", "python3-pip")).distinct()
-            Log.i(TAG, "[net-seed] installing ${seed.joinToString()}")
-            val r = runAptInstallInGuest(seed)
+            Log.i(TAG, "[net-seed] installing ${essentials.joinToString()}")
+            val r = runAptInstallInGuest(essentials)
             Log.i(TAG, "[net-seed] essentials exit=${r.exitCode}")
         }
         val node = File(rootfsDir, "usr/bin/node").takeIf { it.exists() }

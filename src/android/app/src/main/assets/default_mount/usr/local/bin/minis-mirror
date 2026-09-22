@@ -243,9 +243,9 @@ acquire_lock() {
 
 release_lock() {
     if type minis_release_apt_lock >/dev/null 2>&1; then
-        minis_release_apt_lock
+        minis_release_apt_lock 2>/dev/null || true
     fi
-    rm -rf "$LOCK_FILE.d" 2>/dev/null
+    rm -rf "$LOCK_FILE.d" 2>/dev/null || true
     return 0
 }
 

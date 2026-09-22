@@ -28,7 +28,7 @@ minis_clear_stale_dpkg_locks() {
 
 minis_acquire_apt_lock() {
     _timeout="${1:-180}"
-    mkdir -p /var/lock /tmp /var/tmp
+    mkdir -p /var/lock /tmp /var/tmp 2>/dev/null || true
     if command -v flock >/dev/null 2>&1; then
         exec 9>"$MINIS_APT_LOCKFILE" 2>/dev/null || true
         if flock -w "$_timeout" 9 2>/dev/null; then
@@ -46,7 +46,8 @@ minis_acquire_apt_lock() {
         fi
         if [ -d "$MINIS_APT_LOCKDIR" ]; then
             _mtime=$(stat -c %Y "$MINIS_APT_LOCKDIR" 2>/dev/null || echo 0)
-            _age=$(( $(date +%s) - _mtime ))
+            _now=$(date +%s 2>/dev/null || echo 0)
+            _age=$(( _now - _mtime ))
             if [ "$_age" -gt 1800 ]; then
                 echo "minis-apt-lock: stale mkdir lock (${_age}s), removing" >&2
                 rmdir "$MINIS_APT_LOCKDIR" 2>/dev/null || true
