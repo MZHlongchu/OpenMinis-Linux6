@@ -6,7 +6,7 @@
 
 **端侧私人 AI Agent。** 把 Claude、GPT、Gemini 等模型接到手机里的一台真 Linux：Ubuntu 24.04 沙箱、浏览器自动化、技能与记忆、多智能体调度。
 
-本仓库是 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 **Linux 沙箱 Android 分支**。启动器名称 **Minis Ultra**，包名 `com.openminis.linux`，可与官方 OpenMinis **并排安装**。当前 **1.36.18-linux**（versionCode 71）。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。
+本仓库是 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 **Linux 沙箱 Android 分支**。启动器名称 **Minis Ultra**，包名 `com.openminis.linux`，可与官方 OpenMinis **并排安装**。当前 **1.36.19-linux**（versionCode 72）。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。
 
 ## 仓库介绍
 

@@ -1,12 +1,36 @@
-# OpenMinis-Linux 1.36.18-linux
+# OpenMinis-Linux 1.36.19-linux
 
-- versionCode **71**
+- versionCode **72**
 - applicationId `com.openminis.linux`
 - 启动器名称：**Minis Ultra**
 - GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
 - APK：`minis-ultra-com.openminis.linux.apk`
 
-## 本版
+## 本版（1.36.19-linux，2026-09-22）
+
+### 用户反馈的P0 修复
+
+1. **minis-dev-setup 巨无霸问题** - 原脚本强制安装 gcc/ffmpeg/openjdk/golang (~800MB)，蜂窝网络30分钟没下完
+   - **修复**: 拆分为轻量版（~30秒，必需包）和完整版（10-20分钟，可选）
+   - 轻量版自动运行：ca-certificates, curl, wget, python3, git, nodejs, psmisc, unzip
+   - 完整版手动运行：`minis-dev-setup-full`
+
+2. **apt运行时阻塞所有shell命令** - aptMutex 无限等待，后续 shell_execute 全部超时
+   - **修复**: 添加 5 分钟超时，失败时抛出清晰错误
+   - 非apt命令不再被阻塞
+
+3. **脚本重试无法kill** - apt_try 8次重试，杀掉 apt-get 后自动拉起新进程
+   - **修复**: SIGTERM 优雅退出（释放锁，exit 143）
+   - 轻量版移除重试循环，使用 `set -e` 快速失败
+
+### 其他改进
+
+- **seedNetworkTools 优化**: 已存在包跳过安装，不重复下载
+- **文档**: FIX-DEV-SETUP.md 详细技术说明
+
+## 历史版本
+
+### 1.36.18-linux (2026-09-22)
 
 相对 1.36.17-linux：
 

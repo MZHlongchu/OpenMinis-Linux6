@@ -2,6 +2,7 @@ package com.openminis.app.sandbox
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -38,10 +39,32 @@ object SandboxResourceGate {
             c.contains("minis-mirror")
     }
 
+    /**
+     * Wrap a command with resource locks to serialize conflicting operations.
+     * 
+     * APK builds and package managers (apt/dpkg/sdkmanager/minis-dev-setup)
+     * are serialized to prevent dpkg lock conflicts. Shell commands that don't
+     * touch package state run concurrently.
+     * 
+     * Lock timeout: apt/dpkg commands have a 5-minute timeout. If the lock
+     * cannot be acquired within that time, the operation fails with a clear
+     * error message instead of hanging indefinitely.
+     */
     suspend fun <T> withCommandLock(command: String, block: suspend () -> T): T {
         return when {
             isApkBuild(command) -> apkLock.withLock { block() }
-            isPackageManager(command) -> aptMutex.withLock { block() }
+            isPackageManager(command) -> {
+                try {
+                    withTimeout(5 * 60 * 1000L) { // 5 minutes
+                        aptMutex.withLock { block() }
+                    }
+                } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                    throw RuntimeException(
+                        "apt/dpkg is busy for 5+ minutes (likely minis-dev-setup or long apt-get). " +
+                        "Command aborted to prevent deadlock. Kill the apt process and retry.", e
+                    )
+                }
+            }
             else -> block()
         }
     }

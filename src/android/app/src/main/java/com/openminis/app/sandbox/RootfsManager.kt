@@ -1017,6 +1017,8 @@ class RootfsManager private constructor(private val context: Context) {
 
     private fun seedNetworkToolsLocked() {
         if (!prootBinary.exists()) return
+        
+        // Only seed truly essential packages that are missing
         val essentials = mutableListOf<String>()
         val ca = File(rootfsDir, "etc/ssl/certs/ca-certificates.crt")
         if (!ca.exists() || ca.length() < 1024L) essentials += "ca-certificates"
@@ -1026,20 +1028,26 @@ class RootfsManager private constructor(private val context: Context) {
         if (!File(rootfsDir, "usr/bin/git").exists()) essentials += "git"
         if (!File(rootfsDir, "usr/bin/fuser").exists()) essentials += "psmisc"
         if (!File(rootfsDir, "usr/bin/unzip").exists()) essentials += "unzip"
-        if (essentials.isNotEmpty()) {
-            Log.i(TAG, "[net-seed] installing ${essentials.joinToString()}")
-            val r = runAptInstallInGuest(essentials)
-            Log.i(TAG, "[net-seed] essentials exit=${r.exitCode}")
+        
+        if (essentials.isEmpty()) {
+            Log.i(TAG, "[net-seed] all essentials present, skipping")
+            return
         }
+        
+        Log.i(TAG, "[net-seed] installing ${essentials.joinToString()}")
+        val r = runAptInstallInGuest(essentials)
+        Log.i(TAG, "[net-seed] essentials exit=${r.exitCode}")
+        
+        // Node.js: try once, but don't block boot
         val node = File(rootfsDir, "usr/bin/node").takeIf { it.exists() }
             ?: File(rootfsDir, "usr/bin/nodejs")
         val nodeAttempted = File(rootfsDir, "var/lib/minis/node-seed.attempted")
         if (!node.exists() && !nodeAttempted.exists()) {
             nodeAttempted.parentFile?.mkdirs()
             nodeAttempted.writeText("1\n")
-            Log.i(TAG, "[net-seed] installing nodejs npm")
-            val r = runAptInstallInGuest(listOf("nodejs", "npm"))
-            Log.i(TAG, "[net-seed] nodejs exit=${r.exitCode}")
+            Log.i(TAG, "[net-seed] attempting nodejs npm (best-effort)")
+            val nr = runAptInstallInGuest(listOf("nodejs", "npm"))
+            Log.i(TAG, "[net-seed] nodejs exit=${nr.exitCode}")
         }
     }
 
