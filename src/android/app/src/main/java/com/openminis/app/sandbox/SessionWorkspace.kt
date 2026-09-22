@@ -82,7 +82,7 @@ object SessionWorkspace {
         File(filesDir, "$WORKSPACES_DIR/$folderId")
 
     fun memoryDir(filesDir: File, sessionId: String): File =
-        File(base(filesDir, sessionId), "memory")
+        File(base(filesDir, ownerSessionId(sessionId)), "memory")
 
     /**
      * Host directory mounted at `/var/minis/[subdir]`. Shared project dirs when
@@ -112,7 +112,28 @@ object SessionWorkspace {
                 )
             }
         }
-        return File(base(filesDir, sessionId), subdir)
+        return File(base(filesDir, ownerSessionId(sessionId)), subdir)
+    }
+
+    /**
+     * Resolve a `/var/minis/<subdir>/...` path to the same host file the shell
+     * bind uses. Returns null for `..` or paths this layout does not own.
+     */
+    fun resolveGuestPath(filesDir: File, sessionId: String, linuxPath: String): File? {
+        if (!linuxPath.startsWith("/var/minis/")) return null
+        val rest = linuxPath.removePrefix("/var/minis/")
+        if (rest.isEmpty()) return null
+        val parts = rest.split('/')
+        if (parts.any { it == ".." }) return null
+        val subdir = parts[0]
+        if (subdir.isEmpty()) return null
+        val root = when (subdir) {
+            in SESSION_SUBDIRS -> hostDir(filesDir, sessionId, subdir)
+            in GLOBAL_BIND_SUBDIRS -> File(File(filesDir, GLOBAL_DIR), subdir)
+            else -> return null
+        }
+        val tail = parts.drop(1).filter { it.isNotEmpty() }.joinToString("/")
+        return if (tail.isEmpty()) root else File(root, tail)
     }
 
     fun ensureProjectDirs(filesDir: File, folderId: String) {
@@ -152,11 +173,88 @@ object SessionWorkspace {
         return dir.deleteRecursively()
     }
 
-    private fun ownerSessionId(sessionId: String): String {
+    fun ownerSessionId(sessionId: String): String {
         val prefix = "subagent:"
         if (!sessionId.startsWith(prefix)) return sessionId
         val rest = sessionId.substring(prefix.length)
         val cut = rest.lastIndexOf(':')
         return if (cut > 0) rest.substring(0, cut) else sessionId
+    }
+
+    /** True when [candidate] does not climb out of [root] via `..`. */
+    fun staysInside(root: File, candidate: File): Boolean {
+        val base = normalized(root).path.trimEnd('\\', '/')
+        val file = normalized(candidate).path.trimEnd('\\', '/')
+        return file == base || file.startsWith(base + File.separator)
+    }
+
+    private fun normalized(file: File): File =
+        try {
+            file.canonicalFile
+        } catch (_: Exception) {
+            lexicalNormalize(file)
+        }
+
+    /**
+     * File tools may read the caller's private tree, the caller's project
+     * tree, rootfs, and global skills. They must not land in another
+     * session's `minis-sessions/<other>` or another project's
+     * `minis-workspaces/<other>`.
+     */
+    fun acceptsResolved(filesDir: File, sessionId: String, candidate: File): Boolean {
+        val owner = ownerSessionId(sessionId)
+        if (!isSafeId(owner)) return false
+        val canon = lexicalNormalize(candidate)
+        val sessions = lexicalNormalize(File(filesDir, SESSIONS_DIR))
+        val projects = lexicalNormalize(File(filesDir, WORKSPACES_DIR))
+        if (staysInside(sessions, canon)) {
+            return staysInside(File(sessions, owner), canon)
+        }
+        if (staysInside(projects, canon)) {
+            val folder = folderIdFor(sessionId) ?: return false
+            if (!isSafeId(folder)) return false
+            return staysInside(File(projects, folder), canon)
+        }
+        return true
+    }
+
+    internal fun lexicalNormalize(file: File): File {
+        val abs = file.absolutePath
+        val prefix: String
+        val rest: String
+        when {
+            abs.length >= 2 && abs[1] == ':' -> {
+                prefix = abs.substring(0, 2)
+                rest = abs.substring(2)
+            }
+            abs.startsWith("\\\\") -> {
+                prefix = "\\\\"
+                rest = abs.removePrefix("\\\\")
+            }
+            abs.startsWith("/") || abs.startsWith("\\") -> {
+                prefix = File.separator
+                rest = abs.trimStart('/', '\\')
+            }
+            else -> {
+                prefix = ""
+                rest = abs
+            }
+        }
+        val parts = ArrayDeque<String>()
+        for (seg in rest.split('/', '\\')) {
+            when {
+                seg.isEmpty() || seg == "." -> Unit
+                seg == ".." -> if (parts.isNotEmpty()) parts.removeLast()
+                else -> parts.addLast(seg)
+            }
+        }
+        val body = parts.joinToString(File.separator)
+        val path = when {
+            prefix.endsWith(":") -> prefix + File.separator + body
+            prefix == File.separator -> File.separator + body
+            prefix == "\\\\" -> "\\\\$body"
+            else -> body
+        }
+        return File(path)
     }
 }

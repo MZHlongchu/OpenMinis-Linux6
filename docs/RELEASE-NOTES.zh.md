@@ -1,3 +1,29 @@
+# OpenMinis-Linux 1.36.20-linux
+
+- versionCode **73**
+- applicationId `com.openminis.linux`
+- 启动器名称：**Minis Ultra**
+- GitHub：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)
+- APK：`minis-ultra-com.openminis.linux.apk`
+
+## 本版（1.36.20-linux，2026-09-22）
+
+### 权限
+
+工具闸门和系统权限是两层，不再只出现在多智能体页。设置 → 权限顶部是工具模式（询问 / 全部允许 / 只读 / 计划 / 全部拒绝），下面仍是无障碍、Shizuku、存储。
+
+「本会话全部允许」和全局「全部允许」走同一套判断：用户规则优先；拒绝规则仍然生效；`rm -rf /` 在全部允许下改为弹确认，不再静默拒绝；权威路径围栏只在询问模式下拦住工作区外写入。
+
+### 会话隔离
+
+文件工具解析路径后会规范化，拒绝落到别的会话 `minis-sessions/<other>` 或别的项目 `minis-workspaces/<other>`。同一项目的共享工作区、自己的日记、全局技能、rootfs 仍然可读。`search_sessions` / `read_session` 不受影响。删一个会话不会删项目树。
+
+### 客户机证书
+
+注入的 CA 改为目录 0755、文件 0644，避免 Android umask 0077 加上 PRoot 的权限检查让非 root 读不到证书。同时按 OpenSSL 的 subject hash 写出 `.0` 文件，并把 `SSL_CERT_FILE` 写进 `/etc/environment` 和 bash 启动脚本，不依赖本次进程的环境变量。
+
+---
+
 # OpenMinis-Linux 1.36.19-linux
 
 - versionCode **72**

@@ -302,12 +302,18 @@ fun MultiAgentSettingsScreen(onBack: () -> Unit) {
         var permMode by remember { mutableStateOf(gate.getPermissionMode()) }
         SettingsSection(
             header = "权限模式",
-            footer = "ASK 默认询问写操作与高风险命令；ALLOW_ALL 自动放行；READ_ONLY / PLAN 只读；DENY_ALL 全拒。",
+            footer = "这是 Agent 工具闸门，和设置 → 权限里的系统权限（无障碍 / Shizuku）不是同一个开关。同一套模式也显示在权限页顶部。询问是默认；全部允许仍会弹确认拦截 rm -rf /，但不再静默拒绝。拒绝规则优先。会话里的「本会话全部允许」走同一闸门。",
         ) {
-            val modes = com.openminis.app.security.PermissionMode.entries
+            val modes = listOf(
+                com.openminis.app.security.PermissionMode.ASK,
+                com.openminis.app.security.PermissionMode.ALLOW_ALL,
+                com.openminis.app.security.PermissionMode.READ_ONLY,
+                com.openminis.app.security.PermissionMode.PLAN,
+                com.openminis.app.security.PermissionMode.DENY_ALL,
+            )
             modes.forEachIndexed { index, mode ->
                 SettingsChoiceRow(
-                    title = mode.name,
+                    title = mode.labelZh(),
                     selected = permMode == mode,
                     onSelect = {
                         permMode = mode

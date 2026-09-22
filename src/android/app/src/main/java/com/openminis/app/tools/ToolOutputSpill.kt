@@ -25,7 +25,10 @@ object ToolOutputSpill {
     ): String {
         if (output.length <= LIMIT || sessionId.isBlank()) return output
         val safeId = toolId.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "tool" }
-        val dir = File(context.filesDir, "minis-sessions/$sessionId/workspace/tool-spill")
+        val dir = File(
+            com.openminis.app.sandbox.SessionWorkspace.hostDir(context.filesDir, sessionId, "workspace"),
+            "tool-spill",
+        )
         if (!dir.mkdirs() && !dir.isDirectory) return output
         val file = File(dir, "$safeId.txt")
         return try {
@@ -65,7 +68,10 @@ object ToolOutputSpill {
     fun hostFile(context: Context, sessionId: String, guestPath: String): File? {
         val name = parseGuestPath(guestPath)?.substringAfterLast('/') ?: return null
         if (sessionId.isBlank() || name.isBlank()) return null
-        val file = File(context.filesDir, "minis-sessions/$sessionId/workspace/tool-spill/$name")
+        val file = File(
+            com.openminis.app.sandbox.SessionWorkspace.hostDir(context.filesDir, sessionId, "workspace"),
+            "tool-spill/$name",
+        )
         return file.takeIf { it.isFile }
     }
 }

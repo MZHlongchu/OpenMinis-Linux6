@@ -754,33 +754,31 @@ object PRootKernel {
         return cmd
     }
 
-    /** Subdirs that live under `minis-sessions/<sessionId>/` rather than the global pool. */
-    private val perSessionSubdirs = SessionWorkspace.SESSION_SUBDIRS.toSet()
-
     /**
-     * Resolve a `/var/minis/...` Linux path directly against a specific session's
-     * host directory, bypassing the global [bindMounts] map. Use this when the
-     * caller knows the owning session (chat link resolver, file preview, etc.) —
-     * the global map is overwritten every time another session boots its shell,
-     * so its answer is last-writer-wins rather than "this session's view".
+     * Resolve a `/var/minis/...` Linux path against the same host directory the
+     * session shell bind-mounts. Use this when the caller knows the owning
+     * session (file tools, chat link resolver, file preview). The global
+     * [bindMounts] map is last-writer-wins and must not be used for per-session
+     * paths — that split is what made `file_write` and `shell_execute` see two
+     * different `/var/minis/workspace` trees.
      *
-     * Falls back to [resolveHostPath] for paths outside `/var/minis/` or for the
-     * shared subdirs (skills/shared) which don't depend on sessionId.
+     * Falls back to [resolveHostPath] for paths this layout does not own
+     * (rootfs files, external SAF mounts).
      */
     fun resolveSessionHostPath(sessionId: String, linuxPath: String, context: Context): File? {
-        if (!linuxPath.startsWith("/var/minis/")) return resolveHostPath(linuxPath)
-        val rest = linuxPath.removePrefix("/var/minis/")
-        val slash = rest.indexOf('/')
-        val subdir = if (slash < 0) rest else rest.substring(0, slash)
-        if (subdir !in perSessionSubdirs) return resolveHostPath(linuxPath)
-        val sessionBase = File(context.filesDir, "minis-sessions/$sessionId/$subdir")
-        val tail = if (slash < 0) "" else rest.substring(slash + 1)
-        return if (tail.isEmpty()) sessionBase else File(sessionBase, tail)
+        val resolved = SessionWorkspace.resolveGuestPath(context.filesDir, sessionId, linuxPath)
+            ?: resolveHostPath(linuxPath)
+            ?: return null
+        return resolved.takeIf {
+            SessionWorkspace.acceptsResolved(context.filesDir, sessionId, it)
+        }
     }
 
     /**
      * Resolve a Linux path to a host filesystem File by checking bind mounts.
-     * Returns null if no matching mount is found.
+     * Returns null if no matching mount is found, or if `..` walks out of the
+     * matched bind root / rootfs (that is how one session's file tool used to
+     * read another's private tree).
      */
     fun resolveHostPath(linuxPath: String): File? {
         // Check bind mounts (longest prefix match)
@@ -789,18 +787,17 @@ object PRootKernel {
             if (linuxPath == mountPoint || linuxPath.startsWith("$mountPoint/")) {
                 val hostBase = bindMounts[mountPoint]!!
                 val relativePath = linuxPath.removePrefix(mountPoint).removePrefix("/")
-                return if (relativePath.isEmpty()) {
-                    File(hostBase)
-                } else {
-                    File(hostBase, relativePath)
-                }
+                val file = if (relativePath.isEmpty()) File(hostBase) else File(hostBase, relativePath)
+                return file.takeIf { SessionWorkspace.staysInside(File(hostBase), it) }
             }
         }
 
         // Fallback: resolve relative to rootfs
         if (!::rootfsManager.isInitialized) return null
         val stripped = linuxPath.removePrefix("/")
-        return if (stripped.isEmpty()) rootfsManager.rootfsDir else File(rootfsManager.rootfsDir, stripped)
+        if (stripped.isEmpty()) return rootfsManager.rootfsDir
+        val file = File(rootfsManager.rootfsDir, stripped)
+        return file.takeIf { SessionWorkspace.staysInside(rootfsManager.rootfsDir, it) }
     }
 
     /**

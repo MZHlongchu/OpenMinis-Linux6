@@ -146,10 +146,63 @@ class SecurityGateImpl : SecurityGate {
     }
 
     override fun decide(cmd: GateCommand, mode: PermissionMode): Decision {
+        // [Fix-P0] Reordered to match user expectation: ALLOW_ALL should bypass
+        // everything except rules + fatal-confirm. Old order put authority fence
+        // + fatal-block *before* ALLOW_ALL, breaking user's "allow all" intent.
+
+        // [1] Permission rules: explicit allow/deny bypass everything else.
         val rule = evaluateRules(cmd)
         if (rule == "deny") return Decision.Denied("规则拒绝: ${cmd.toolName}")
         if (rule == "allow") return Decision.Allow("规则放行: ${cmd.toolName}")
 
+        // [2] Always pass: read-only tools (unless mode==DENY_ALL).
+        if (cmd.toolName in READ_ONLY_TOOLS && mode != PermissionMode.DENY_ALL) {
+            return Decision.Allow("只读工具自动放行")
+        }
+
+        // [3] Always pass: coordinator tools (unless mode blocks them).
+        if (cmd.toolName in COORDINATOR_TOOLS && mode != PermissionMode.DENY_ALL &&
+            mode != PermissionMode.READ_ONLY && mode != PermissionMode.PLAN
+        ) {
+            return Decision.Allow("协调工具自动放行")
+        }
+
+        // [4] Mode-level block: DENY_ALL, READ_ONLY, PLAN.
+        if (mode == PermissionMode.DENY_ALL) {
+            return Decision.Denied("当前为拒绝全部模式")
+        }
+        if (mode == PermissionMode.READ_ONLY || mode == PermissionMode.PLAN) {
+            if (cmd.toolName in WRITE_TOOLS || cmd.toolName in SHELL_TOOLS) {
+                return Decision.Denied("只读/计划模式禁止写与执行")
+            }
+        }
+
+        // [5] FATAL risk check, but ALLOW_ALL downgrades to confirm.
+        val command = extractCommand(cmd)
+        val risk = if (cmd.toolName in SHELL_TOOLS || cmd.toolName == "shell_exec") {
+            classifyRisk(command)
+        } else {
+            RiskLevel.NORMAL
+        }
+        if (risk == RiskLevel.FATAL_BANNED) {
+            if (mode == PermissionMode.ALLOW_ALL) {
+                // [Fix-P0-option-2] User selected: FATAL→confirm in ALLOW_ALL.
+                return Decision.NeedConfirm(
+                    describeFatalViolation(command),
+                    "⚠️ 危险命令（可能损坏系统）\n\n${preview(cmd)}"
+                )
+            } else {
+                return Decision.Denied(describeFatalViolation(command))
+            }
+        }
+
+        // [6] ALLOW_ALL: if we reached here, no rule/fatal blocked it → allow.
+        // Authority fence is checked *after* ALLOW_ALL to let users override it.
+        if (mode == PermissionMode.ALLOW_ALL) {
+            return Decision.Allow("允许全部模式：直接放行")
+        }
+
+        // [7] Authority fence: only enforced in ASK mode (workspace jail).
         val authority = authorityProfile
         if (authority != null) {
             val path = extractPath(cmd)
@@ -166,47 +219,9 @@ class SecurityGateImpl : SecurityGate {
             }
         }
 
-        if (mode == PermissionMode.DENY_ALL) {
-            return Decision.Denied("当前为拒绝全部模式")
-        }
-        if (cmd.toolName in READ_ONLY_TOOLS && mode != PermissionMode.DENY_ALL) {
-            return Decision.Allow("只读工具自动放行")
-        }
-        if (cmd.toolName in COORDINATOR_TOOLS && mode != PermissionMode.DENY_ALL &&
-            mode != PermissionMode.READ_ONLY && mode != PermissionMode.PLAN
-        ) {
-            return Decision.Allow("协调工具自动放行")
-        }
-        if (mode == PermissionMode.READ_ONLY || mode == PermissionMode.PLAN) {
-            if (cmd.toolName in WRITE_TOOLS || cmd.toolName in SHELL_TOOLS) {
-                return Decision.Denied("只读/计划模式禁止写与执行")
-            }
-            if (cmd.toolName in READ_ONLY_TOOLS) return Decision.Allow("只读模式放行")
-        }
-
-        val command = extractCommand(cmd)
-        val risk = if (cmd.toolName in SHELL_TOOLS || cmd.toolName == "shell_exec") {
-            classifyRisk(command)
-        } else {
-            RiskLevel.NORMAL
-        }
-        if (risk == RiskLevel.FATAL_BANNED) {
-            return Decision.Denied(describeFatalViolation(command))
-        }
-        if (mode == PermissionMode.ALLOW_ALL) {
-            // [allow-all-no-prompt] ALLOW_ALL 的语义就是「不询问」：致命命令
-            // 已在上面 Denied，权威围栏/规则拒绝也已在前面返回，其余一律放行。
-            // 旧实现在这里对「危险 / 不可逆」再弹一次确认，而未知工具默认被判
-            // 为 IRREVERSIBLE（见 classify 的 else 分支），于是 file_write 之类
-            // 的常规操作在 ALLOW_ALL 下依然弹窗——这正是「设了自动放行还问」的根因。
-            return Decision.Allow("允许全部模式：直接放行")
-        }
-        // ASK
+        // [8] ASK: safe commands auto-allow, others confirm.
         if (cmd.toolName in SHELL_TOOLS && isSafeReadOnlyCommand(command)) {
             return Decision.Allow("只读安全命令自动放行")
-        }
-        if (cmd.toolName in READ_ONLY_TOOLS) {
-            return Decision.Allow("只读工具自动放行")
         }
         return Decision.NeedConfirm(cmd.why, preview(cmd))
     }

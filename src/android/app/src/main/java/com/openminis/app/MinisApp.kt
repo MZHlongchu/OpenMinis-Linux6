@@ -443,6 +443,13 @@ class MinisApp : Application(), ImageLoaderFactory {
         }
         database = AppDatabase.getInstance(this)
         chatRepository = ChatRepository(database.chatDao(), filesDir)
+        // Must finish before the first file tool or shell. A filed session's
+        // folder id is what makes both sides share minis-workspaces/<folder>.
+        runCatching {
+            kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+                chatRepository.warmupWorkspaceOwners()
+            }
+        }.onFailure { Log.e("MinisApp", "workspace owner warmup failed", it) }
         providerRepository = ProviderRepository(this)
         envVarRepository = EnvVarRepository(this)
         // [T-android-safemode-lateinit-crash-147] SkillRepository parses

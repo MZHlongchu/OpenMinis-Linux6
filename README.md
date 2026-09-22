@@ -6,7 +6,7 @@
 
 **端侧私人 AI Agent。** 把 Claude、GPT、Gemini 等模型接到手机里的一台真 Linux：Ubuntu 24.04 沙箱、浏览器自动化、技能与记忆、多智能体调度。
 
-本仓库是 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 **Linux 沙箱 Android 分支**。启动器名称 **Minis Ultra**，包名 `com.openminis.linux`，可与官方 OpenMinis **并排安装**。当前 **1.36.19-linux**（versionCode 72）。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。
+本仓库是 [OpenMinis](https://github.com/OpenMinis/OpenMinis) 的 **Linux 沙箱 Android 分支**。启动器名称 **Minis Ultra**，包名 `com.openminis.linux`，可与官方 OpenMinis **并排安装**。当前 **1.36.20-linux**（versionCode 73）。检查更新 / 关于页指向本 fork：[`tall-1997/OpenMinis-Linux`](https://github.com/tall-1997/OpenMinis-Linux)。
 
 ## 仓库介绍
 
@@ -15,6 +15,7 @@
 - **模型参数自动补全（1.36.1）**：先查 models.dev（去厂商前缀、统一大小写和 `./_` → `-`，再按精确 ID → 归一化 ID → 全库多数票），没有的洞用 DataLearner 补，中转站脏名（如 `GPT-6免费` / `免费GPT-6 Astra`）按命中最多的字匹配。目录和家族都认不出的 id 默认 **256k 上下文 / 128k 输出 / 开启思考（最高 max）/ 文本模态**。
 - **多智能体**：主会话当协调者，设置 → 多智能体（`minis://settings/multi-agent`）。
 - **签名与国内编译**：[docs/SIGNING.md](docs/SIGNING.md)、[docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)（切勿覆盖 aarch64 aapt2）。
+- **1.36.20**：工具权限和系统权限不再混成同一个开关；「本会话全部允许」与全局「全部允许」走同一闸门，拒绝规则仍优先。文件工具不能用 `..` 读到别的会话或别的项目。客户机证书改为人人可读，并补上 OpenSSL 哈希文件，非 root 的 curl / git / apt 也能校验证书。
 - **1.36.18**：启动时把 Android 系统 CA 注入客户机；`minis-mirror` 不再依赖 curl（`/dev/tcp` + apt 实测）；apt 锁先 flock 再清 dpkg；开机种子安装 curl/wget/python3/git/node；`minis-open` 无 TTY 也走应用内预览。
 - **1.36.17**：已归档会话每次启动收敛到项目工作区；移出/解散分组会把共享文件拷回会话；会话列表只留一个「新建文件夹」FAB。
 - **1.36.16**：Termux 终端、提供商置顶与并行刷新、dpkg/pip 世界快照、一级设置无返回箭头、选中文字分享、技能 requirements 与平台环境变量；并带上 1.36.15 的工作区归档与原子写文件。
@@ -26,10 +27,14 @@
 
 ## 下载
 
-- **本版发行包（1.36.18-linux / versionCode 71）**：[Releases `1.36.18-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.18-linux) → `minis-ultra-com.openminis.linux.apk`
+- **本版发行包（1.36.20-linux / versionCode 73）**：[Releases `1.36.20-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.20-linux) → `minis-ultra-com.openminis.linux.apk`
 - **滚动构建**：[Releases `android-latest`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest)（main 每次成功构建都会覆盖）
 
 侧载前允许「安装未知应用」。可与官方 OpenMinis 并排安装。debug 签名无法覆盖不同证书的已装版本，见 [docs/SIGNING.md](docs/SIGNING.md)。
+
+### 1.36.20 要点
+
+设置 → 权限顶部是 Agent 工具闸门，和下面的无障碍 / Shizuku 不是同一个开关。「本会话全部允许」不再被静默拒绝；拒绝规则仍然优先。文件工具不能越过会话或项目边界。客户机证书对非 root 可读，并带 OpenSSL 哈希文件。完整说明：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
 ### 1.36.18 要点
 
@@ -163,210 +168,31 @@ Agent `cronjob`（AlarmManager 一次性延迟 / 间隔重复）；设置 → �
 
 主机反向事件通道、动态通知按钮、任务级模型改道、沙箱长任务保活、`http_proxy` 流量日志/一键切断（无 VpnService）、新设备 WebDAV 恢复向导、机内自编译入口、aarch64 一键脚本。完整说明：[docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
 
-OpenMinis brings leading models — Claude, GPT, Gemini and more — into a native
-mobile experience, and gives them a real computer to work with: a full Linux
-shell running on your device, browser automation, extensible skills, persistent
-memory, and deep system integration.
+## 从源码构建
 
-It is free, and fully open source.
-
-**We believe that in the age of AI, technical design and code are no longer
-where a product's advantage lies. The best agent emerges from a tight feedback
-loop with the people who use it — their expectations and their reports are
-what converge on the product.**
-
-Official website: **[openminis.app](https://openminis.app)**
-
-<a href="https://apps.apple.com/app/id6759188481">
-  <img alt="Download on the App Store" height="48" src="assets/badge-appstore.svg" />
-</a>
-&nbsp;
-<a href="https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.14-linux">
-  <img alt="Get the APK on GitHub" height="48" src="assets/badge-android.svg" />
-</a>
-
-![Minis on iOS — deep research, chat, agent runtime, integrations, iCloud sync and granular permissions](assets/screenshots.png)
-
----
-
-## What it does
-
-| | |
-|---|---|
-| **Bring your own model** | Claude, GPT, Gemini and other providers, via your own API keys or account sign-in. |
-| **A real Linux shell** | A sandboxed Ubuntu 24.04 environment (PRoot) runs on-device — the agent can install packages, run scripts, and work with real files. |
-| **Device integration** | Health, Calendar, Reminders, Contacts, HomeKit, Bluetooth, Clipboard, Media, Alarms and more, exposed to the agent as tools. |
-| **Browser automation** | The agent can browse and interact with the web on your behalf. |
-| **Skills & memory** | Extensible skills plus persistent memory across sessions. |
-| **Workspaces** | Organise work into separate contexts, addressable via `minis://workspace/`. |
-| **Native offloads** | Heavy or platform-specific work is handed to native code instead of the sandbox. |
-
----
-
-## What you can do with Minis
-
-A few things people actually use it for:
-
-- **Photograph a meal, log the nutrition** — Minis identifies the dishes, estimates
-  calories and macros, and writes them to Apple Health.
-- **Wake up to your timeline** — Shortcuts triggers Minis to fetch your X timeline,
-  summarise it, synthesise speech, and play it as your alarm.
-- **Turn group chatter into tasks** — pull messages from a Telegram group, extract
-  bugs and action items, deduplicate them, and file them into Apple Reminders.
-- **Mount your Obsidian vault** — research, clean up and write Markdown notes back
-  into the vault as a normal workspace.
-- **Share anything into a calendar event** — send a page or message to Minis via the
-  iOS Share Sheet and it creates the event, time and place included.
-
-**→ [OpenMinis/AwesomeMinis](https://github.com/OpenMinis/AwesomeMinis)** — a curated,
-community-contributed collection of use cases and workflows across health,
-productivity, research, finance and developer tooling.
-
----
-
-## Skills
-
-A **skill** is a folder with a `SKILL.md` file — instructions, and optionally scripts,
-references and assets — that the agent loads on demand when a request matches it.
-Metadata stays in context for triggering; the body and bundled resources load only
-when the skill is actually used.
-
-Minis 有自己的工具系统，但不要求技能必须为它而写：**给 Claude、Codex、OpenClaw 或 Hermes Agent 写的技能一般能直接跑。** 针对 Minis 工具适配过的技能会更好用——可以直接打到 Linux shell、设备集成和原生 offload。
-
-本分支额外内置 **`android-sdk-mirrors`**：中国大陆镜像、以及「永远不要在 aarch64 客户机上安装 Google linux x86_64 build-tools」。
-
-**→ [OpenMinis/MinisSkills](https://github.com/OpenMinis/MinisSkills)** — 既有为 Minis 适配的技能，也有从零写的，覆盖 TTS、搜索、媒体下载、健康分析、云 API 等。
-
----
-
-## 多智能体（Minis Ultra）
-
-主会话模型是协调者：拆解任务、用 `run_subagent` 分派队友、验收、汇总。同一回合里相互独立的调用会并行（上限 1–8，默认 3）；每个并发槽位可单独选模型。有依赖的阶段必须验收后再继续。子代理看不到主会话，也不能再开子代理；各自走独立 shell 通道，文件仍写在父会话工作区。设置页：`minis://settings/multi-agent`。
-
----
-
-## Press
-
-> "the most impressive indie app I've seen in a while"
->
-> — Federico Viticci, [**Open Minis Is the iOS Agent I Wish Siri AI Could Be**](https://www.macstories.net/reviews/open-minis-is-the-ios-agent-i-wish-siri-ai-could-be/),
-> MacStories (July 2026)
-
-> "在很大程度上实现甚至局部超越了 Apple Intelligence"
->
-> — Ye Han, [**这可能是 iPhone 最强 Agent 软件，没有之一 丨Open Minis 入门指南**](https://zhuanlan.zhihu.com/p/2045570157783807562),
-> 知乎 / Zhihu (June 2026)
-
-> "可能是 iOS 端最强 AI Agent"
->
-> — [**Open Minis：可能是 iOS 端最强 AI Agent**](https://www.appinn.com/open-minis/),
-> 小众软件 / Appinn (March 2026)
-
----
-
-## Beta programme
-
-App Store releases can lag behind: every update waits on review, and we hold
-builds back when stability warrants it. The TestFlight build is where fixes
-and new features land first.
-
-**→ [Join the TestFlight beta](https://testflight.apple.com/join/3BdkA5c3)**
-
-On Android, the [releases page](https://github.com/OpenMinis/OpenMinis/releases)
-always carries the latest APK.
-
----
-
-## Building from source
-
-Minis ships a Linux sandbox inside the app, so the native dependencies (PRoot,
-FFmpeg, LAME) and the Ubuntu rootfs are **built from source** rather than
-committed as binaries.
-
-**→ See [BUILDING.md](BUILDING.md) for the full first-build guide.**
-
-The short version (this fork is Android-only):
+本分支只构建 Android arm64。PRoot 与 Ubuntu rootfs 在构建时生成，不进仓库。完整步骤见 [BUILDING.md](BUILDING.md)。
 
 ```sh
 git clone --recurse-submodules https://github.com/tall-1997/OpenMinis-Linux.git
 cd OpenMinis-Linux
-
-# Android — needs NDK r28+
 ./deps/build_proot.sh && ./scripts/prepare_android_sandbox.sh
 cd src/android && ./gradlew :app:assembleDebug
 ```
 
-`BUILDING.md` covers the toolchain requirements per platform, the build-time
-customization templates, and a troubleshooting section for the failure modes
-you are most likely to hit.
+需要 NDK r28+。国内镜像与签名见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)、[docs/SIGNING.md](docs/SIGNING.md)。
 
----
-
-## Repository layout
+## 目录
 
 ```
-src/android/      Android app (Kotlin / Compose) + JNI native code  ← this fork
-src/shared/       Shared assets
-deps/             Native dependency build scripts and vendored sources
-docs/specs/       Architecture and interface specifications
-scripts/          Rootfs preparation and developer tooling
+src/android/      Android 应用（Kotlin / Compose）与 JNI
+src/shared/       共享资源
+deps/             原生依赖构建脚本
+docs/             说明与发行注记
+scripts/          rootfs 与开发脚本
 ```
 
----
+## 许可
 
-## Acknowledgements
+本仓库以 **[GNU GPL v3.0](LICENSE)** 分发。沙箱链接 PRoot（GPLv2），合并作品按 GPLv3 分发。第三方许可见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
 
-OpenMinis stands on a great deal of open-source work. Our thanks to the
-maintainers of these projects — the full inventory, with versions and license
-terms, is in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
-
-**The sandbox** — the heart of the product:
-
-- **[iSH](https://github.com/ish-app/ish)** (GPLv3) — Linux usermode emulation on
-  iOS. We run [an ARM64 fork](https://github.com/OpenMinis/ish-arm64).
-- **[PRoot](https://github.com/termux/proot)** (GPLv2) — user-space chroot for the
-  Android sandbox, via [our fork](https://github.com/OpenMinis/proot);
-  **[talloc](https://talloc.samba.org)** (LGPLv3+) underpins it.
-- **[Alpine Linux](https://alpinelinux.org)** — the minirootfs the sandbox boots.
-
-**Media & text** — [FFmpeg](https://ffmpeg.org) (LGPL-2.1+),
-[LAME](https://lame.sourceforge.io) (LGPL), [cppjieba](https://github.com/yanyiwu/cppjieba) (MIT),
-[KaTeX](https://katex.org) (MIT).
-
-**iOS** — [SwiftAnthropic](https://github.com/jamesrochabrun/SwiftAnthropic),
-[SwiftMath](https://github.com/mgriebling/SwiftMath),
-[RealTimeCutVADLibrary](https://github.com/helloooideeeeea/RealTimeCutVADLibrary) (all MIT),
-[swift-cmark](https://github.com/swiftlang/swift-cmark) (BSD-2-Clause), and the
-Apple / Swift Server Workgroup packages (Apache-2.0).
-
-**Android** — [AndroidX & Jetpack Compose](https://developer.android.com/jetpack),
-[OkHttp](https://square.github.io/okhttp/), [Coil](https://coil-kt.github.io/coil/),
-[kotlinx](https://github.com/Kotlin) serialization & coroutines,
-[multiplatform-markdown-renderer](https://github.com/mikepenz/multiplatform-markdown-renderer),
-[Reorderable](https://github.com/Calvin-LL/Reorderable), [ACRA](https://github.com/ACRA/acra)
-(all Apache-2.0), and [Shizuku](https://github.com/RikkaApps/Shizuku-API) (MIT).
-
----
-
-## License
-
-OpenMinis is licensed under the **[GNU General Public License v3.0](LICENSE)**.
-
-The app links GPL-licensed components — [iSH](https://github.com/OpenMinis/ish-arm64)
-(GPLv3) and [PRoot](https://github.com/OpenMinis/proot) (GPLv2) — so the combined
-work is distributed under GPLv3. Bundled third-party licenses are listed in
-[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
-
----
-
-## Community
-
-- **Telegram**: [Join the group](https://t.me/+2NzhOJuzRyI1YmM1)
-- **Issues**: Bug reports, feature requests and discussion via
-  [GitHub Issues](https://github.com/OpenMinis/OpenMinis/issues)
-
-This repository is a mirror of a private development tree, so it **does not
-accept pull requests** — there is nowhere for them to land. Issues are the way
-to shape the product, and [AwesomeMinis](https://github.com/OpenMinis/AwesomeMinis)
-and [MinisSkills](https://github.com/OpenMinis/MinisSkills) both do take
-contributions. See [CONTRIBUTING.md](CONTRIBUTING.md).
+问题与功能请求请提到本仓库的 [Issues](https://github.com/tall-1997/OpenMinis-Linux/issues)。

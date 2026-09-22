@@ -82,7 +82,10 @@ internal fun ChatViewModel.persistGeneratedImage(
     }
     val name = "image-${System.currentTimeMillis()}.$extension"
     val rel = "generated/$name"
-    val dir = File(context.filesDir, "minis-sessions/$sessionId/attachments/generated")
+    val dir = File(
+        com.openminis.app.sandbox.SessionWorkspace.hostDir(context.filesDir, sessionId, "attachments"),
+        "generated",
+    )
     dir.mkdirs()
     File(dir, name).writeBytes(attachment.data)
     return SavedGeneratedImage(rel, "/var/minis/attachments/$rel", attachment.mimeType)

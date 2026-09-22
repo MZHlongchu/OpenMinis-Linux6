@@ -157,7 +157,7 @@ object ExecutionCoordinator {
     private suspend fun getOrCreateShell(sessionId: String): PersistentShell {
         // Fast path: existing alive shell
         val existing = shells[sessionId]
-        if (existing != null && existing.isAlive) {
+        if (existing != null && existing.isAlive && !shellMountsStale(existing, sessionId)) {
             Log.w(TAG, "[diag] reuse existing shell for sessionId=$sessionId attachmentsMount=${existing.debugBindMount("/var/minis/attachments")}")
             return existing
         }
@@ -166,7 +166,7 @@ object ExecutionCoordinator {
         return globalLock.withLock {
             // Double-check after acquiring lock
             val recheck = shells[sessionId]
-            if (recheck != null && recheck.isAlive) {
+            if (recheck != null && recheck.isAlive && !shellMountsStale(recheck, sessionId)) {
                 Log.w(TAG, "[diag] reuse existing shell (post-lock) for sessionId=$sessionId attachmentsMount=${recheck.debugBindMount("/var/minis/attachments")}")
                 return@withLock recheck
             }
@@ -185,6 +185,17 @@ object ExecutionCoordinator {
             Log.w(TAG, "[diag] new shell created sessionId=$sessionId attachmentsMount=${bindMounts["/var/minis/attachments"]}")
             shell
         }
+    }
+
+    fun sessionBindMounts(sessionId: String): Map<String, String> = buildSessionBindMounts(sessionId)
+
+    private fun shellMountsStale(shell: PersistentShell, sessionId: String): Boolean {
+        for (subdir in SessionWorkspace.SESSION_SUBDIRS) {
+            val expected = SessionWorkspace.hostDir(appContext.filesDir, sessionId, subdir).absolutePath
+            val actual = shell.debugBindMount("/var/minis/$subdir") ?: return true
+            if (actual != expected) return true
+        }
+        return false
     }
 
     /**

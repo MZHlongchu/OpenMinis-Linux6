@@ -52,7 +52,12 @@ class SecurityGateImplTest {
             gate.classify("shell_execute", """{"command":"rm -rf /"}"""),
             PermissionMode.ALLOW_ALL,
         )
-        assertTrue(d is Decision.Denied)
+        assertTrue(d is Decision.NeedConfirm)
+        val denied = gate.decide(
+            gate.classify("shell_execute", """{"command":"rm -rf /"}"""),
+            PermissionMode.ASK,
+        )
+        assertTrue(denied is Decision.Denied)
     }
 
     @Test
@@ -97,11 +102,41 @@ class SecurityGateImplTest {
     @Test
     fun authorityFenceDeniesOutsideWorkspace() {
         gate.setAuthorityProfile(PermissionProfile.workspace("/var/minis/workspace"))
-        val d = gate.decide(
+        val asked = gate.decide(
+            gate.classify("file_write", """{"path":"/etc/passwd","content":"x"}"""),
+            PermissionMode.ASK,
+        )
+        assertTrue(asked is Decision.Denied)
+        val allowed = gate.decide(
             gate.classify("file_write", """{"path":"/etc/passwd","content":"x"}"""),
             PermissionMode.ALLOW_ALL,
         )
+        assertTrue(allowed is Decision.Allow)
+    }
+
+    @Test
+    fun denyRuleStillBeatsAllowAll() {
+        gate.setPermissionRules(
+            listOf(PermissionRule(action = "deny", toolFilter = "shell_execute", pattern = "rm *")),
+        )
+        val d = gate.decide(
+            gate.classify("shell_execute", """{"command":"rm /tmp/x"}"""),
+            PermissionMode.ALLOW_ALL,
+        )
         assertTrue(d is Decision.Denied)
+        assertTrue((d as Decision.Denied).reason.startsWith("规则拒绝"))
+    }
+
+    @Test
+    fun sessionAllowAllUsesSameModeAsGlobal() {
+        assertEquals(
+            PermissionMode.ALLOW_ALL,
+            effectivePermissionMode(PermissionMode.ASK, sessionAllowAll = true),
+        )
+        assertEquals(
+            PermissionMode.DENY_ALL,
+            effectivePermissionMode(PermissionMode.DENY_ALL, sessionAllowAll = false),
+        )
     }
 
     @Test

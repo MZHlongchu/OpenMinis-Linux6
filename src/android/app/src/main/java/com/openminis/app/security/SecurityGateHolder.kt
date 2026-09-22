@@ -72,11 +72,21 @@ object SecurityGateHolder {
     suspend fun intercept(context: Context, name: String, argsJson: String): ToolExecutionResult? {
         val canonical = ToolAliases.canonical(name)
         val cmd = gate.classify(canonical, argsJson)
-        val decision = gate.decide(cmd, gate.getPermissionMode())
+        // Session allow-all is the same decision as global ALLOW_ALL. Applying
+        // it here — before any Denied short-circuit — is what stops "本会话全部
+        // 允许" from swallowing the command with no dialog.
+        val sessionAllowAll = ApprovalGate.isSessionAllowAll()
+        val mode = effectivePermissionMode(gate.getPermissionMode(), sessionAllowAll)
+        val decision = gate.decide(cmd, mode)
         gate.audit(cmd, decision, null)
         return when (decision) {
             is Decision.Allow -> null
             is Decision.Denied -> {
+                // Explicit deny rules still win. Anything else under session
+                // allow-all must not come back as a silent Denied.
+                if (sessionAllowAll && !decision.reason.startsWith("规则拒绝")) {
+                    return null
+                }
                 InterceptFeedback.publishDenied(canonical, decision.reason)
                 ToolExecutionResult(
                     "SecurityGate denied: ${decision.reason}",

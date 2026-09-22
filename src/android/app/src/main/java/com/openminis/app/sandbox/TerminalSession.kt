@@ -143,6 +143,9 @@ class TerminalSession(private val context: Context) {
                 val rootfsManager = RootfsManager.getInstance(context)
                 val proot = rootfsManager.prootBinary.absolutePath
                 val filesDir = context.filesDir.absolutePath
+                // Refresh this chat's binds before reading the process-wide map,
+                // or the terminal inherits whichever session booted last.
+                sessionId?.let { ExecutionCoordinator.sessionBindMounts(it) }
 
                 // Build PRoot arguments (mirrors legacy buildInteractiveCommand).
                 // Pass the proot binary path so it lands in argv[0] — critical

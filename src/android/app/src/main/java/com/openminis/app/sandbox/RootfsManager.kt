@@ -414,7 +414,7 @@ class RootfsManager private constructor(private val context: Context) {
         }
         val dest = File(guestCerts, "ca-certificates.crt")
         dest.writeText(pem.toString())
-        dest.setReadable(true, false)
+        chmodWorld(dest, false)
         val copies = listOf(
             File(rootfsDir, "usr/lib/ssl/cert.pem"),
             File(rootfsDir, "etc/ssl/cert.pem"),
@@ -423,12 +423,112 @@ class RootfsManager private constructor(private val context: Context) {
             try {
                 copy.parentFile?.mkdirs()
                 dest.copyTo(copy, overwrite = true)
+                chmodWorld(copy, false)
             } catch (t: Throwable) {
                 Log.w(TAG, "[CA] failed to copy bundle to ${copy.name}: ${t.message}")
             }
         }
-        File(rootfsDir, "usr/local/share/ca-certificates").mkdirs()
+        val share = File(rootfsDir, "usr/local/share/ca-certificates")
+        share.mkdirs()
+        publishUnprivilegedCa(guestCerts, pem.toString())
         Log.i(TAG, "[CA] injected $source (${pem.length} bytes) → ${dest.absolutePath}")
+    }
+
+    /**
+     * PRoot `-0` reports uid 0, but `access()` still honors the on-disk mode.
+     * Android's umask is 0077, so a bundle written as 0600 is invisible to
+     * `_apt`, `nobody`, and any `su` that dropped the process environment.
+     * Make the tree 0755/0644, emit OpenSSL subject-hash links, and persist
+     * `SSL_CERT_FILE` in files the guest reads without our envp.
+     */
+    private fun publishUnprivilegedCa(guestCerts: File, pem: String) {
+        var dir: File? = guestCerts
+        while (dir != null && dir != rootfsDir) {
+            chmodWorld(dir, true)
+            dir = dir.parentFile
+        }
+        writeOpenSslHashFiles(guestCerts, pem)
+        guestCerts.listFiles()?.forEach { child -> chmodWorld(child, child.isDirectory) }
+        val envBody = """
+            SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+            SSL_CERT_DIR=/etc/ssl/certs
+            CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+            REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+            GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
+            PIP_CERT=/etc/ssl/certs/ca-certificates.crt
+            NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
+        """.trimIndent() + "\n"
+        val envFile = File(rootfsDir, "etc/environment")
+        envFile.parentFile?.mkdirs()
+        val kept = if (envFile.exists()) {
+            envFile.readLines().filterNot { line ->
+                line.substringBefore("=").trim() in CA_ENV_KEYS
+            }
+        } else {
+            emptyList()
+        }
+        envFile.writeText((kept + envBody.trim().lines()).filter { it.isNotBlank() }.joinToString("\n") + "\n")
+        chmodWorld(envFile, false)
+        val snippet = """
+            # minis-ca-env
+            export SSL_CERT_FILE="${'$'}{SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
+            export SSL_CERT_DIR="${'$'}{SSL_CERT_DIR:-/etc/ssl/certs}"
+            export CURL_CA_BUNDLE="${'$'}{CURL_CA_BUNDLE:-${'$'}SSL_CERT_FILE}"
+            export REQUESTS_CA_BUNDLE="${'$'}{REQUESTS_CA_BUNDLE:-${'$'}SSL_CERT_FILE}"
+            export GIT_SSL_CAINFO="${'$'}{GIT_SSL_CAINFO:-${'$'}SSL_CERT_FILE}"
+            export PIP_CERT="${'$'}{PIP_CERT:-${'$'}SSL_CERT_FILE}"
+            export NODE_EXTRA_CA_CERTS="${'$'}{NODE_EXTRA_CA_CERTS:-${'$'}SSL_CERT_FILE}"
+        """.trimIndent() + "\n"
+        for (rel in listOf("etc/bash.bashrc", "etc/profile", "root/.bashrc")) {
+            val f = File(rootfsDir, rel)
+            f.parentFile?.mkdirs()
+            val existing = if (f.exists()) f.readText() else ""
+            if (!existing.contains("# minis-ca-env")) {
+                f.appendText(if (existing.endsWith("\n") || existing.isEmpty()) snippet else "\n$snippet")
+            }
+            chmodWorld(f, false)
+        }
+    }
+
+    private fun writeOpenSslHashFiles(certsDir: File, pem: String) {
+        val certs = try {
+            CertificateFactory.getInstance("X.509")
+                .generateCertificates(pem.byteInputStream())
+                .filterIsInstance<X509Certificate>()
+        } catch (t: Throwable) {
+            Log.w(TAG, "[CA] hash parse failed: ${t.message}")
+            return
+        }
+        val used = HashMap<String, Int>()
+        for (cert in certs) {
+            val body = StringBuilder()
+            appendPem(body, cert)
+            val text = body.toString()
+            for (hash in listOf(OpenSslSubjectHash.oldHash(cert), OpenSslSubjectHash.newHash(cert))) {
+                val n = used.getOrDefault(hash, 0)
+                used[hash] = n + 1
+                val out = File(certsDir, "$hash.$n")
+                try {
+                    if (java.nio.file.Files.isSymbolicLink(out.toPath())) out.delete()
+                    out.writeText(text)
+                    chmodWorld(out, false)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "[CA] hash ${out.name} failed: ${t.message}")
+                }
+            }
+        }
+    }
+
+    /** 0644 for files, 0755 for directories. Os.chmod survives Android umask 0077. */
+    private fun chmodWorld(file: File, directory: Boolean) {
+        val mode = if (directory) 493 else 420
+        try {
+            android.system.Os.chmod(file.absolutePath, mode)
+        } catch (_: Throwable) {
+            file.setReadable(true, false)
+            file.setExecutable(directory, false)
+            if (!directory) file.setWritable(true, true)
+        }
     }
 
     private fun appendPem(pem: StringBuilder, cert: X509Certificate) {
@@ -1407,6 +1507,15 @@ class RootfsManager private constructor(private val context: Context) {
 
     companion object {
         private const val TAG = "RootfsManager"
+        private val CA_ENV_KEYS = setOf(
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "CURL_CA_BUNDLE",
+            "REQUESTS_CA_BUNDLE",
+            "GIT_SSL_CAINFO",
+            "PIP_CERT",
+            "NODE_EXTRA_CA_CERTS",
+        )
         private const val UBUNTU_GUEST_PATH =
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/bin:" +
                 "/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:" +

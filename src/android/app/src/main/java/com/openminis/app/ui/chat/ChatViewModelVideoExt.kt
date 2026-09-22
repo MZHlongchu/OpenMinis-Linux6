@@ -90,7 +90,10 @@ internal suspend fun ChatViewModel.runVideoGenerationTurn(
 internal fun ChatViewModel.persistGeneratedVideo(sessionId: String, bytes: ByteArray): SavedGeneratedVideo {
     val name = "video-${System.currentTimeMillis()}.mp4"
     val rel = "generated/$name"
-    val dir = File(context.filesDir, "minis-sessions/$sessionId/attachments/generated")
+    val dir = File(
+        com.openminis.app.sandbox.SessionWorkspace.hostDir(context.filesDir, sessionId, "attachments"),
+        "generated",
+    )
     dir.mkdirs()
     File(dir, name).writeBytes(bytes)
     return SavedGeneratedVideo(rel, "/var/minis/attachments/$rel")

@@ -2763,7 +2763,7 @@ class ChatViewModel(
         // For dropped images without a linuxPath, lazily spill to disk so
         // the placeholder still gives the model an addressable reference.
         val attachmentsRoot = activeSessionId?.let { sid ->
-            java.io.File(context.filesDir, "minis-sessions/$sid/attachments")
+            com.openminis.app.sandbox.SessionWorkspace.hostDir(context.filesDir, sid, "attachments")
         }
         val resolvedPaths = HashMap<ImageBudget.ImagePartId, String?>()
         for (ref in images) {
@@ -9981,7 +9981,7 @@ class ChatViewModel(
     private fun persistBrowserArtifact(filename: String, data: ByteArray): String? {
         val sid = activeSessionId.takeIf { it.isNotEmpty() } ?: return null
         return try {
-            val dir = java.io.File(context.filesDir, "minis-sessions/$sid/browser").apply { mkdirs() }
+            val dir = com.openminis.app.sandbox.SessionWorkspace.hostDir(context.filesDir, sid, "browser").apply { mkdirs() }
             val file = java.io.File(dir, filename)
             file.writeBytes(data)
             file.absolutePath
@@ -10712,8 +10712,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         // the same image accessible to the agent via shell tools (read_image
         // / cat / file) and matches the iOS uploads-directory convention.
         val uploadsHostDir = java.io.File(
-            context.filesDir,
-            "minis-sessions/$sessionId/attachments/uploads",
+            com.openminis.app.sandbox.SessionWorkspace.hostDir(context.filesDir, sessionId, "attachments"),
+            "uploads",
         ).apply { mkdirs() }
         // Metadata captured per attachment for the <user-attached-files> XML.
         data class UploadMeta(val linuxPath: String, val size: Long, val modifiedIso: String)
