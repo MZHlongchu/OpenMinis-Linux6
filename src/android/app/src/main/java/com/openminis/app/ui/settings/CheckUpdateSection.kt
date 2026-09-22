@@ -305,7 +305,7 @@ fun CheckUpdateSection() {
                                 )
                                 val tail = result.output
                                     .trim()
-                                    .lineSequence()
+                                    .lines()
                                     .takeLast(8)
                                     .joinToString("\n")
                                     .take(500)
