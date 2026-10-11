@@ -38,6 +38,10 @@ import kotlinx.coroutines.launch
  */
 fun ChatViewModel.retryLast() {
     if (_isStreaming.value) return
+    // [T-android-mute-reset-on-drain] Retry is new work, as on iOS: 重试是**新的一轮**，
+    // 子代理 Stop 留下的委派静音只属于被中断的那一轮，这里必须解除（否则重试出来
+    // 的回合里派的子代理结果投给没人）。
+    com.openminis.app.agent.jobs.AgentJobRegistry.clearDelegationMute(activeSessionId)
     // T-streaming-side-channel: belt-and-suspenders flush in case any
     // delta survived an earlier abnormal exit; retryLast is gated on
     // !isStreaming so this is normally a no-op.
@@ -219,7 +223,14 @@ fun ChatViewModel.retryLast() {
             try {
                 SessionConcurrencyManager.acquireSlot(activeSessionId)
                 AppLogger.debug(ChatViewModel.TAG_STREAM, "retryLast streamJob slot acquired")
-                SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+                // [T-a15-overlay-task-title] 上游 1.14 的五处 setActive 都带 sessionTitle：
+                // 悬浮胶囊按**任务名**而不是助手名标识这一条。合并拆文件时该实参丢了，
+                // tracker 的 upsertTask 收到 null，胶囊第一行只剩 Soul 名。
+                SessionActivityTracker.setActive(
+                    activeSessionId,
+                    onStop = { cancelStream() },
+                    sessionTitle = overlaySessionTitle(),
+                )
                 val activeFallbackStrategy = run {
                     val groupId = _selectedGroupId.value
                     groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }

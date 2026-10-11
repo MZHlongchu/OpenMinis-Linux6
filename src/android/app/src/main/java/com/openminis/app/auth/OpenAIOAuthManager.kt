@@ -55,7 +55,12 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         loginCallbackServer = null
 
         val authUrl = buildAuthorizationUrl()
-        AppLogger.info(TAG, "authorization flow prepared (callbackPort=$callbackPort)")
+        // [T-android-oauth-log-redact, upstream 1.14] Mask code_challenge and
+        // state (length + prefix still lets a diagnostician match state against
+        // the callback); scope, redirect_uri and client_id stay readable.
+        val redactedAuthUrl = OAuthLogRedaction.url(authUrl)
+        AppLogger.info(TAG, "authorize URL: $redactedAuthUrl")
+        AppLogger.info(TAG, "redirect_uri=$redirectUri callbackPort=$callbackPort")
 
         val accessToken = withContext(Dispatchers.IO) {
             // Step 1: Wait for callback code
@@ -86,13 +91,25 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
 
             loginCallbackServer?.stop()
             loginCallbackServer = null
+            // Fail-closed state check (ours): an empty/absent state on either
+            // side must never count as a match, even if both sides are empty.
             val stateMatches = !expectedState.isNullOrEmpty() && !state.isNullOrEmpty() && state == expectedState
-            AppLogger.info(TAG, "callback received: codePresent=${code.isNotEmpty()} statePresent=${!state.isNullOrEmpty()} match=$stateMatches")
+            // [T-android-oauth-log-redact, upstream 1.14] state is a one-time
+            // credential — log length + first 4 chars only.
+            AppLogger.info(
+                TAG,
+                "callback received: codeLen=${code.length} state=${OAuthLogRedaction.secret(state)} expected=${OAuthLogRedaction.secret(expectedState)} match=$stateMatches",
+            )
             if (!stateMatches) {
                 throw IllegalStateException("OAuth state mismatch; refusing to exchange authorization code")
             }
 
             // Step 2: Exchange code for tokens (JSON body, matching iOS CodexOAuthManager)
+            // [T-android-oauth-foreground-exchange] The callback lands while the
+            // user is still in the Custom Tab, i.e. with Minis in the background,
+            // where the OS blocks this app's network (DNS answers "no address").
+            // Exchange only once the user is back.
+            OAuthForegroundGate.awaitForeground(TAG)
             exchangeCodeJson(code)
         }
 
@@ -173,7 +190,11 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
             .url(tokenURL)
             .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        // Retry up to 3 times — DNS can briefly fail after Custom Tab closes
+        // Retry up to 3 times. [T-android-oauth-foreground-exchange] The
+        // failure this used to paper over was not flaky DNS but the OS
+        // blocking a BACKGROUND app's network while the user was still in the
+        // Custom Tab; OAuthForegroundGate now waits that out. The retry stays
+        // for the brief lag between foregrounding and the block lifting.
         var response: okhttp3.Response? = null
         var lastError: Exception? = null
         for (attempt in 1..3) {

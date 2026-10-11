@@ -8,7 +8,14 @@
 # PRoot itself is still built by deps/build_proot.sh (NDK), not fetched here.
 #
 # Usage:
-#   ./scripts/prepare_android_sandbox.sh
+#   ./deps/build_proot.sh && ./scripts/prepare_android_sandbox.sh
+#
+# [T-sandbox-usage] The usage line above is upstream 1.14's (base 1.13 said just
+#   `./scripts/prepare_android_sandbox.sh`). It is accurate for this port too:
+#   assets/proot-aarch64 is a hard prerequisite and the script now aborts when
+#   it is missing instead of downloading a Termux proot .deb — that package
+#   version was rotated out of packages.termux.dev (404), so the fallback could
+#   only ever fail. Keep the two-step invocation in the usage line.
 set -euo pipefail
 [ -d "${TMPDIR:-}" ] || export TMPDIR=/tmp
 
@@ -229,6 +236,20 @@ if [ ! -f "$SDK_TOOLS_ZIP" ]; then
     rm -f "$TMP_SDK"
   fi
 fi
+
+# --- PRoot binary ---
+# Built from source by deps/build_proot.sh (NDK cross-build), never fetched:
+# the Termux proot .deb this script used to fall back to has rotated out of
+# packages.termux.dev (404), so a download fallback could only fail. Fail
+# loudly here instead of shipping an APK whose sandbox cannot start.
+PROOT_FILE="$ASSETS/proot-aarch64"
+if [ ! -f "$PROOT_FILE" ]; then
+  echo "Error: $PROOT_FILE is missing." >&2
+  echo "       It is built from source by ./deps/build_proot.sh — run that first," >&2
+  echo "       then rerun this script." >&2
+  exit 1
+fi
+echo "==> PRoot binary present: $PROOT_FILE"
 
 # Gate the vendored copy on EVERY run, not just after a download: a bad blob can
 # already be sitting in the tree (that is how the corrupt 35.0.2 asset shipped).

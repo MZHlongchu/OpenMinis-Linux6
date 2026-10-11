@@ -2,11 +2,11 @@
   "formatVersion": 1,
   "database": {
     "version": 22,
-    "identityHash": "ea89e13670d878e9cd2470e7bbcd9ee1",
+    "identityHash": "f0b157f0d5f1dc1895b7acd7c2888cff",
     "entities": [
       {
         "tableName": "sessions",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `title` TEXT, `model_id` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, `category` TEXT, `last_message` TEXT, `model_binding` TEXT, `source` TEXT, `memory_enabled` INTEGER NOT NULL, `pinned_at` INTEGER, `edit_count` INTEGER NOT NULL, `thinking_override` TEXT, `folder_id` TEXT, `permission_mode` TEXT, PRIMARY KEY(`id`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `title` TEXT, `model_id` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, `category` TEXT, `last_message` TEXT, `model_binding` TEXT, `source` TEXT, `memory_enabled` INTEGER NOT NULL, `pinned_at` INTEGER, `edit_count` INTEGER NOT NULL, `thinking_override` TEXT, `folder_id` TEXT, `parent_session_id` TEXT, `parent_tool_use_id` TEXT, `permission_mode` TEXT, PRIMARY KEY(`id`))",
         "fields": [
           {
             "fieldPath": "id",
@@ -89,6 +89,18 @@
           {
             "fieldPath": "folderId",
             "columnName": "folder_id",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "parentSessionId",
+            "columnName": "parent_session_id",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "parentToolUseId",
+            "columnName": "parent_tool_use_id",
             "affinity": "TEXT",
             "notNull": false
           },
@@ -943,7 +955,7 @@
     "views": [],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'ea89e13670d878e9cd2470e7bbcd9ee1')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'f0b157f0d5f1dc1895b7acd7c2888cff')"
     ]
   }
 }

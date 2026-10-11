@@ -453,7 +453,18 @@ private fun ChatViewModel.resolveTitleProvider(): LLMProvider? {
             Log.w(ChatViewModel.TAG, "TitleGen OAuth refresh failed: ${e.message}")
         }
     }
-    return ProviderFactory.create(instance, apiKey, entry.model, context)
+    // [T-android-opencode-subtask-session] 标题生成是**这个会话**发起的请求，
+    // 必须带上会话 id：上游 1.14 的对应调用点就是这么做的（
+    // `git show upstream-1.14:.../ui/chat/ChatViewModel.kt` 第 16138 行
+    // `TitleCandidates.providerFor(providerRepository, context, entry, activeSessionId)`）。
+    // 不传的话 provider.sessionId 留在 null，OpenCode Go 的 `x-opencode-session`
+    // 永远不会挂上，替会话发的这条请求只会拿回
+    // 400 "Request is missing x-opencode-session"。
+    // [T-android-regenerate-title-submodel] 手动 Regenerate 那条路
+    // （SessionListViewModel.regenerateTitle → TitleCandidates.providerFor）早就传了，
+    // 这里补的是自动标题那条。草稿 id（`__new__…`）由 ProviderFactory /
+    // OpenCodeSessionHeader 侧按形状拦掉，所以照传 activeSessionId 即可。
+    return ProviderFactory.create(instance, apiKey, entry.model, context, sessionId = activeSessionId)
 }
 
 /** Parse LLM response for title/category JSON. Multiple fallback strategies. */

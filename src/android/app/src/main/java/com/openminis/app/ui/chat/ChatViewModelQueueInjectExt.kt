@@ -40,9 +40,24 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
      * tool_result，库与 wire 同时出现重复/不一致。
      */
     commitPendingToolResult: (suspend () -> LLMMessage)? = null,
+    /**
+     * [T-scheduled-preemptive-insert] 这一次要注入的那一批，由
+     * [QueuedPromptBatching.nextInsertBatch] 在工具边界选出（一个 scheduled fire
+     * 独自成一批；否则是用户跟进 + 其余非 scheduled 的提示）。默认值 = 整个队列，
+     * 这是本移植 pre-dispatch 注入点（[T-queue-pre-dispatch-persist]）的既有语义；
+     * 传了 batch 就只注入这一批——批外的消息留在队列里，交给 drain。
+     * 上游 1.14 把它写成必填形参（`batch: List<QueuedPrompt>`，见
+     * `git show upstream-1.14:...ChatViewModel.kt` 的 injectQueuedPromptsAsNewTurn
+     * 签名）；这里给默认值，只为不动那个本移植特有的调用点。
+     */
+    batch: List<QueuedPrompt> = _promptQueue.value,
 ): ChatViewModel.InjectedTurn? {
+    // [T-android-mute-reset-on-drain] 注入出来的回合是**新的一轮**：子代理 Stop 留下
+    // 的委派静音属于被它打断的那一轮，不能顺手把新轮也静音（否则新轮里派的子代理
+    // 结果投给没人）。上游 1.14 在函数入口就解除；这里同位置。
+    com.openminis.app.agent.jobs.AgentJobRegistry.clearDelegationMute(activeSessionId)
     // [T-queue-shelved] 搁置消息不参与自动注入；只注入 pending 态。
-    val queued = _promptQueue.value.filter { !it.shelved }
+    val queued = batch.filter { !it.shelved }
     if (queued.isEmpty()) return null
 
     // [T-android-queued-message-duplicated-on-inject] REMOVE the queued
@@ -54,10 +69,30 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     // placeholder, once as the injected bubble. drainQueuedPrompts reuses
     // its placeholders and never re-appends, so it didn't dupe; this mid-
     // loop inject path appends a fresh bubble, so the placeholders must go.
+    //
+    // [T-android-midtask-msg-vanishes] Only the ID SET is captured here.
+    //
+    // This used to also snapshot `_messages.value` into `msgsAfterUnqueue`
+    // and assign that snapshot back on Main ~100 lines below. Between the
+    // two points this function suspends four times — ensureSession(),
+    // prepareUserAttachments() (which copies attachments), buildPastedParts()
+    // and chatRepository.appendMessage() (a DB write) — and that gap is
+    // seconds wide in a real session (measured 4.8s in the reported repro).
+    //
+    // Anything appended to _messages during that gap was silently
+    // overwritten by the stale snapshot: a read-modify-write race. The
+    // user-visible symptom was the reported bug — you type a message while
+    // a task is running, it IS accepted and IS persisted (the model even
+    // answers it), but its bubble vanishes from the chat until you leave
+    // the session and come back. enqueuePrompt() appends the queued bubble
+    // to _messages immediately, so a message sent inside the window had its
+    // bubble erased milliseconds later.
+    //
+    // The filter is now applied to the LIVE list at assignment time (below),
+    // which is what drainQueuedPrompts already does (`_messages.value.map { … }`)
+    // and why that path never showed the bug.
+    // （上游 1.14 ChatViewModel.kt:8715-8740 原文。）
     val queuedIds = queued.map { it.id }.toSet()
-    val msgsAfterUnqueue = _messages.value.filterNot { m ->
-        m.queuedPromptId != null && queuedIds.contains(m.queuedPromptId)
-    }
 
     // Build the combined user message from all queued prompts.
     val sid = ensureSession()
@@ -74,9 +109,8 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
         }
     }
     prepared.imageParts.forEachIndexed { idx, part ->
-        val path = prepared.imageUploadPaths.getOrNull(idx)
-        if (path != null) combinedParts.add(AgentContentPart.Text("[attached image: $path]"))
-        combinedParts.add(AgentContentPart.ImageData(part.data, part.mimeType, linuxPath = path, noVisionPlaceholder = visionPlaceholderFor(path)))
+        // [T-android-image-downscale-parity] 上游 1.14 ChatViewModel.kt:8957-8959。
+        combinedParts.addModelImage(part, prepared.imageUploadPaths.getOrNull(idx), prepared.imageModelNotes.getOrNull(idx))
     }
     prepared.attachedFilesXml?.let { combinedParts.add(AgentContentPart.Text(it)) }
 
@@ -241,8 +275,13 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
         withContext(Dispatchers.Main) {
             // (a) + (b) one emit: build the post-finalize list.
             // 落库失败时保留队列占位气泡（与 _promptQueue / 磁盘镜像一致）。
+            // [T-android-midtask-msg-vanishes] Filter the LIVE list here rather
+            // than assigning a snapshot taken before the four suspensions above
+            // — otherwise every bubble appended in that window is erased.
             if (userEntity != null) {
-                _messages.value = msgsAfterUnqueue
+                _messages.value = _messages.value.filterNot { m ->
+                    m.queuedPromptId != null && queuedIds.contains(m.queuedPromptId)
+                }
             }
             updateAssistantMessage(
                 finishedAssistantId,

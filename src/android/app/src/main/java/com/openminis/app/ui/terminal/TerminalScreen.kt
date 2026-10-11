@@ -114,6 +114,45 @@ fun TerminalScreen(
         }
     }
 
+    // T-android-terminal-keyboard-3a8f5e0b: Do NOT auto-focus the input on
+    // open. An earlier 20-tick retry loop here force-popped the IME on entry
+    // (matching iOS becomeFirstResponder), but on Android that caused two
+    // issues: (1) keyboard pops up unsolicited when the user just wants to
+    // read terminal output, (2) the back gesture's first press hides the IME,
+    // then the still-living retry loop (or a focus-restore on next
+    // composition) re-pops it, requiring a second back press to actually
+    // leave the screen. Android convention for read-eval shells is to let the
+    // user tap the canvas (handled below via the view's onSingleTapUp) or the
+    // keyboard-toggle button in the accessory bar to deliberately invoke the
+    // IME — that single user action handles both opening the keyboard and
+    // closing it, and a single back press now exits.
+
+    // [T-android-terminal-enter-keeps-focus] ...but DO auto-focus when a
+    // hardware keyboard is attached.
+    //
+    // Every objection in the note above is about the soft IME: it pops up
+    // unsolicited over the output, and it fights the back gesture. With a
+    // physical keyboard there is no IME to pop — focus is invisible — so the
+    // only thing auto-focus changes is that the keys the user presses arrive
+    // somewhere. Without it, opening the terminal and typing does nothing at
+    // all, with no on-screen hint as to why.
+    // [T-android-hwkeyboard-virtual-false-positive] Same rule as the chat
+    // composer — see HardwareKeyboard. Configuration.keyboard alone also
+    // counts virtual HID keyboards (scrcpy --uhid), which would auto-focus the
+    // terminal input on a touch-only phone.
+    //
+    // [T-android-terminal-termux-focus] Local adaptation: this screen renders
+    // Termux's TerminalView (see the AndroidView factory below) instead of
+    // upstream's canvas input view, so the focus target is that TerminalView.
+    // It is null until the factory has run, hence keying the effect on it as
+    // well — focus is requested as soon as the view exists, and re-requested
+    // if the holder is ever rebuilt.
+    val hasHardwareKeyboard = com.openminis.app.ui.components.rememberHasHardwareKeyboard()
+    var terminalView by remember { mutableStateOf<TerminalView?>(null) }
+    LaunchedEffect(hasHardwareKeyboard, terminalView) {
+        if (hasHardwareKeyboard) terminalView?.requestFocus()
+    }
+
     DisposableEffect(Unit) {
         onDispose { terminalSession.stop() }
     }
@@ -173,6 +212,12 @@ fun TerminalScreen(
                             // Hand the view to the session so PTY output can
                             // redraw it (onTextChanged → onScreenUpdated).
                             terminalSession.attachView(this)
+                            // [T-android-terminal-termux-focus] Publish the view
+                            // so the hardware-keyboard focus effect above can
+                            // reach it. The factory runs once per composition
+                            // (AndroidView remembers the instance), so this is a
+                            // single state write, not a per-frame one.
+                            terminalView = this
                         }
                     },
                     update = { view ->

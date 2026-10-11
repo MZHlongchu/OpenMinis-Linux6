@@ -22,6 +22,26 @@ class OAuthCallbackServer(
         private const val MAX_REQUEST_LINE = 4096
         private const val MAX_RESPONSE_BYTES = 1024
         private const val ACCEPT_BACKLOG = 8
+
+        /**
+         * Hosts whose authorization page is allowed to see a CORS preflight
+         * answer — exactly the xAI hosts (see [handlePreflight]). Everything
+         * else gets `Access-Control-Allow-Origin: null`, i.e. no cross-origin
+         * read access at all.
+         */
+        private val TRUSTED_CORS_HOSTS = setOf("auth.x.ai", "accounts.x.ai")
+
+        /**
+         * The `Origin` header value to echo, or null when [origin] is absent or
+         * not one of [TRUSTED_CORS_HOSTS]. The host is compared exactly, on the
+         * parsed URI — a substring match would accept
+         * `https://evil.example/?x=auth.x.ai`.
+         */
+        private fun trustedCorsOrigin(origin: String?): String? {
+            val value = origin?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            val host = runCatching { URI(value).host }.getOrNull()?.lowercase() ?: return null
+            return value.takeIf { host in TRUSTED_CORS_HOSTS }
+        }
     }
 
     /**
@@ -132,8 +152,17 @@ class OAuthCallbackServer(
             val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
             val requestLine = reader.readLine() ?: return
             if (requestLine.length > MAX_REQUEST_LINE) { writeResponse(socket, 414, "Request URI too long"); return }
+            // [T-android-oauth-log-redact, upstream 1.14] 请求行带着 code/state，
+            // 只能以脱敏形态进日志（app 日志会随 bug report 导出）。
+            Log.d(TAG, "Request: ${OAuthLogRedaction.url(requestLine)}")
             val parts = requestLine.split(' ')
             if (parts.size != 3 || parts[2] != "HTTP/1.1") { writeResponse(socket, 400, "Bad request"); return }
+            // [upstream 1.14] xAI 的授权页在跳转回回调前会先对本地址发 OPTIONS
+            // 预检；不回预检，浏览器就不跟随跳转，登录会卡死（上游既有行为，
+            // 我们的 accept 重写一度把它整段删掉了）。这里按"只对本服务器注册
+            // 的回调路径 + 只回显已知 xAI 来源"的最小面恢复，其余来源一律
+            // `Access-Control-Allow-Origin: null`，不做通配放行；非回调路径 404。
+            if (parts[0] == "OPTIONS") { handlePreflight(socket, reader, parts[1]); return }
             if (parts[0] != "GET") { writeResponse(socket, 405, "Method not allowed"); return }
             val requestTarget = parts[1]
             var headerBytes = 0
@@ -159,7 +188,13 @@ class OAuthCallbackServer(
             val state = params["state"]
 
             // Send response
-            val html = "<html><body><h1>Authorization complete</h1><p>You can close this tab.</p><script>window.close()</script></body></html>"
+            // [T-android-oauth-foreground-exchange, upstream 1.14] Not "complete":
+            // the app still has to exchange the code, and it can only do that
+            // once the user is back in Minis (background network is blocked).
+            // Say so, so the user returns rather than waiting on a tab that
+            // already "succeeded". Kept ASCII-only so the advertised byte
+            // length and the rendered text can never disagree.
+            val html = "<html><body><h1>Authorization received</h1><p>Return to Minis to finish signing in.</p><script>window.close()</script></body></html>"
             writeResponse(socket, 200, html)
             Log.i(TAG, "OAuth callback accepted: codePresent=${!code.isNullOrEmpty()} statePresent=${!state.isNullOrEmpty()}")
 
@@ -175,6 +210,39 @@ class OAuthCallbackServer(
         } catch (e: Exception) {
             Log.w(TAG, "Error handling connection", e)
             try { socket.close() } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * [upstream 1.14] CORS preflight answer for the narrow xAI case described in
+     * [handle]. Only the registered callback path is answered, the peer is
+     * already known to be loopback (see [acceptLoop]), the header block is
+     * size-capped, and only [TRUSTED_CORS_HOSTS] origins are echoed back.
+     */
+    private fun handlePreflight(socket: java.net.Socket, reader: BufferedReader, requestTarget: String) {
+        try {
+            var origin: String? = null
+            var headerBytes = 0
+            while (true) {
+                val header = reader.readLine() ?: break
+                headerBytes += header.length
+                if (header.isEmpty() || headerBytes > MAX_REQUEST_LINE) break
+                if (header.lowercase().startsWith("origin:")) origin = header.substringAfter(":").trim()
+            }
+            val path = runCatching { URI("http://localhost$requestTarget").rawPath }.getOrNull()
+            if (path != expectedPath) { writeResponse(socket, 404, "Not found"); return }
+            val allowOrigin = trustedCorsOrigin(origin) ?: "null"
+            val pre = "HTTP/1.1 204 No Content\r\n" +
+                "Access-Control-Allow-Origin: $allowOrigin\r\n" +
+                "Access-Control-Allow-Methods: GET, OPTIONS\r\n" +
+                "Access-Control-Allow-Headers: *\r\n" +
+                "Access-Control-Max-Age: 600\r\n" +
+                "Connection: close\r\n\r\n"
+            socket.getOutputStream().use { it.write(pre.toByteArray(Charsets.UTF_8)) }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error handling preflight", e)
+        } finally {
+            runCatching { socket.close() }
         }
     }
 

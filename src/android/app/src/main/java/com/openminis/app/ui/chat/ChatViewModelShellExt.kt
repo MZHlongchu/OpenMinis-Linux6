@@ -24,7 +24,11 @@ internal fun ChatViewModel.maybeReloadSkillsForPath(argsJson: String) {
     runCatching {
         val path = JSONObject(argsJson).optString("path", "")
         if (path.contains("/skills/") && path.endsWith("SKILL.md")) {
-            skillRepository?.reloadFromDisk()
+            // [T-android-skill-scan-parity] 上游 1.14 ChatViewModel.kt:14135 走的是
+            // 后台签名比对（requestReload），不是同步的 reloadFromDisk()：后者在
+            // 490 个技能的库上要 ~2 秒，而且它在主线程的 send 路径上。合并时这里
+            // 退回了同步重扫，一并修回。
+            skillRepository?.requestReload("file_write", force = true)
         }
     }
 }
@@ -218,7 +222,20 @@ internal suspend fun ChatViewModel.executeShellCommand(
         val (cleanedOutput, oneShotUrls) = MinisUrlMarker.extract(result.output)
         for (raw in oneShotUrls) MinisOpenUrlBroker.offer(raw)
         val output = if (cleanedOutput.isBlank()) "(no output)" else cleanedOutput
-        val exitInfo = if (result.exitCode != 0) " (exit code ${result.exitCode})" else ""
+        // [T-android-parity-fixes] The coordinator already annotates every
+        // non-zero status except its own timeout (124) — ExecutionCoordinator
+        // calls ShellExitCode.ensureSuffix — and this layer used to append the
+        // SECOND format (" (exit code N)") unconditionally, so the model read
+        // `…\n(exit code: 1) (exit code 1)` on every failure. ensureSuffix adds
+        // only what is missing, in the coordinator's own "(exit code: N)" form.
+        // Ported from upstream 1.14 (`upstream-1.14:src/android/app/src/main/
+        // java/com/openminis/app/ui/chat/ChatViewModel.kt:14319-14334`); the
+        // merge kept the pre-1.14 two-format version.
+        val withExit = if (result.exitCode != 0) {
+            com.openminis.app.sandbox.ShellExitCode.ensureSuffix(output, result.exitCode)
+        } else {
+            output
+        }
         // Exit code 124 is the BusyBox/GNU timeout-utility convention for
         // a command that exceeded its budget. PersistentShell returns this
         // when its `withTimeoutOrNull(timeout)` wrapper fires.
@@ -226,10 +243,10 @@ internal suspend fun ChatViewModel.executeShellCommand(
 
         // Redact env-var values that leaked into the captured output
         // before the model sees them. No-op when Privacy Mode is OFF.
-        // Done after exitInfo is appended so the suffix can't accidentally
+        // Done after the exit status is appended so the suffix can't accidentally
         // contain a secret that escaped masking. The user-visible streamed
         // content (toolBlocks above) is intentionally left unmasked.
-        val finalOutput = "$output$exitInfo"
+        val finalOutput = withExit
         val (redactedOut, redactHits) = com.openminis.app.data.EnvVarRedactor.redactIfEnabled(finalOutput)
         if (redactHits > 0) {
             android.util.Log.i("EnvVarRedact", "shell_execute: masked $redactHits env-var value(s) in tool result")
@@ -243,9 +260,21 @@ internal suspend fun ChatViewModel.executeShellCommand(
         // §4.2: append the bashism reminder when we fell back to sh and the
         // command failed OR any silent-class rule was hit (S-class exit-0
         // exception, default-on).
-        val withReminder = bashReminder?.let { rem ->
+        val withBashReminder = bashReminder?.let { rem ->
             if (result.exitCode != 0 || bashism.hasSilent) "$redactedOut\n\n$rem" else redactedOut
         } ?: redactedOut
+        // [T-android-shell-process-budget] Last, so nothing is appended after
+        // the note that the command waited in the process queue.
+        //
+        // 合并 1.14 时这一段丢了：ExecutionCoordinator 仍然会算出
+        // [ExecutionCoordinator.queueNote]（`queueNote(queuedMs, startRetries)`，
+        // 见 ExecutionCoordinator.kt:413），但没人把它接到工具结果上，于是"排队
+        // 等了 12.3s 才跑"这个事实永远到不了模型面前 —— 模型只看得到一个莫名其
+        // 妙变慢（甚至超时）的命令，于是照旧拿 duration 下结论。上游位置为
+        // git show upstream-1.14:src/android/app/src/main/java/com/openminis/app/
+        // ui/chat/ChatViewModel.kt 的 `withBashReminder` 之后那一行（本移植把它
+        // 拆分到了本文件）。放在 bashism 提示之后，保证它是最后一段。
+        val withReminder = result.queueNote?.let { "$withBashReminder\n\n$it" } ?: withBashReminder
 
         ToolExecutionResult(
             output = withReminder,

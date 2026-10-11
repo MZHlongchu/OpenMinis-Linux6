@@ -15,6 +15,7 @@ import com.openminis.app.data.db.SessionGoalEntity
 import com.openminis.app.data.db.ChatSessionEntity
 import com.openminis.app.data.db.FolderEntity
 import com.openminis.app.data.db.MessageEntity
+import com.openminis.app.data.db.MessageHeadRow
 import com.openminis.app.data.db.MessageVersionDao
 import com.openminis.app.data.db.MessageVersionEntity
 import com.openminis.app.data.db.PersistedMessageStatus
@@ -53,12 +54,17 @@ class ChatRepository(
         // memoryEnabled=1 behavior (legacy default).
         memoryEnabled: Boolean = true,
         permissionMode: String = "ASK",
+        // [T-p1-delegate-task] Non-null makes this a hidden child session.
+        parentSessionId: String? = null,
+        parentToolUseId: String? = null,
     ): ChatSessionEntity {
         val now = System.currentTimeMillis()
         val session = ChatSessionEntity(
             id = UUID.randomUUID().toString(),
             title = title,
             modelId = modelId,
+            parentSessionId = parentSessionId,
+            parentToolUseId = parentToolUseId,
             createdAt = now,
             updatedAt = now,
             memoryEnabled = if (memoryEnabled) 1 else 0,
@@ -345,11 +351,14 @@ class ChatRepository(
      * [headChars] characters of parts_json (SQL-side substr), so a 5.4M-char
      * session costs a few KB here instead of materialising every 500KB blob.
      */
+    // [T-merge-1.14] 返回类型随 ChatDao 里的改名走：上游 1.14 的 `MessageHeadRow`
+    // （id / role / parts_json）保留了原名，本分支那只有界文本头投影改叫
+    // MessageHeadPreviewRow，字段与语义不变。
     suspend fun loadMessageHeads(
         sessionId: String,
         headChars: Int = 800,
         limit: Int = 32,
-    ): List<com.openminis.app.data.db.MessageHeadRow> =
+    ): List<com.openminis.app.data.db.MessageHeadPreviewRow> =
         dao.loadMessageHeads(sessionId, headChars, limit)
 
     suspend fun loadMessageHeadsByRole(
@@ -358,7 +367,7 @@ class ChatRepository(
         headChars: Int = 800,
         limit: Int = 32,
         newest: Boolean = false,
-    ): List<com.openminis.app.data.db.MessageHeadRow> = if (newest) {
+    ): List<com.openminis.app.data.db.MessageHeadPreviewRow> = if (newest) {
         dao.loadMessageHeadsByRoleNewest(sessionId, role, headChars, limit)
     } else {
         dao.loadMessageHeadsByRole(sessionId, role, headChars, limit)
@@ -432,9 +441,45 @@ class ChatRepository(
         dao.updateSessionBinding(sessionId, binding, modelId)
     }
 
+    /**
+     * [T-android-child-session-delete-storage] Self + every descendant child
+     * session, deepest first (root last). The one place the tree is walked.
+     */
+    suspend fun sessionSubtreeIds(rootId: String): List<String> =
+        com.openminis.app.data.session.SessionTree.subtreeDeepestFirst(rootId) { dao.childSessionIds(it) }
+
+    /**
+     * DB-level delete of the whole tree: rows and messages for [id] and every
+     * descendant, children first, with any running helper job cancelled.
+     *
+     * This is the DB half only. App code must delete a session through
+     * [com.openminis.app.data.session.SessionDeleter], which also removes the
+     * session's files, ViewModel and badges — a repository has no filesDir.
+     * Kept for callers that own the file side themselves (backup restore
+     * rollback, tests).
+     */
     suspend fun deleteSession(id: String) {
-        // [T-bodies-gc] 先取候选 ref（删除后它们可能变成孤儿），去留由全库引用计数判定。
-        deleteSessionsInternal(listOf(id), referencedBodyRefsForSession(dao, versionDao, id))
+        // [T-android-child-session-delete-storage] 合并上游 1.14 的语义：删一个会话
+        // 必须带走整棵子树（深者优先），并**先**取消仍在往这些会话里写库的 helper
+        // job —— 否则留下的子会话行既不会被任何列表枚举，也就永远删不掉（正是
+        // ChatDao.orphanChildSessionIds 要善后的僵尸行）。
+        // 本分支保留的语义：[T-bodies-gc] 正文回收的候选 ref 必须在删除**前**采集
+        // （删完就找不回候选），且整棵子树只跑一轮全库引用计数——与 [deleteSessions]
+        // 的批量优化同一条路径，不会变成 N 次全表扫。
+        val subtree = sessionSubtreeIds(id)
+        for (sid in subtree) {
+            com.openminis.app.agent.jobs.AgentJobRegistry.jobForSession(sid)
+                ?.let { com.openminis.app.agent.jobs.AgentJobRegistry.cancel(it.id, "parent-deleted") }
+        }
+        val refs = HashSet<String>()
+        for (sid in subtree) refs.addAll(referencedBodyRefsForSession(dao, versionDao, sid))
+        deleteSessionsInternal(subtree, refs)
+    }
+
+    /** Rows + messages of exactly one session — NO cascade. Funnel primitive. */
+    suspend fun deleteSessionOnly(id: String) {
+        dao.deleteMessages(id)
+        dao.deleteSession(id)
     }
 
     /**
@@ -774,6 +819,92 @@ class ChatRepository(
         return SessionSearchResult(rows.take(bounded), bounded, truncated)
     }
 
+    /**
+     * [T-merge-1.14] 上游 1.14 在这里声明的同名类型是**单条命中**（session + 命中
+     * 片段 + 标题是否命中），与本分支 [SessionSearchResult]（结果页：sessions +
+     * limit + truncated，见 SessionSearchResult.kt）同名不同义；两者同在
+     * `com.openminis.app.data.repository` 包内，会让整个包无法编译。本分支那个已被
+     * SessionSearchQueryShapeTest 按源码形状钉住（`): SessionSearchResult {`、
+     * `SessionSearchResult(rows.take(bounded), bounded, truncated)`），所以改上游这
+     * 个：字段与语义一字未动，只把类名换成 `SessionSearchHit`。
+     *
+     * [T-android-search-visible-only] One session-list search result: the
+     * session, the line that shows why it matched (null for a title-only
+     * match), and whether the title matched.
+     */
+    data class SessionSearchHit(
+        val session: ChatSessionEntity,
+        val snippet: String?,
+        val titleMatched: Boolean,
+    )
+
+    /**
+     * [T-android-search-visible-only] Sessions whose title holds [query], or
+     * that hold it in a message field the user can see, newest first; each
+     * with the line of its NEWEST such message. Port of iOS
+     * `ChatStore.searchSessions` (bbd21900a, 6b0ee14c1).
+     *
+     *  - Only text parts, tool inputs and tool outputs count
+     *    ([SessionSearch.VISIBLE_HIT_CLAUSE]); hits inside tool-call ids or
+     *    thought signatures no longer make a session a result.
+     *  - When the newest matching message shows no line (its hit was inside a
+     *    `<system-reminder>`, say), up to [SessionSearch.OLDER_LOOKBACK] older
+     *    matches are tried — for the [SessionSearch.OLDER_LOOKBACK_SESSIONS]
+     *    newest such sessions only, so a query like "text" stays cheap.
+     *  - A session with neither a title hit nor a line is dropped: every
+     *    result shows why it is one.
+     *  - On an SQLite without JSON functions the raw-JSON query runs instead;
+     *    its rows are still subject to the drop rule.
+     */
+    suspend fun searchSessionsWithHits(query: String): List<SessionSearchHit> {
+        val q = query.trim()
+        if (q.isEmpty()) return emptyList()
+        val like = "%$q%"
+        var visibleOnly = true
+        val rows = try {
+            dao.runSessionSearchQuery(androidx.sqlite.db.SimpleSQLiteQuery(SessionSearch.VISIBLE_SEARCH_SQL, arrayOf(like, q)))
+        } catch (e: android.database.sqlite.SQLiteException) {
+            android.util.Log.w("ChatRepository", "[Search] visible-field query unavailable (${e.message}) — raw-JSON fallback")
+            visibleOnly = false
+            dao.runSessionSearchQuery(androidx.sqlite.db.SimpleSQLiteQuery(SessionSearch.LEGACY_SEARCH_SQL, arrayOf(like, q)))
+        }
+        var lookbackBudget = SessionSearch.OLDER_LOOKBACK_SESSIONS
+        var dropped = 0
+        val out = ArrayList<SessionSearchHit>(rows.size)
+        for (row in rows) {
+            val titleMatched = row.session.title?.contains(q, ignoreCase = true) == true
+            var snippet = row.hitPartsJson?.let { SessionSearch.searchSnippet(it, q) }
+            if (snippet == null && row.hitPartsJson != null && lookbackBudget > 0) {
+                lookbackBudget--
+                snippet = olderSearchSnippet(row.session.id, like, q, visibleOnly)
+            }
+            if (!titleMatched && snippet == null) {
+                dropped++
+                continue
+            }
+            out.add(SessionSearchHit(row.session, snippet, titleMatched))
+        }
+        if (dropped > 0) {
+            android.util.Log.i(
+                "ChatRepository",
+                "[Search] dropped $dropped session(s) with no visible hit (visibleOnly=$visibleOnly, budgetLeft=$lookbackBudget)",
+            )
+        }
+        return out
+    }
+
+    /** The newest match was already tried; look through the next few. */
+    private suspend fun olderSearchSnippet(sessionId: String, like: String, query: String, visibleOnly: Boolean): String? {
+        val older = try {
+            dao.runPartsJsonQuery(
+                androidx.sqlite.db.SimpleSQLiteQuery(SessionSearch.olderMatchesSql(visibleOnly), arrayOf(like, sessionId, query.trim())),
+            )
+        } catch (e: android.database.sqlite.SQLiteException) {
+            return null
+        }
+        return older.drop(1).firstNotNullOfOrNull { SessionSearch.searchSnippet(it.partsJson, query) }
+    }
+
     fun observeMessages(sessionId: String): Flow<List<MessageEntity>> =
         dao.observeMessages(sessionId)
 
@@ -995,6 +1126,84 @@ class ChatRepository(
         pausedAt = goal.pausedAt,
         updatedAt = goal.updatedAt,
     )
+
+    /** [T-android-error-persist-current-turn] Where [persistTurnError] put the sticker. */
+    sealed class TurnErrorWrite {
+        /** Stamped onto an assistant row the failing turn already persisted. */
+        data class Stamped(val messageId: String) : TurnErrorWrite()
+        /** The turn had no assistant row; a minimal carrier row was inserted. */
+        data class Carrier(val messageId: String) : TurnErrorWrite()
+        /** Nothing written (no rows at all, or the scan ran past its cap). */
+        data class Skipped(val reason: String) : TurnErrorWrite()
+    }
+
+    /**
+     * [T-android-error-persist-current-turn] GH#263, parity with iOS
+     * `persistErrorInfo` (fd7ec79a2 / 910708619). Persist a terminal error onto
+     * the CURRENT turn only.
+     *
+     * The old write went through [updateLastAssistantError], i.e. the session's
+     * newest assistant row. When a turn died before persisting any output (a
+     * network error, a provider 4xx, an empty turn on turn 2+), that row was
+     * the PREVIOUS turn's successful reply — so after a reload the error banner
+     * sat under an answer that had worked.
+     *
+     * Walks back from the newest row (see [errorTargetStep]): the first
+     * assistant row reached before a turn-starting user row belongs to this
+     * turn and gets the sticker. Reaching a turn-starting user row first means
+     * this turn has no assistant row, so a minimal empty assistant CARRIER row
+     * is inserted to hold the error — otherwise the only copy of the error
+     * would be in memory and a reload would lose it (iOS does the same). The
+     * carrier is:
+     *  - rendered by the load path as an error-only bubble (and skipped again
+     *    once its error is cleared, so a successful retry leaves no empty
+     *    bubble behind);
+     *  - never sent to the model ([isEmptyAssistantCarrier] rows are left out
+     *    of agentHistory on every rebuild);
+     *  - the newest assistant row, so the existing clear path
+     *    ([updateLastAssistantError] with null, used by retry) finds it, and a
+     *    second failure of the same turn re-stamps it instead of adding another.
+     *
+     * Clears are NOT routed through here — they keep [updateLastAssistantError].
+     */
+    suspend fun persistTurnError(sessionId: String, errorInfo: String): TurnErrorWrite {
+        var offset = 0
+        while (offset < MAX_TURN_ERROR_SCAN) {
+            val row = dao.messageHeadNewestFirst(sessionId, offset)
+                ?: return if (offset == 0) {
+                    TurnErrorWrite.Skipped("no rows")
+                } else {
+                    // Every row so far was a tool-result row with no assistant
+                    // row before it — no turn start, no reply: carry it.
+                    insertErrorCarrier(sessionId, errorInfo)
+                }
+            when (errorTargetStep(row.role, row.partsJson)) {
+                ErrorTargetStep.TARGET -> {
+                    dao.updateMessageErrorInfo(row.id, errorInfo)
+                    return TurnErrorWrite.Stamped(row.id)
+                }
+                ErrorTargetStep.TURN_START -> return insertErrorCarrier(sessionId, errorInfo)
+                ErrorTargetStep.SKIP -> offset += 1
+            }
+        }
+        return TurnErrorWrite.Skipped("scan cap $MAX_TURN_ERROR_SCAN reached")
+    }
+
+    private suspend fun insertErrorCarrier(sessionId: String, errorInfo: String): TurnErrorWrite {
+        val carrier = MessageEntity(
+            id = UUID.randomUUID().toString(),
+            sessionId = sessionId,
+            role = "assistant",
+            partsJson = ERROR_CARRIER_PARTS_JSON,
+            createdAt = System.currentTimeMillis(),
+            sortOrder = dao.nextSortOrder(sessionId),
+            errorInfo = errorInfo,
+        )
+        // Deliberately not appendMessage(): the carrier has no preview and must
+        // not touch the session's last_message / ordering.
+        dao.insertMessage(carrier)
+        return TurnErrorWrite.Carrier(carrier.id)
+    }
 
     /**
      * [T-token-attribution-snapshot] `modelSnapshot` records which model
@@ -1393,6 +1602,10 @@ class ChatRepository(
         // side, so existing callers keep the previous behaviour untouched.
         startMs: Long? = null,
         endMs: Long? = null,
+        // [T-android-sessions-cli-tool-calls] Also decode each message's
+        // toolUse / toolResult parts UNSUMMARIZED (iOS 7af22b59f). `text` and
+        // the skip rule are unchanged either way; the lists stay empty when off.
+        includeTools: Boolean = false,
     ): List<MessagePageItem> {
         val rows = if (startMs == null && endMs == null) {
             dao.loadMessagesPage(sessionId, offset, limit)
@@ -1402,11 +1615,14 @@ class ChatRepository(
         return rows.mapNotNull { e ->
             val text = extractTextForOffload(e.partsJson)
             if (text.isBlank()) return@mapNotNull null
+            val tools = if (includeTools) decodeToolParts(e.partsJson) else null
             MessagePageItem(
                 e.id, e.role, e.createdAt, text.take(maxChars),
                 // Mark messages that exceeded the cap so the caller can emit
                 // "truncated": true (mirrors iOS SessionsOffloadBridge).
                 truncated = text.length > maxChars,
+                toolUses = tools?.first.orEmpty(),
+                toolResults = tools?.second.orEmpty(),
             )
         }
     }
@@ -1570,6 +1786,70 @@ class ChatRepository(
         // 500 KB parts_json body was a leftover ICU Matcher.reset path.
         private const val PREVIEW_CLEAN_CHARS = 400
 
+        /** [T-android-error-persist-current-turn] parts_json of an error-carrier row. */
+        internal const val ERROR_CARRIER_PARTS_JSON = "[]"
+
+        /** Upper bound on rows [persistTurnError] walks back; the answer is normally at offset 0-2. */
+        private const val MAX_TURN_ERROR_SCAN = 500
+
+        /** [T-android-error-persist-current-turn] One step of the newest-first walk. */
+        internal enum class ErrorTargetStep { TARGET, TURN_START, SKIP }
+
+        /**
+         * [T-android-error-persist-current-turn] Classify one row of the
+         * newest-first walk in [persistTurnError]:
+         *  - an assistant row → TARGET (the newest assistant row of this turn);
+         *  - a user row that starts a turn → TURN_START (this turn has no
+         *    assistant row of its own);
+         *  - a tool-result user row → SKIP (it continues the turn).
+         * "Starts a turn" matches iOS `currentTurnStartIndex`: a user row with at
+         * least one part that is not a tool result. An empty `[]` user row does
+         * not start one (same as iOS). An UNPARSEABLE user row counts as a turn
+         * start: walking past it could reach the previous turn's reply, which is
+         * exactly the row this fix must never stamp.
+         */
+        internal fun errorTargetStep(role: String, partsJson: String): ErrorTargetStep {
+            if (role == "assistant") return ErrorTargetStep.TARGET
+            if (role != "user") return ErrorTargetStep.SKIP
+            return if (isTurnStartingUserParts(partsJson)) ErrorTargetStep.TURN_START else ErrorTargetStep.SKIP
+        }
+
+        /** Whether a user row's parts contain anything other than tool results. */
+        internal fun isTurnStartingUserParts(partsJson: String): Boolean {
+            val arr = runCatching { org.json.JSONArray(partsJson) }.getOrNull() ?: return true
+            for (i in 0 until arr.length()) {
+                val type = arr.optJSONObject(i)?.optString("type") ?: return true
+                if (type != "toolResult") return true
+            }
+            return false
+        }
+
+        /**
+         * [T-android-error-persist-current-turn] Pure form of the
+         * [persistTurnError] walk over rows given newest-first: the id to stamp,
+         * or null when the current turn has no assistant row (→ carrier).
+         */
+        internal fun currentTurnErrorRowId(rowsNewestFirst: List<MessageHeadRow>): String? {
+            for (row in rowsNewestFirst) {
+                when (errorTargetStep(row.role, row.partsJson)) {
+                    ErrorTargetStep.TARGET -> return row.id
+                    ErrorTargetStep.TURN_START -> return null
+                    ErrorTargetStep.SKIP -> Unit
+                }
+            }
+            return null
+        }
+
+        /**
+         * [T-android-error-persist-current-turn] True for an assistant row with
+         * no parts — the error carrier [persistTurnError] inserts (no other
+         * writer persists an empty assistant row: persistAssistantTurn drops
+         * them). Such a row must never reach the model: an empty assistant
+         * message is rejected by Anthropic and breaks role alternation.
+         */
+        internal fun isEmptyAssistantCarrier(role: String, partsJson: String): Boolean =
+            role == "assistant" && partsJson.trim() == ERROR_CARRIER_PARTS_JSON
+
         private fun cleanPreview(raw: String): String {
             val src = if (raw.length <= PREVIEW_CLEAN_CHARS) raw else raw.take(PREVIEW_CLEAN_CHARS)
             return stripSystemReminders(src)
@@ -1673,6 +1953,10 @@ class ChatRepository(
         // messages it just imported — see BackupImporter [T-android-restore-preview].
         internal fun extractTextPreview(partsJson: String): String? {
             try {
+                // [T-merge-1.14] 上游 1.14 把同一段解析内联在这里；本分支已把它抽成
+                // extractTextPreviewParsed（extractTextPreviewStrict 也复用同一份实现），
+                // 所以这里保留一行转发。上游在这段里新增的 [T-p2-agent-callback] 分支
+                // 已经并入 extractTextPreviewParsed —— 功能一条没丢，只是不再有第二份。
                 return extractTextPreviewParsed(partsJson)
             } catch (_: Exception) {
                 if (partsJson.isNotBlank()) return cleanPreview(partsJson)
@@ -1706,6 +1990,11 @@ class ChatRepository(
                 if (type == "text") {
                     val text = obj.optString("value", "")
                     if (text.isNotBlank()) {
+                        // [T-p2-agent-callback] 合并上游 1.14：agent 的回报要渲染成
+                        // "Agent result · title · status"，绝不能让原始 XML 进会话列表。
+                        com.openminis.app.agent.jobs.AgentCallback.parse(text)?.let { cb ->
+                            return com.openminis.app.agent.jobs.AgentCallbackLabels.previewLine(cb)
+                        }
                         return cleanPreview(text)
                     }
                 } else if (type == "mediaRef") {
@@ -1730,6 +2019,33 @@ class ChatRepository(
 
         internal fun stripSystemReminders(raw: String): String =
             SYSTEM_REMINDER_RE.replace(raw, "").trim()
+
+        /**
+         * [T-android-sessions-cli-tool-calls] Every toolUse / toolResult part
+         * of [partsJson], in order, with nothing summarized: the full input
+         * JSON string and the full output. [extractTextForOffload] cannot serve
+         * this — it drops tool calls whenever the message has text, reduces a
+         * tool-only message to its tool_title (100 chars), and keeps a 200-char
+         * result preview. Malformed JSON yields empty lists.
+         */
+        internal fun decodeToolParts(partsJson: String): Pair<List<OffloadToolUse>, List<OffloadToolResult>> {
+            val uses = mutableListOf<OffloadToolUse>()
+            val results = mutableListOf<OffloadToolResult>()
+            val arr = try { org.json.JSONArray(partsJson) } catch (_: Exception) { return uses to results }
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val v = o.optJSONObject("value") ?: continue
+                when (o.optString("type")) {
+                    "toolUse" -> uses.add(
+                        OffloadToolUse(v.optString("toolUseId"), v.optString("name"), v.optString("input")),
+                    )
+                    "toolResult" -> results.add(
+                        OffloadToolResult(v.optString("toolUseId"), v.optBoolean("success"), v.optString("output")),
+                    )
+                }
+            }
+            return uses to results
+        }
 
         // T188: snippet/length caps mirror iOS SessionsOffload.m. 600 chars
         // is a balance between giving the agent enough context to
@@ -1803,4 +2119,13 @@ data class MessagePageItem(
     // [T-android-sessions-cli-full] True when the stored text exceeded the
     // requested cap and [text] is a prefix. Surfaced as "truncated": true.
     val truncated: Boolean = false,
+    // [T-android-sessions-cli-tool-calls] Filled only for `messages --tools`.
+    val toolUses: List<OffloadToolUse> = emptyList(),
+    val toolResults: List<OffloadToolResult> = emptyList(),
 )
+
+/** [T-android-sessions-cli-tool-calls] A tool call as stored: [input] is the raw input JSON string. */
+data class OffloadToolUse(val toolUseId: String, val name: String, val input: String)
+
+/** [T-android-sessions-cli-tool-calls] A tool result as stored, output unsummarized. */
+data class OffloadToolResult(val toolUseId: String, val success: Boolean, val output: String)

@@ -41,6 +41,7 @@ import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material.icons.outlined.Handyman
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.TravelExplore
 import androidx.compose.material.icons.automirrored.outlined.Send
@@ -99,6 +100,9 @@ fun SettingsScreen(
     onMultiAgentClick: () -> Unit = {},
     onTerminalClick: () -> Unit = {},
     onMemoryClick: () -> Unit = {},
+    /** [T-p2-agent-settings] Settings › Agents (delegation on/off), below Memory. */
+    onAgentsClick: () -> Unit = {},
+    onAgentToolsClick: () -> Unit = {},
     // [T-mcp-integration-android] MCP Integrations page, listed directly below
     // Memory. Default no-op for callers that haven't wired the route yet.
     onMcpClick: () -> Unit = {},
@@ -186,7 +190,32 @@ fun SettingsScreen(
             }
 
             // -- Agent Runtime --
+            // [T-android-settings-runtime-order] Row order matches iOS
+            // (ContentView.swift, Section "Agent Runtime"): Agent Tools, Sub
+            // Agents, Skills, Soul, Memory, MCP, Environment Variables.
+            //
+            // The order is not alphabetical or historical — it runs from what
+            // the agent may DO (tools, and who it may hand work to) to what it
+            // is made OF (skills, identity, memory) and finally to what it
+            // connects to (MCP, env). Android had grown its own order simply by
+            // appending each row as it landed, which put the two capability
+            // switches in the middle of the identity rows.
             SettingsSection(title = stringResource(R.string.settings_section_agent_runtime)) {
+                // [T-tools-granular-switches] Which optional tools the agent may use.
+                SettingsItem(
+                    icon = Icons.Outlined.Handyman,
+                    iconColor = Color(0xFF5E5CE6),
+                    title = stringResource(R.string.settings_agent_tools),
+                    subtitle = stringResource(R.string.settings_agent_tools_subtitle),
+                    onClick = onAgentToolsClick,
+                )
+                SettingsItem(
+                    icon = Icons.Outlined.Groups,
+                    iconColor = com.openminis.app.ui.chat.HelperAccentStatic,
+                    title = stringResource(R.string.settings_agents),
+                    subtitle = stringResource(R.string.settings_agents_subtitle),
+                    onClick = onAgentsClick,
+                )
                 SettingsItem(
                     icon = Icons.Outlined.Groups,
                     iconColor = Color(0xFF5856D6),
@@ -201,6 +230,9 @@ fun SettingsScreen(
                     subtitle = stringResource(R.string.settings_skills_subtitle),
                     onClick = onSkillsClick,
                 )
+                // [T-android-websearch-translate-settings] 我们独有的两个入口
+                //（Web Search / 翻译），上游 1.14 没有这两行，保留并由 main
+                // 传入 onWebSearchClick / onTranslateClick。
                 SettingsItem(
                     icon = Icons.Outlined.TravelExplore,
                     iconColor = Color(0xFF34C759),
@@ -215,7 +247,8 @@ fun SettingsScreen(
                     subtitle = stringResource(R.string.settings_translate_subtitle),
                     onClick = onTranslateClick,
                 )
-                // [T-soul-md] insertion between Skills and Memory per spec.
+                // [T-soul-md] insertion between Skills and Memory per spec
+                // (upstream 1.14 的措辞：Between Skills and Memory, as on iOS)。
                 SettingsItem(
                     icon = Icons.Outlined.AutoAwesome,
                     iconColor = Color(0xFFFF9500),

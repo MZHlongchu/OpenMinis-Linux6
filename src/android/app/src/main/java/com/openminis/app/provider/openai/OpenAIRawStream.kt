@@ -767,6 +767,10 @@ internal fun OpenAIProvider.rawStreamMessage(
         // least one non-whitespace character. See the response.incomplete handler.
         var sawNonBlankText = false
         var reasoningLen = 0
+        // [T-android-openrouter-reasoning-details] (上游 1.14) 见到的
+        // `reasoning.encrypted` 项数量：它们不带文本，所以只看 reasoningLen 会读成
+        // 0，"模型确实推理了但 UI 没有思考内容"的现场就无法区分。
+        var encryptedReasoningChunks = 0
         var toolCallEventCount = 0
         var sawFinishReason = false
         var sawUsageBlock = false
@@ -918,7 +922,17 @@ internal fun OpenAIProvider.rawStreamMessage(
                     )
                     continue
                 }
-                if (android.util.Log.isLoggable("ToolChain[Provider]", android.util.Log.VERBOSE)) {
+                // [T-android-log-hotpath] （上游 1.14 移植）RAW SSE 是**整段**原始
+                // payload：每个事件一行、3 小时设备日志里约 8.5k 行 / 1.4 MB。上游把
+                // 它门禁在 DEBUG 上——插值出的字符串在 logcat 决定要不要之前就已经建好，
+                // release 版为此白付一次分配 + 写入，也就不该出现在发布版里。合并时
+                // 这一侧只落了「VERBOSE 可读」的门；这里补回 BuildConfig.DEBUG，与
+                // AnthropicProvider 的同名站点保持一致（两个 provider 一个 DEBUG+VERBOSE、
+                // 一个只有 VERBOSE 是合并留下的不对称）。我们审计修复的按长度截断
+                // （clampSsePayload）保留。
+                if (com.openminis.app.BuildConfig.DEBUG &&
+                    android.util.Log.isLoggable("ToolChain[Provider]", android.util.Log.VERBOSE)
+                ) {
                     android.util.Log.d(
                         "ToolChain[Provider]",
                         "RAW SSE: ${com.openminis.app.text.BoundedText.clampSsePayload(payload)}",
@@ -935,16 +949,24 @@ internal fun OpenAIProvider.rawStreamMessage(
                     if (delta != null) {
                         val cLen = delta.optString("content", "").length
                         val rcLen = delta.optString("reasoning_content", "").length
+                        // [T-android-copilot-reasoning-text] (上游 1.14) 第三种拼写
+                        // 也要计入诊断长度，否则 Copilot 的推理在计数里读成 0。
                         val rLen = delta.optString("reasoning", "").length
+                            .coerceAtLeast(delta.optString("reasoning_text", "").length)
                         val tcLen = delta.optJSONArray("tool_calls")?.length() ?: 0
                         val role = delta.optString("role", "")
-                        if ((cLen + rcLen + rLen + tcLen > 0 || delta.has("role")) &&
-                            android.util.Log.isLoggable("OpenAIProvider", android.util.Log.VERBOSE)
-                        ) {
-                            com.openminis.app.logging.AppLogger.debug(
-                                "OpenAIProvider",
+                        if (cLen + rcLen + rLen + tcLen > 0 || delta.has("role")) {
+                            // [T-android-log-hotpath] Per SSE event: built only
+                            // when someone can read it (debug build / Verbose).
+                            //
+                            // （上游 1.14 移植）合并后这里曾是 `Log.isLoggable(VERBOSE)`
+                            // + AppLogger.debug(String)：门是有效的，但每个 SSE 事件
+                            // 仍要过一次 JNI 的 isLoggable；AppLogger.trace 只是读两个
+                            // 字段，且 release 默认 Info 级下连字符串都不建。这与
+                            // AppLogger.trace 头注释承诺的用途（逐事件诊断）是同一件事。
+                            com.openminis.app.logging.AppLogger.trace("OpenAIProvider") {
                                 "[T321] SSE delta: contentLen=$cLen rcLen=$rcLen rLen=$rLen toolCalls=$tcLen role='$role'"
-                            )
+                            }
                         }
                         contentLen += cLen
                         reasoningLen += rcLen + rLen
@@ -953,20 +975,18 @@ internal fun OpenAIProvider.rawStreamMessage(
                         // Responses API event-typed diagnostics.
                         // [T-android-responses-delta-log-noise] Responses events
                         // carry no `choices`, so EVERY delta lands in this branch:
-                        // unconditional AppLogger.debug wrote one line per
+                        // an unconditional AppLogger.debug wrote one line per
                         // streamed token — each paying two IsoTime formats plus,
                         // with file logging on, an @Synchronized flush — from the
-                        // very coroutine that reads the SSE socket. Gate it with
-                        // the same Log.isLoggable(VERBOSE) as the Chat Completions
-                        // delta log above.
+                        // very coroutine that reads the SSE socket. AppLogger.trace
+                        // is the gate that fixes that at the source: the message is
+                        // not built unless a debug build or Verbose logging means
+                        // someone is reading it.
                         val dLen = ev.optString("delta", "").length
-                        if ((type.contains("delta") || type == "response.completed" || type == "response.output_item.added" || type == "response.output_item.done") &&
-                            android.util.Log.isLoggable("OpenAIProvider", android.util.Log.VERBOSE)
-                        ) {
-                            com.openminis.app.logging.AppLogger.debug(
-                                "OpenAIProvider",
+                        if (type.contains("delta") || type == "response.completed" || type == "response.output_item.added" || type == "response.output_item.done") {
+                            com.openminis.app.logging.AppLogger.trace("OpenAIProvider") {
                                 "[T321] SSE responses type=$type deltaLen=$dLen"
-                            )
+                            }
                         }
                         if (type == "response.output_text.delta") {
                             contentLen += dLen
@@ -1235,7 +1255,14 @@ internal fun OpenAIProvider.rawStreamMessage(
                                 // rather than falling back through the group.
                                 throw LLMError.TransientError("[$code] $message")
                             }
-                            throw LLMError.ProviderError("[$code] $message")
+                            // [T-responses-overflow-status] (上游 1.14) 流式失败没有
+                            // HTTP 状态码，而 ContextOverflowGuard 明确拒收无状态码的
+                            // 错误 —— 于是结构化的 context_length_exceeded 从未被当作
+                            // 溢出处理（不抬比例、不触发 GH#352 自愈、钉住的会话静默
+                            // 跨模型回退）。该 code 在语义上就是"请求过大"的 400，只是
+                            // 传输方式不同。
+                            val status = if (code == "context_length_exceeded") 400 else null
+                            throw LLMError.ProviderError("[$code] $message", httpStatus = status)
                         }
                         type == "response.incomplete" -> {
                             // [T-responses-terminal-events] The server ended the
@@ -1394,11 +1421,26 @@ internal fun OpenAIProvider.rawStreamMessage(
                             // counts so we can round-trip DeepSeek V4's `reasoning_content: ""`.
                             val hasRcKey = d.has("reasoning_content")
                             val hasReasoningKey = d.has("reasoning")
-                            if (hasRcKey || hasReasoningKey) {
+                            // [T-android-copilot-reasoning-text] (上游 1.14) GitHub
+                            // Copilot 用第三种拼写 `delta.reasoning_text` 流式输出推理，
+                            // 这个解析器此前不认识它。抓包（claude-sonnet-5，经
+                            // api.githubcopilot.com）：
+                            //
+                            //   "delta":{"content":null,"role":"assistant",
+                            //            "reasoning_text":" this is a standard mod"}
+                            //
+                            // 274 个这样的 delta 全部被丢弃 —— 流末 reasoningLen=0
+                            // —— 于是深度思考开着、模型也确实推理了，用户却看不到
+                            // 任何思考文本。该名字在本文件里早已存在（Responses API 的
+                            // `response.reasoning_text.delta`）；只有 chat-completions
+                            // 分支从未见过它。
+                            val hasReasoningTextKey = d.has("reasoning_text")
+                            if (hasRcKey || hasReasoningKey || hasReasoningTextKey) {
                                 sawReasoningField = true
                             }
                             val rc = d.safeOptString("reasoning_content", "")
                                 .ifEmpty { d.safeOptString("reasoning", "") }
+                                .ifEmpty { d.safeOptString("reasoning_text", "") }
                             if (rc.isNotEmpty()) {
                                 reasoningAccum.append(rc)
                                 if (!sawReasoningDelta) {
@@ -1409,6 +1451,30 @@ internal fun OpenAIProvider.rawStreamMessage(
                                     )
                                 }
                                 sendTracked(LLMStreamChunk.ThinkingDelta(rc))
+                            }
+                            // [T-android-openrouter-reasoning-details] (上游 1.14)
+                            // OpenRouter 的结构化 `reasoning_details` 数组，部分模型
+                            // 只用它、不用上面的字符串字段。本 chunk 已有字符串推理时
+                            // 返回 null（同一段文字会来两遍），详见 ReasoningDetails。
+                            //
+                            // 该解析器随合并进了仓却**没有任何调用点** —— 拆分把它
+                            // 落下了，于是 OpenRouter 上靠 reasoning_details 推理的模型
+                            // 整轮文本为空、推理也为空，agent 循环报"模型返回空响应"。
+                            ReasoningDetails.parse(d)?.let { rd ->
+                                sawReasoningField = true
+                                encryptedReasoningChunks += rd.encryptedCount
+                                if (rd.text.isNotEmpty()) {
+                                    reasoningAccum.append(rd.text)
+                                    reasoningLen += rd.text.length
+                                    if (!sawReasoningDelta) {
+                                        sawReasoningDelta = true
+                                        com.openminis.app.logging.AppLogger.info(
+                                            "OpenAIProvider",
+                                            "Chat Completions: first reasoning_details delta arrived on ${model.id} — streaming Thinking content"
+                                        )
+                                    }
+                                    sendTracked(LLMStreamChunk.ThinkingDelta(rd.text))
+                                }
                             }
                         }
 
@@ -1457,7 +1523,16 @@ internal fun OpenAIProvider.rawStreamMessage(
                                     val n = acc.args.length
                                     if (com.openminis.app.text.BoundedText.shouldCommitLengthStride(n, acc.lastSentArgsLen)) {
                                         acc.lastSentArgsLen = n
-                                        if (com.openminis.app.text.BoundedText.shouldLogLengthStride(n)) {
+                                        // [T-android-log-hotpath] （上游 1.14 移植）
+                                        // 逐 chunk 的诊断必须「没人读就一条都不写」：
+                                        // 只有 debug 构建或开了 Verbose 才可能有人看。
+                                        // 我们这一侧的步长节流（shouldLogLengthStride）
+                                        // 只限制行数，release 默认 Info 级下照样会写，
+                                        // 所以两道门都留着：traceEnabled 决定要不要写，
+                                        // 步长决定写多密。
+                                        if (com.openminis.app.logging.AppLogger.traceEnabled &&
+                                            com.openminis.app.text.BoundedText.shouldLogLengthStride(n)
+                                        ) {
                                             android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=${acc.id} accumulated=${n}chars")
                                         }
                                         sendTracked(LLMStreamChunk.ToolInputDelta(acc.id, acc.args.toString()))
@@ -1482,7 +1557,7 @@ internal fun OpenAIProvider.rawStreamMessage(
                                     sawFinishReason = true
                                     com.openminis.app.logging.AppLogger.info(
                                         "OpenAIProvider",
-                                        "[T321] finish_reason=$it contentLen=$contentLen reasoningLen=$reasoningLen toolCallEvents=$toolCallEventCount accumulators=${toolCallAccumulators.size}"
+                                        "[T321] finish_reason=$it contentLen=$contentLen reasoningLen=$reasoningLen encryptedReasoningChunks=$encryptedReasoningChunks toolCallEvents=$toolCallEventCount accumulators=${toolCallAccumulators.size}"
                                     )
                                 }
                             }
@@ -1612,6 +1687,7 @@ internal fun OpenAIProvider.rawStreamMessage(
                     "OpenAIProvider",
                     "[T321] stream ended WITHOUT finish_reason: events=$sseEventCount " +
                         "contentLen=$contentLen reasoningLen=$reasoningLen " +
+                        "encryptedReasoningChunks=$encryptedReasoningChunks " +
                         "toolCallEvents=$toolCallEventCount sawUsage=$sawUsageBlock model=${model.id}"
                 )
             } else {
@@ -1621,7 +1697,49 @@ internal fun OpenAIProvider.rawStreamMessage(
                         "reasoningLen=$reasoningLen toolCallEvents=$toolCallEventCount sawUsage=$sawUsageBlock"
                 )
             }
+
+            // [T-android-fallback-providererror] (上游 1.14) 什么都没产生的流 ——
+            // 没有 SSE 事件、没有正文、没有工具调用、没有 usage —— 不是"提前结束"，
+            // 而是**从未开始**。正常收尾会把它报成一次空的成功回合，于是 group
+            // fallback 的判断根本不会被触发，死掉的端点继续占着这一轮，而不是把机会
+            // 让给组里的下一个模型（含"只回一个 [DONE]"的中继）。用 TransientError
+            // （不带 httpStatus：没有 HTTP 失败，只是 body 为空）先走同 provider 的
+            // 重试阶梯，阶梯耗尽后由 group fallback 接手。
+            //
+            // 刻意收窄。两种更"有内容"的情形保留它们各自更合适的恢复手段，绝不能
+            // 改成抛错：
+            //   * 已有部分内容后断开 -> ChatViewModel 的
+            //     [T-android-silent-stream-drop] 中断提示横幅，它保住了用户已经读到
+            //     的那段文字；
+            //   * 有过事件但仍是空回合 -> <system-reminder> 的单轮重试 + 空响应提示。
+            // 对这两种抛错会把这些恢复手段一并丢掉。
+            //
+            // 判据照上游写全（不额外用 sawFinishReason 收窄）：拿到过 finish_reason
+            // 的流必然有过事件，条件本身已经把它排除。
+            if (sseEventCount == 0 && contentLen == 0 && reasoningLen == 0 &&
+                toolCallEventCount == 0 && !sawUsageBlock
+            ) {
+                throw LLMError.TransientError(
+                    "stream closed without producing any data (model=${model.id})"
+                )
+            }
         } catch (e: Exception) {
+            // [T-android-fallback-providererror] 上面那条"什么都没产生"的守卫抛出的
+            // 是**结论**（LLMError），不是解析事故：它必须原样交给调用方，绝不能经
+            // cancel() 变成一次"取消"。同一条通路上已有先例 —— [T-stream-content-type-sniff]
+            // 的 DecodingError 就是裸抛 LLMError 直达 collector，StreamContentTypeSniffTest
+            // 正着钉住这个形态。
+            //
+            // 为什么这条必须补：非流式入口 OpenAIProvider.sendMessageClamped 自己就是
+            // collector，它的契约是"返回一个 LLMResponse，或抛出一个 LLMError"。被
+            // cancel() 包成 CancellationException 之后，调用方（minis-model-use、标题生成
+            // 等）看到的是"被取消"而不是可重试的 TransientError：重试/错误分支不接管，
+            // 正是 [T-android-sendmessage-stream-true] 要堵的静默失败（回归 2f45981d 的
+            // 同一现象：整条流什么都不产出，调用方却当成一次成功的空回复）。
+            // 循环侧不受影响：ChatViewModel.runAgentLoop 的 catch 走 unwrapFlowException，
+            // 裸 LLMError 与 CancellationException(cause=LLMError) 都归一到同一张
+            // StreamRetryPolicy 判定表，重试阶梯与组回退的语义不变。
+            if (e is LLMError) throw e
             // [T-android-body-idle-watchdog] The watchdog's trip (body-idle /
             // content-idle) closed the socket: surface as a stall-resume
             // TransientError so the retry ladder carries the partial

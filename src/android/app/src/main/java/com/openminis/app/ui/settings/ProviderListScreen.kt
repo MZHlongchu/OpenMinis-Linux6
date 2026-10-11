@@ -306,6 +306,11 @@ fun ProviderListScreen(
                                 // configured-by-definition (mirrors iOS).
                                 !apiKey.isNullOrBlank() || instance.allowsEmptyAPIKey
                             }
+                            // [T-oauth-keep-credentials] Refresh rejected: the
+                            // credential is kept but the row renders red.
+                            val needsReauth = instance.credentialType ==
+                                com.openminis.app.data.model.ProviderCredential.oauth &&
+                                com.openminis.app.auth.OAuthManager.needsReauth(context, instance.id)
                             // Lift the dragged row above its neighbours so it
                             // reads as "picked up" (matches ModelGroupsScreen).
                             val elevation by animateDpAsState(
@@ -351,6 +356,9 @@ fun ProviderListScreen(
                                         modelCount = modelCount,
                                         apiKey = apiKey,
                                         isConfigured = isConfigured,
+                                        // 上游 1.14 的 OAuth 重新登录标记 + 我们的收藏置顶，
+                                        // 两者互不冲突，都保留。
+                                        needsReauth = needsReauth,
                                         pinned = instance.pinned,
                                         onTogglePinned = {
                                             providerRepository.setInstancePinned(instance.id, !instance.pinned)
@@ -499,6 +507,11 @@ private fun ProviderSwipeableRow(
     } else {
         !apiKey.isNullOrBlank() || instance.allowsEmptyAPIKey
     }
+    // 上游 1.14 的 [T-oauth-keep-credentials] 红行标记：收藏区走同一条行组件，
+    // 这里同样算出 needsReauth，避免置顶后凭据失效却不再标红。
+    val needsReauth = instance.credentialType ==
+        com.openminis.app.data.model.ProviderCredential.oauth &&
+        com.openminis.app.auth.OAuthManager.needsReauth(context, instance.id)
     SwipeRowActions(
         actions = listOf(
             SwipeRowAction(
@@ -522,6 +535,7 @@ private fun ProviderSwipeableRow(
             modelCount = modelCount,
             apiKey = apiKey,
             isConfigured = isConfigured,
+            needsReauth = needsReauth,
             pinned = instance.pinned,
             onTogglePinned = {
                 providerRepository.setInstancePinned(instance.id, !instance.pinned)
@@ -538,8 +552,10 @@ private fun ProviderInstanceRow(
     modelCount: Int,
     apiKey: String?,
     isConfigured: Boolean,
+    // 我们的收藏置顶（星标）+ 上游 1.14 的 OAuth 需重新登录标记。
     pinned: Boolean,
     onTogglePinned: () -> Unit,
+    needsReauth: Boolean = false,
     onClick: () -> Unit,
     syncResult: ModelRefreshResult? = null,
 ) {
@@ -556,7 +572,9 @@ private fun ProviderInstanceRow(
             modifier = Modifier
                 .size(8.dp)
                 .background(
-                    color = if (isActive) Color(0xFF34C759) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f),
+                    color = if (needsReauth) MaterialTheme.colorScheme.error
+                        else if (isActive) Color(0xFF34C759)
+                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f),
                     shape = CircleShape,
                 ),
         )
@@ -590,11 +608,13 @@ private fun ProviderInstanceRow(
                 Text(
                     // [T-empty-key-compat-endpoints] Keyless compatible endpoint:
                     // say so instead of the alarming "No API key".
-                    text = if (!apiKey.isNullOrBlank()) maskKey(apiKey)
+                    text = if (needsReauth) stringResource(R.string.provider_oauth_sign_in_expired)
+                        else if (!apiKey.isNullOrBlank()) maskKey(apiKey)
                         else if (instance.allowsEmptyAPIKey) stringResource(R.string.provider_no_key_required)
                         else stringResource(R.string.provider_list_no_api_key),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (needsReauth) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                 )
             }

@@ -3,6 +3,7 @@ package com.openminis.app.data.repository
 import android.content.Context
 import android.util.Base64
 import com.openminis.app.backup.BackupSecrets
+import com.openminis.app.backup.ProviderOverridesWire
 import com.openminis.app.data.db.ProviderConfigDao
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ModelEntry
@@ -16,18 +17,10 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 
-// Modality bit layout — must match src/ios/Providers/LLMTypes.swift
-// ModelModality OptionSet rawValue exactly. Used by export/import to
-// transmit modality info as a single Int that iOS can decode.
-private const val MODALITY_BIT_TEXT_IN = 1 shl 0
-private const val MODALITY_BIT_TEXT_OUT = 1 shl 1
-private const val MODALITY_BIT_IMG_IN = 1 shl 2
-private const val MODALITY_BIT_PDF_IN = 1 shl 3
-private const val MODALITY_BIT_AUD_IN = 1 shl 4
-private const val MODALITY_BIT_VID_IN = 1 shl 5
-private const val MODALITY_BIT_IMG_OUT = 1 shl 6
-private const val MODALITY_BIT_AUD_OUT = 1 shl 7
-private const val MODALITY_BIT_VID_OUT = 1 shl 8
+// [T-android-overrides-wire-codec] overrides 层的编解码（含 modality 位域与
+// MODALITY_BIT_* 布局）已挪进 backup/BackupRecordMapper.kt 的 ProviderOverridesWire：
+// 本文件顶在架构棘轮基线上（.architecture-baseline.json，只许下调），而那段逻辑
+// 是纯 org.json 映射、与数据库无关，抽出去既能给这里腾空间，也能被单测直接驱动。
 
 internal class ProviderBackupCoordinator(
     private val context: Context,
@@ -91,45 +84,14 @@ internal class ProviderBackupCoordinator(
                     entry.baseModel.maxOutputTokens?.let { put("maxOutputTokens", it) }
                     entry.baseModel.supportsReasoning?.let { put("supportsReasoning", it) }
                     entry.baseModel.interleavedReasoningField?.let { put("interleavedReasoningField", it) }
-                    // [T-provider-export-model-overrides] Serialize the FULL
-                    // ModelOverrides layer, not just displayName/maxOutputTokens.
-                    // contextWindow / supportsReasoning / modality (input+output)
-                    // were previously dropped — a hand-corrected proxied model
-                    // lost those edits on round-trip. Each key is additive +
-                    // optional: older builds ignore unknown keys, and import
-                    // below reads each independently so a partial override
-                    // object restores exactly the fields present.
-                    //
-                    // For cross-platform interop with iOS we ALSO write a
-                    // `modalityOverride` bitfield (Int, matching
-                    // ios/Providers/LLMTypes.swift ModelModality OptionSet):
-                    // textInput=1, textOutput=2, imageInput=4, pdfInput=8,
-                    // audioInput=16, videoInput=32, imageOutput=64,
-                    // audioOutput=128, videoOutput=256. Android natively
-                    // carries inputModalities/outputModalities as string lists;
-                    // the bitfield is purely an interop wire-format that iOS
-                    // can consume directly. On import, the native list fields
-                    // win when present (Android↔Android lossless), bitfield is
-                    // the iOS→Android fallback.
+                    // [T-provider-export-model-overrides] 整个 ModelOverrides 层
+                    // （含 1.14 新增的 maxThinkingLevel / topP / customHeaders /
+                    // extraBodyParams）统一交给 ProviderOverridesWire.encode ——
+                    // 逐字段手写正是这些键被漏掉的原因：层里加了字段，这条手写
+                    // 清单不会报错，只是静默不写，分享/往返一次就丢。每个键仍然
+                    // 增量 + 可选：老构建忽略不认识的键，导入侧逐键独立读。
                     if (!entry.overrides.isEmpty) {
-                        val o = JSONObject()
-                        entry.overrides.displayName?.let { o.put("displayName", it) }
-                        entry.overrides.maxOutputTokens?.let { o.put("maxOutputTokens", it) }
-                        entry.overrides.contextWindow?.let { o.put("contextWindow", it) }
-                        entry.overrides.supportsReasoning?.let { o.put("supportsReasoning", it) }
-                        entry.overrides.temperature?.let { o.put("temperature", it) }
-                        entry.overrides.inputModalities?.let {
-                            o.put("inputModalities", JSONArray(it))
-                        }
-                        entry.overrides.outputModalities?.let {
-                            o.put("outputModalities", JSONArray(it))
-                        }
-                        val bitfield = modalityBitfieldFromLists(
-                            entry.overrides.inputModalities,
-                            entry.overrides.outputModalities,
-                        )
-                        if (bitfield != 0) o.put("modalityOverride", bitfield)
-                        put("overrides", o)
+                        put("overrides", ProviderOverridesWire.encode(entry.overrides))
                     }
                     // Mirror iOS export of baseModel.modalityOverride — when
                     // the base model itself carries explicit modality info,
@@ -137,7 +99,7 @@ internal class ProviderBackupCoordinator(
                     // restore it. Android's native baseModel uses string
                     // lists too; this is purely additive for iOS readers.
                     run {
-                        val bf = modalityBitfieldFromLists(
+                        val bf = ProviderOverridesWire.bitfieldFromLists(
                             entry.baseModel.inputModalities,
                             entry.baseModel.outputModalities,
                         )
@@ -542,7 +504,7 @@ internal class ProviderBackupCoordinator(
                 // modalities. Android-native list fields win when present;
                 // otherwise fall back to iOS's `modalityOverride` bitfield so
                 // a provider exported on iOS retains its capability info.
-                val (baseIn, baseOut) = readModalitiesWithBitfieldFallback(m)
+                val (baseIn, baseOut) = ProviderOverridesWire.readModalitiesWithBitfieldFallback(m)
                 val model = LLMModel(
                     id = modelId,
                     displayName = displayName,
@@ -555,24 +517,13 @@ internal class ProviderBackupCoordinator(
                     outputModalities = baseOut,
                 )
                 val overridesObj = m.optJSONObject("overrides")
+                // [T-provider-export-model-overrides] 整个 overrides 层交给
+                // ProviderOverridesWire.decode：逐键 has() 判存在，缺键 → null（=
+                // 沿用 baseModel / 默认值），校验口径与上游 1.14 一致 —— 其中就
+                // 包含 1.14 新增的 maxThinkingLevel / topP / customHeaders /
+                // extraBodyParams；旧导出没有这些键也不会报错。
                 val overrides = if (overridesObj != null) {
-                    // [T-provider-export-model-overrides] Read the full
-                    // overrides layer. Each key is read independently — a
-                    // missing key (old export, partial object) simply stays
-                    // null → the field falls back to baseModel / defaults.
-                    val (ovIn, ovOut) = readModalitiesWithBitfieldFallback(overridesObj)
-                    ModelOverrides(
-                        displayName = overridesObj.optString("displayName", "").ifEmpty { null },
-                        maxOutputTokens = if (overridesObj.has("maxOutputTokens")) overridesObj.optInt("maxOutputTokens").takeIf { it > 0 } else null,
-                        contextWindow = if (overridesObj.has("contextWindow")) overridesObj.optInt("contextWindow").takeIf { it > 0 } else null,
-                        supportsReasoning = if (overridesObj.has("supportsReasoning")) overridesObj.optBoolean("supportsReasoning") else null,
-                        temperature = if (overridesObj.has("temperature")) {
-                            overridesObj.optDouble("temperature").takeUnless { it.isNaN() }
-                                ?.takeIf { it in 0.0..2.0 }
-                        } else null,
-                        inputModalities = ovIn,
-                        outputModalities = ovOut,
-                    )
+                    ProviderOverridesWire.decode(overridesObj)
                 } else {
                     ModelOverrides()
                 }
@@ -601,90 +552,5 @@ internal class ProviderBackupCoordinator(
         }
 
         return resolvedLabel
-    }
-
-    // -- Modality interop with iOS ----------------------------------------
-    //
-    // iOS encodes ModelModality as a single Int bitfield (OptionSet rawValue);
-    // Android carries inputModalities / outputModalities as bare string lists
-    // ("text" / "image" / "pdf" / "audio" / "video"). The export/import path
-    // writes both encodings so the wire format is portable in either
-    // direction without losing fidelity:
-    //   - Android → Android: the native string lists round-trip exactly.
-    //   - Android → iOS:    iOS reads `modalityOverride` Int and ignores
-    //                       the unknown list keys (forward-compatible).
-    //   - iOS → Android:    Android prefers the native list keys when
-    //                       present (Android-original export); otherwise
-    //                       decodes `modalityOverride` Int back into lists.
-    //
-    // Bit layout constants live at file scope above the class (Kotlin
-    // forbids a second companion object, and ProviderRepository already
-    // has one).
-
-    private fun modalityBitfieldFromLists(
-        inputs: List<String>?,
-        outputs: List<String>?,
-    ): Int {
-        var bits = 0
-        inputs?.forEach { raw ->
-            when (raw.lowercase()) {
-                "text" -> bits = bits or MODALITY_BIT_TEXT_IN
-                "image" -> bits = bits or MODALITY_BIT_IMG_IN
-                "pdf" -> bits = bits or MODALITY_BIT_PDF_IN
-                "audio" -> bits = bits or MODALITY_BIT_AUD_IN
-                "video" -> bits = bits or MODALITY_BIT_VID_IN
-            }
-        }
-        outputs?.forEach { raw ->
-            when (raw.lowercase()) {
-                "text" -> bits = bits or MODALITY_BIT_TEXT_OUT
-                "image" -> bits = bits or MODALITY_BIT_IMG_OUT
-                "audio" -> bits = bits or MODALITY_BIT_AUD_OUT
-                "video" -> bits = bits or MODALITY_BIT_VID_OUT
-            }
-        }
-        return bits
-    }
-
-    private fun modalityListsFromBitfield(bits: Int): Pair<List<String>?, List<String>?> {
-        if (bits == 0) return null to null
-        val inputs = buildList {
-            if (bits and MODALITY_BIT_TEXT_IN != 0) add("text")
-            if (bits and MODALITY_BIT_IMG_IN != 0) add("image")
-            if (bits and MODALITY_BIT_PDF_IN != 0) add("pdf")
-            if (bits and MODALITY_BIT_AUD_IN != 0) add("audio")
-            if (bits and MODALITY_BIT_VID_IN != 0) add("video")
-        }
-        val outputs = buildList {
-            if (bits and MODALITY_BIT_TEXT_OUT != 0) add("text")
-            if (bits and MODALITY_BIT_IMG_OUT != 0) add("image")
-            if (bits and MODALITY_BIT_AUD_OUT != 0) add("audio")
-            if (bits and MODALITY_BIT_VID_OUT != 0) add("video")
-        }
-        return inputs.ifEmpty { null } to outputs.ifEmpty { null }
-    }
-
-    /**
-     * Read modality info from a JSON object. Returns (inputs, outputs):
-     *   - native `inputModalities` / `outputModalities` list keys take
-     *     precedence (Android-original export — lossless).
-     *   - if neither list is present, decode iOS's `modalityOverride`
-     *     bitfield as the fallback.
-     *   - if neither shape is present, returns null pair (caller treats
-     *     as "no modality info" → baseModel defaults apply).
-     */
-    private fun readModalitiesWithBitfieldFallback(
-        obj: JSONObject,
-    ): Pair<List<String>?, List<String>?> {
-        val nativeIn = obj.optJSONArray("inputModalities")?.let { arr ->
-            (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotEmpty() } }.takeIf { it.isNotEmpty() }
-        }
-        val nativeOut = obj.optJSONArray("outputModalities")?.let { arr ->
-            (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotEmpty() } }.takeIf { it.isNotEmpty() }
-        }
-        if (nativeIn != null || nativeOut != null) return nativeIn to nativeOut
-        if (!obj.has("modalityOverride")) return null to null
-        val bits = obj.optInt("modalityOverride", 0)
-        return modalityListsFromBitfield(bits)
     }
 }

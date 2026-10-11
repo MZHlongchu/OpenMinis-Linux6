@@ -37,8 +37,14 @@ object RemediationLoop {
                     continue
                 }
                 trips++
+                // [T-a7-render-breaker-removed] 这里原本还调用
+                // HangDetector.tripRenderBreaker()。上游 1.14 的
+                // [T-android-hang-false-positive] 已把 render breaker 从看门狗与
+                // 渲染器一起删掉（它会因为任何屏幕上的 3s 主线程间隙，把之后每条
+                // 流式回复都降级，而那 33 个样本没有一个落在渲染里），渲染端也早已
+                // 改成只看体积，那个信号已无读取方。本循环的降级仍由上一行的
+                // DegradeFlags + 下面的 killUnprotected 完成，语义不变。
                 DegradeFlags.trip(filesDir, "stall gap=${gap}ms trips=$trips")
-                com.openminis.app.diagnostics.HangDetector.tripRenderBreaker()
                 if (!killed && (trips >= 2 || gap >= KILL_MS)) {
                     killed = true
                     stops++

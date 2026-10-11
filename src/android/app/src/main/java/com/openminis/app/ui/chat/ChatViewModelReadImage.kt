@@ -21,7 +21,15 @@ import org.json.JSONObject
  * AIChatViewModel+ConcurrentTools read_image branch.
  */
 internal suspend fun ChatViewModel.executeReadImageTool(argsJson: String): ToolExecutionResult {
-    val base = ReadImageTool.execute(argsJson, activeSessionId, context)
+    // [T-a15-read-image-fs-session-id] 必须用**挂载时那个**会话 id：helper 的
+    // `/var/minis/attachments` 绑的是父会话的 `minis-sessions/<parent>/attachments`
+    // （ExecutionCoordinator 的 fsSessionId），而 `activeSessionId` 是 helper 自己的
+    // dispatch id。用后者会让截图目录解析到 helper 自己的 attachments，
+    // guest shell（父挂载）与 ReadImageTool（按父 id 调用）都找不到那张 PNG ——
+    // 正是 eff4ac95f 修掉的 "File not found" 在 helper 上复发。上游 1.14
+    // ChatViewModel.kt:14064 用的就是 `fsSessionId`（T-p2-shared-workspace），
+    // 本移植拆文件时丢了这一点，按上游移植回来。
+    val base = ReadImageTool.execute(argsJson, fsSessionId, context)
     // [T-android-vision-group / GH#182] Optional caller instruction focusing
     // what to learn from the image.
     val customPrompt = try {

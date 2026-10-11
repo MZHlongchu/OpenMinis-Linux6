@@ -281,18 +281,27 @@ class RootfsManager private constructor(private val context: Context) {
         Log.i(TAG, "User data restored from $backupDir")
     }
 
-    private fun calculateDirSize(dir: File): Long {
-        var total = 0L
-        val files = dir.listFiles() ?: return 0L
-        for (file in files) {
-            total += if (file.isDirectory) {
-                calculateDirSize(file)
-            } else {
-                file.length()
-            }
-        }
-        return total
-    }
+    /**
+     * [T-android-storage-symlink-inflation] Third copy of the sizing walk —
+     * routed through the shared one instead of keeping a following variant
+     * alive here.
+     *
+     * This was hand-rolled recursion over `listFiles()`, and both `isDirectory`
+     * and `length()` RESOLVE symlinks: a link to a directory was descended into
+     * and its whole subtree counted again (once per link pointing at it), and a
+     * link to a file was counted as a second copy of the target. That is the
+     * same defect 754e65eac fixed in `SessionStorage.directorySize` and
+     * `DebugRPCHandler.dirSize`, and missing it here is why the "Rootfs 管理"
+     * screen still read 40.25 GB after the Storage screen had been corrected —
+     * two screens sizing the same directory and disagreeing by an order of
+     * magnitude.
+     *
+     * It was also the only one of the three with no cycle protection: a
+     * `a/loop -> a` symlink recursed until StackOverflowError rather than
+     * merely over-counting.
+     */
+    private fun calculateDirSize(dir: File): Long =
+        com.openminis.app.data.session.SessionStorage.directorySize(dir)
 
     /**
      * Ensure session-specific directories exist on the host filesystem.
@@ -312,8 +321,23 @@ class RootfsManager private constructor(private val context: Context) {
      */
     fun refreshDns() {
         if (!rootfsDir.exists()) return
+        // [T-container-network-dns] (OpenMinis#396) Custom mode: the user's
+        // servers, verbatim, on every call — install, boot and each network
+        // change all land here, so a network switch can no longer wash them
+        // out. Custom with no usable server resolves to System (see
+        // ContainerDns.plan), so this can never write a resolv.conf with no
+        // nameserver. Auto (the default) is the system path below.
+        val plan = ContainerDns.plan(context)
+        if (plan is ContainerDns.Plan.Custom) {
+            Log.i(TAG, "[DNS] custom mode: ${plan.servers.joinToString(", ")}")
+            writeResolvConf(ContainerDns.customResolvConf(plan.servers))
+            return
+        }
         val (domains, servers) = readSystemDns()
-        val content = composeResolvConf(domains, servers)
+        writeResolvConf(composeResolvConf(domains, servers))
+    }
+
+    private fun writeResolvConf(content: String) {
         try {
             val file = File(rootfsDir, "etc/resolv.conf")
             file.parentFile?.mkdirs()
@@ -377,9 +401,20 @@ class RootfsManager private constructor(private val context: Context) {
             if (!rootfsDir.exists()) return
             val onDisk = runCatching { File(rootfsDir, "etc/resolv.conf").readText() }.getOrNull()
                 ?: return
-            val (domains, servers) = readSystemDns()
-            if (onDisk != composeResolvConf(domains, servers)) {
-                Log.i(TAG, "[DNS] resolv.conf no longer matches system DNS — rewriting")
+            // [T-container-network-dns] Compare against what THIS mode would
+            // write. A custom-DNS user must not have their servers "corrected"
+            // back to the system ones by this check — that is exactly the
+            // washing-out OpenMinis#396 fixed, and this path runs on every
+            // guest spawn.
+            val plan = ContainerDns.plan(context)
+            val expected = if (plan is ContainerDns.Plan.Custom) {
+                ContainerDns.customResolvConf(plan.servers)
+            } else {
+                val (domains, servers) = readSystemDns()
+                composeResolvConf(domains, servers)
+            }
+            if (onDisk != expected) {
+                Log.i(TAG, "[DNS] resolv.conf no longer matches the active DNS mode — rewriting")
                 refreshDns()
             }
         }

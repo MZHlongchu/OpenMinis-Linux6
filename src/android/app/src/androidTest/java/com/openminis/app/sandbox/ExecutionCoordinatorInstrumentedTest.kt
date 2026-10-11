@@ -38,6 +38,7 @@ class ExecutionCoordinatorInstrumentedTest {
 
     @After
     fun tearDown() {
+        ExecutionCoordinator.stopCurrentCommand()
         PRootKernel.clearBindMounts()
         PRootKernel.customEnvironment.clear()
         cleanupSessionDirs()
@@ -53,6 +54,7 @@ class ExecutionCoordinatorInstrumentedTest {
         ExecutionCoordinator.execute(sessionId, "echo hello")
 
         assertTrue(ExecutionCoordinator.hasLiveShell(sessionId))
+        assertTrue("$sessionId#0" in activeShellKeys())
     }
 
     @Test
@@ -61,9 +63,12 @@ class ExecutionCoordinatorInstrumentedTest {
 
         ExecutionCoordinator.execute("session-A", "echo a")
         assertTrue(ExecutionCoordinator.hasLiveShell("session-A"))
+        assertTrue("session-A#0" in activeShellKeys())
 
         ExecutionCoordinator.execute("session-B", "echo b")
         assertTrue(ExecutionCoordinator.hasLiveShell("session-B"))
+        assertTrue("session-A#0" in activeShellKeys())
+        assertTrue("session-B#0" in activeShellKeys())
     }
 
     @Test
@@ -72,7 +77,7 @@ class ExecutionCoordinatorInstrumentedTest {
 
         ExecutionCoordinator.execute("session-X", "echo first")
 
-        // Get current bind mount count
+        val shellKeys = activeShellKeys()
         val mountCount = PRootKernel.bindMounts.size
 
         ExecutionCoordinator.execute("session-X", "echo second")
@@ -80,6 +85,7 @@ class ExecutionCoordinatorInstrumentedTest {
         // Mounts should remain the same (not cleared and re-added)
         assertEquals(mountCount, PRootKernel.bindMounts.size)
         assertTrue(ExecutionCoordinator.hasLiveShell("session-X"))
+        assertEquals(shellKeys, activeShellKeys())
     }
 
     @Test
@@ -88,13 +94,24 @@ class ExecutionCoordinatorInstrumentedTest {
 
         ExecutionCoordinator.execute("session-mounts", "echo test")
 
-        assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/attachments"))
-        assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/offloads"))
-        assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/workspace"))
-        assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/browser"))
-        assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/memory"))
+        // [T-android-session-private-mounts] The session-level dirs live in the
+        // shell's OWN PRoot argv — `sessionBindMounts` is the map a shell of
+        // this session is started with. They are deliberately NOT written into
+        // the process-wide PRootKernel.bindMounts (last-writer-wins: that is
+        // how one chat's /var/minis/workspace became every other reader's).
+        val sessionMounts = ExecutionCoordinator.sessionBindMounts("session-mounts")
+        assertTrue(sessionMounts.containsKey("/var/minis/attachments"))
+        assertTrue(sessionMounts.containsKey("/var/minis/offloads"))
+        assertTrue(sessionMounts.containsKey("/var/minis/workspace"))
+        assertTrue(sessionMounts.containsKey("/var/minis/browser"))
+        // memory is per-session on purpose (the daily memory quota is per chat).
+        assertTrue(sessionMounts.containsKey("/var/minis/memory"))
+
+        // The global dirs are registered process-wide at boot, and they are the
+        // ones a shell still reads out of the shared table.
         assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/skills"))
         assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/shared"))
+        assertTrue(PRootKernel.bindMounts.containsKey("/var/minis/mcp-servers"))
     }
 
     @Test
@@ -125,19 +142,22 @@ class ExecutionCoordinatorInstrumentedTest {
         ExecutionCoordinator.execute(sessionId, "echo test")
 
         val sessionBase = File(context.filesDir, "minis-sessions/$sessionId")
+        // [T-android-session-private-mounts] Assert on the set the shell is
+        // actually started with, not on the shared table.
+        val sessionMounts = ExecutionCoordinator.sessionBindMounts(sessionId)
         assertEquals(
             File(sessionBase, "workspace").absolutePath,
-            PRootKernel.bindMounts["/var/minis/workspace"]
+            sessionMounts["/var/minis/workspace"]
         )
 
         assertEquals(
             File(sessionBase, "memory").absolutePath,
-            PRootKernel.bindMounts["/var/minis/memory"]
+            sessionMounts["/var/minis/memory"]
         )
         val globalBase = File(context.filesDir, "minis-global")
         assertEquals(
             File(globalBase, "skills").absolutePath,
-            PRootKernel.bindMounts["/var/minis/skills"]
+            sessionMounts["/var/minis/skills"]
         )
     }
 
@@ -156,7 +176,7 @@ class ExecutionCoordinatorInstrumentedTest {
     fun executeAppendsExitCodeOnFailure() = runBlocking {
         skipIfNoBoot()
 
-        val result = ExecutionCoordinator.execute("session-fail", "exit 1")
+        val result = ExecutionCoordinator.execute("session-fail", "false")
         assertEquals(1, result.exitCode)
         assertTrue("Should append exit code", result.output.contains("(exit code: 1)"))
     }
@@ -198,11 +218,8 @@ class ExecutionCoordinatorInstrumentedTest {
     // ==================== Serialization ====================
 
     @Test
-    fun executeSerializesConcurrentCalls() = runBlocking {
+    fun executeUsesSeparateShellsForConcurrentCalls() = runBlocking {
         skipIfNoBoot()
-
-        // Launch two commands concurrently — they should serialize
-        val startTime = System.currentTimeMillis()
 
         val deferred1 = async {
             ExecutionCoordinator.execute("session-serial", "sleep 1; echo first")
@@ -219,10 +236,11 @@ class ExecutionCoordinatorInstrumentedTest {
         // Both should succeed
         assertEquals(0, result1.exitCode)
         assertEquals(0, result2.exitCode)
-
-        // Total time should be > 1s (serialized, not parallel)
-        val elapsed = System.currentTimeMillis() - startTime
-        assertTrue("Commands should be serialized (elapsed: ${elapsed}ms)", elapsed >= 900)
+        assertTrue("session-serial#0" in activeShellKeys())
+        assertTrue(
+            "Concurrent calls should allocate a second pool slot: ${activeShellKeys()}",
+            "session-serial#1" in activeShellKeys(),
+        )
     }
 
     // ==================== sessionDidTerminate ====================
@@ -233,11 +251,15 @@ class ExecutionCoordinatorInstrumentedTest {
 
         ExecutionCoordinator.execute("session-terminate", "echo test")
         assertTrue(ExecutionCoordinator.hasLiveShell("session-terminate"))
+        assertTrue("session-terminate#0" in activeShellKeys())
         assertTrue(PRootKernel.bindMounts.isNotEmpty())
 
         ExecutionCoordinator.sessionDidTerminate("session-terminate")
 
         assertFalse(ExecutionCoordinator.hasLiveShell("session-terminate"))
+        // [T-android-concurrent-shell] Terminating a chat must sweep EVERY pool
+        // slot, not just slot 0.
+        assertFalse(activeShellKeys().any { it.startsWith("session-terminate#") })
     }
 
     @Test
@@ -245,18 +267,25 @@ class ExecutionCoordinatorInstrumentedTest {
         skipIfNoBoot()
 
         ExecutionCoordinator.execute("session-keep", "echo test")
+        val shellsBefore = activeShellKeys()
         val mountsBefore = PRootKernel.bindMounts.size
 
         ExecutionCoordinator.sessionDidTerminate("session-other")
 
         assertTrue(ExecutionCoordinator.hasLiveShell("session-keep"))
+        // The global table is not session-scoped any more, so this only proves
+        // nothing cleared it; the shell-key assertions below are the real check.
         assertEquals(mountsBefore, PRootKernel.bindMounts.size)
+        assertEquals(shellsBefore, activeShellKeys())
+        assertTrue("session-keep#0" in activeShellKeys())
     }
 
     @Test
     fun sessionDidTerminateIsNoOpWhenNoSession() {
+        val shellsBefore = activeShellKeys()
         ExecutionCoordinator.sessionDidTerminate("any-session")
         assertFalse(ExecutionCoordinator.hasLiveShell("any-session"))
+        assertEquals(shellsBefore, activeShellKeys())
     }
 
     // ==================== stopCurrentCommand ====================
@@ -337,6 +366,11 @@ class ExecutionCoordinatorInstrumentedTest {
     }
 
     private fun resetKernel() {
+        // Tear down every per-session persistent shell before each test.
+        // [T-android-concurrent-shell] A session now owns a whole pool
+        // ("<sessionId>#<slot>"), and stopCurrentCommand() with no session id
+        // sweeps every slot of every session.
+        ExecutionCoordinator.stopCurrentCommand()
         try {
             val field = PRootKernel::class.java.getDeclaredField("isBooted")
             field.isAccessible = true
@@ -344,9 +378,14 @@ class ExecutionCoordinatorInstrumentedTest {
         } catch (_: Exception) { }
         PRootKernel.clearBindMounts()
         PRootKernel.customEnvironment.clear()
+    }
 
-        // Tear down every per-session persistent shell before each test.
-        ExecutionCoordinator.stopCurrentCommand()
+    @Suppress("UNCHECKED_CAST")
+    private fun activeShellKeys(): Set<String> {
+        val field = ExecutionCoordinator::class.java.getDeclaredField("shells")
+        field.isAccessible = true
+        val shells = field.get(ExecutionCoordinator) as Map<String, *>
+        return shells.keys.toSet()
     }
 
     private fun cleanupSessionDirs() {

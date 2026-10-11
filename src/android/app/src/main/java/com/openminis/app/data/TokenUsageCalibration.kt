@@ -42,6 +42,19 @@ object TokenUsageCalibration {
     }
 
     /**
+     * [T-ctx-overflow-attribute-dispatch] Raise one model's scale to at least
+     * [ratio] — direct evidence (a provider rejecting a request as too long, or
+     * a persisted usage row of this session) rather than an EMA sample, so it is
+     * applied at full strength. Never lowers: a rejection is ground truth about
+     * THIS model, and [observe]'s 0.3 weight would dilute it right back down.
+     */
+    fun raise(modelKey: String, ratio: Double) {
+        if (modelKey.isBlank() || ratio <= 0.0) return
+        val clamped = ratio.coerceIn(MIN_SCALE, MAX_SCALE)
+        scales.compute(modelKey) { _, prev -> maxOf(prev ?: 1.0, clamped) }
+    }
+
+    /**
      * Apply the calibration to a raw heuristic estimate.
      * Returns the same value when uncalibrated (scale = 1.0).
      */

@@ -28,15 +28,19 @@ Android arm64 上的私人 AI Agent。把兼容接口接到手机里的一台 Ub
 - **模型**：接兼容接口；缺参数的模型 id 会按目录补全上下文、输出长度和思考档位。
 - **多智能体**：主会话调度子代理。设置 → 多智能体。
 - **技能与记忆**：全局技能；本会话日记在 `/var/minis/memory`，`GLOBAL.md` 在设置里单独维护。
+- **社区与技能生态**：上游 OpenMinis 的用例合集 [AwesomeMinis](https://github.com/OpenMinis/AwesomeMinis)、技能库 [MinisSkills](https://github.com/OpenMinis/MinisSkills) 与媒体报道见下方 [English](#english) 的 *Upstream and community* 一节。
 
 ## 从源码构建
 
-PRoot 和 Ubuntu rootfs 在构建时生成，不进仓库。需要 NDK r29（`29.0.14206865`）。完整步骤见 [BUILDING.md](BUILDING.md)。
+PRoot 和 Ubuntu rootfs 在构建时生成，不进仓库。需要 NDK r29（`29.0.14206865`）。远端备份用的 rclone AAR 是可选的：要它就得有 Go 1.26+ 与 gomobile，没有它 APK 照样编译，只是远端备份目标不可用。完整步骤见 [BUILDING.md](BUILDING.md)。
 
 ```sh
 git clone --recurse-submodules https://github.com/tall-1997/OpenMinis-Linux.git
 cd OpenMinis-Linux
 ./deps/build_proot.sh && ./scripts/prepare_android_sandbox.sh
+# 可选：远端备份（需要 Go 1.26+ 与 gomobile）
+./deps/build_rclone_android.sh
+mkdir -p src/android/app/libs && cp deps/build/rclone/rclone.aar src/android/app/libs/
 cd src/android && ./gradlew :app:assembleDebug
 ```
 
@@ -56,8 +60,10 @@ scripts/        rootfs 与开发脚本
 
 - 应用源码与本仓库修改：© 各贡献者，[GPL-3.0](LICENSE)
 - [PRoot](https://github.com/proot-me/PRoot/)（GPL-2.0），本仓库子模块 `deps/proot` 基于 [OpenMinis/proot](https://github.com/OpenMinis/proot)
+- proot ELF loaders（GPL-2.0），随 APK 分发的 Termux 构建：`src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader.so`、`libproot-loader32.so`
 - [talloc](https://talloc.samba.org)（LGPL-3.0-or-later）
 - Ubuntu 24.04 arm64 根文件系统：构建时下载，许可随 Canonical / Ubuntu 软件包
+- [rclone](https://github.com/rclone/rclone)（MIT），远端备份的 gomobile 绑定；构建时生成，不进仓库
 - Android SDK / AndroidX、OkHttp、Kotlin 协程等：见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
 
 问题与功能请求请提到 [Issues](https://github.com/tall-1997/OpenMinis-Linux/issues)。
@@ -95,14 +101,44 @@ Allow unknown-app installs before sideloading. A debug signature cannot replace 
 - **Agents**: the main session can dispatch sub-agents. Settings → Agents.
 - **Skills and memory**: global skills; the session diary lives at `/var/minis/memory`. `GLOBAL.md` is edited separately in Settings.
 
+## Upstream and community
+
+Minis Ultra is the Linux/Android fork of
+[OpenMinis](https://github.com/OpenMinis/OpenMinis), and the ecosystem around the
+upstream app applies here unchanged:
+
+- **Community use cases** —
+  **[AwesomeMinis](https://github.com/OpenMinis/AwesomeMinis)** collects
+  user-contributed workflows: logging a meal from a photo, turning group chat into
+  tracked tasks, mounting an Obsidian vault, filing a page into a calendar event.
+- **Skills** — a skill is a folder with a `SKILL.md` (instructions, plus optional
+  scripts, references and assets) that the agent loads on demand when a request
+  matches it. Metadata stays in context for triggering; the body and bundled
+  resources load only once the skill is used. Skills written for Claude, Codex,
+  OpenClaw or Hermes Agent generally run here as-is; ones adapted to Minis' tools
+  do more, because they can reach the Linux shell, device integrations and native
+  offloads directly. **[MinisSkills](https://github.com/OpenMinis/MinisSkills)**
+  carries both kinds.
+- **Press** — "the most impressive indie app I've seen in a while"
+  ([MacStories](https://www.macstories.net/reviews/open-minis-is-the-ios-agent-i-wish-siri-ai-could-be/));
+  「这可能是 iPhone 最强 Agent 软件，没有之一」
+  ([知乎](https://zhuanlan.zhihu.com/p/2045570157783807562));
+  「可能是 iOS 端最强 AI Agent」([小众软件](https://www.appinn.com/open-minis/)).
+- **Upstream releases** — the iOS TestFlight beta and the upstream APK are on
+  [OpenMinis/OpenMinis](https://github.com/OpenMinis/OpenMinis/releases). This
+  repository's own builds are in [Download](#download) above.
+
 ## Build from source
 
-PRoot and the Ubuntu rootfs are produced at build time and are not stored in git. NDK r29 (`29.0.14206865`) is required. Full steps are in [BUILDING.md](BUILDING.md).
+PRoot and the Ubuntu rootfs are produced at build time and are not stored in git. NDK r29 (`29.0.14206865`) is required. The rclone AAR for remote backups is optional: it needs Go 1.26+ and gomobile, and without it the APK still builds — only remote backup destinations are unavailable. Full steps are in [BUILDING.md](BUILDING.md).
 
 ```sh
 git clone --recurse-submodules https://github.com/tall-1997/OpenMinis-Linux.git
 cd OpenMinis-Linux
 ./deps/build_proot.sh && ./scripts/prepare_android_sandbox.sh
+# optional: remote backups (needs Go 1.26+ and gomobile)
+./deps/build_rclone_android.sh
+mkdir -p src/android/app/libs && cp deps/build/rclone/rclone.aar src/android/app/libs/
 cd src/android && ./gradlew :app:assembleDebug
 ```
 
@@ -122,8 +158,10 @@ scripts/        Rootfs and development scripts
 
 - Application source and modifications in this repository: © contributors, [GPL-3.0](LICENSE)
 - [PRoot](https://github.com/proot-me/PRoot/) (GPL-2.0). The `deps/proot` submodule tracks [OpenMinis/proot](https://github.com/OpenMinis/proot)
+- proot ELF loaders (GPL-2.0), Termux builds shipped in the APK: `src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader.so` and `libproot-loader32.so`
 - [talloc](https://talloc.samba.org) (LGPL-3.0-or-later)
 - Ubuntu 24.04 arm64 rootfs: downloaded at build time; licenses follow Canonical / Ubuntu packages
+- [rclone](https://github.com/rclone/rclone) (MIT), the gomobile binding for remote backups; produced at build time, not stored in git
 - Android SDK / AndroidX, OkHttp, Kotlin coroutines, and the rest: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
 
 File issues and feature requests at [Issues](https://github.com/tall-1997/OpenMinis-Linux/issues).

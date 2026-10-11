@@ -83,7 +83,11 @@ object SelfBuildRunner {
         // fast failure used to call setInactive before setActive, which left
         // the overlay stuck on a job that had already ended.
         try {
-            SessionActivityTracker.setActive("self-build") { launched.cancel() }
+            // [T-u12-merge] 必须用具名参数：我们的 setActive 在上游 1.14 之后多了
+            // 第三个参数 sessionTitle，尾随 lambda 语法会绑到最后那个 String? 上
+            // （报 Function0<Unit> ≠ String?）。语义不变——onStop 就是通知栏 Stop
+            // 用的取消回调。
+            SessionActivityTracker.setActive("self-build", onStop = { launched.cancel() })
         } finally {
             // Always open the gate. If registration throws, awaiting it forever
             // leaves running=true and the next Start is a no-op.

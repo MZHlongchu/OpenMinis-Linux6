@@ -119,7 +119,10 @@ fun ChatViewModel.deleteFromMessage(messageId: String) {
     // Truncate the UI to everything BEFORE the target message, and drop
     // any queued prompts that belonged to the deleted range so a later
     // auto-drain can't resurrect them.
-    val retainedHead = messages.subList(0, index)
+    // [T-android-uimessages-sublist-cme] `subList` 返回的是与父表共享 modCount 的
+    // 活视图；下面要把它发布成 `_messages.value`（= Compose 状态），所以必须拷贝。
+    // 与 truncateBeforeEdit / 上游 uiMessages 尾部窗口同一条纪律。
+    val retainedHead = messages.subList(0, index).toList()
     for (m in deletedMessages) {
         // [T-queue-disk-persistence] forgetQueuedPrompt 连带撤掉磁盘镜像，
         // 否则重启会给这批已删除的消息还原出幽灵排队气泡。

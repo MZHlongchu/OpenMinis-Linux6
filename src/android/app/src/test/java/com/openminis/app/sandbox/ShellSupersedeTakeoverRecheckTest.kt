@@ -21,6 +21,14 @@ import org.junit.Test
  */
 class ShellSupersedeTakeoverRecheckTest {
 
+    // [T-a15-shell-key-rename] 本移植把 `startOrReuseShell` 的会话参数命名为 `key`
+    // （上游 1.14 叫 `sessionId`），于是"再读一次注册表"那句在这里是
+    // `val latest = shells[key]`。原针脚写死 `shells[sessionId]`，读到的下标是 -1，
+    // 判据假红 —— 那是变量名耦合，不是复核逻辑丢失。改成只锚 `val latest = shells[`
+    // 前缀：既不认名字，又仍然要求"ensureStarted 之后必须出现这次复核读取"，
+    // 断言强度不变（唯一性由 branch 只含 SUPERSEDED 这一段保证）。
+    private val recheckNeedle = "val latest = shells["
+
     private val source =
         File("src/main/java/com/openminis/app/sandbox/ExecutionCoordinator.kt").readText()
 
@@ -41,7 +49,7 @@ class ShellSupersedeTakeoverRecheckTest {
     @Test
     fun `the registry is re-read after ensureStarted`() {
         val ensureStarted = branch.indexOf("takeover.ensureStarted()")
-        val recheck = branch.indexOf("val latest = shells[sessionId]")
+        val recheck = branch.indexOf(recheckNeedle)
         val verdict = branch.indexOf("ShellSupersedePolicy.verdict(latest, takeover)")
 
         assertTrue("ensureStarted 之后必须复核注册表:\n$branch", ensureStarted >= 0 && recheck > ensureStarted)
@@ -57,7 +65,7 @@ class ShellSupersedeTakeoverRecheckTest {
         val ensureStarted = branch.indexOf("takeover.ensureStarted()")
         // 同一坐标系（ensureStarted 之后的片段）里比较，别把两套下标混用。
         val afterEnsure = branch.substring(ensureStarted.coerceAtLeast(0))
-        val recheck = afterEnsure.indexOf("val latest = shells[sessionId]")
+        val recheck = afterEnsure.indexOf(recheckNeedle)
         val firstReturn = afterEnsure.indexOf("return takeover")
         val stop = afterEnsure.indexOf("takeover.stop()")
         val nullReturn = afterEnsure.indexOf("return null")

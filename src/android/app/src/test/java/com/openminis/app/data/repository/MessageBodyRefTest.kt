@@ -164,6 +164,14 @@ class MessageBodyRefTest {
                 r.deletedSessions += args[0] as String
                 Unit
             }
+            // [T-android-child-session-delete-storage] 本移植的 deleteSession 会先走
+            // `sessionSubtreeIds`（ChatRepository.kt:448-449）把**整棵子会话树**一并删掉
+            // ——这是合并上游 1.14 时带进来的语义（上游 1.14 的 deleteSession 同样带
+            // 子树），所以假 DAO 必须能回答这第一个问句。这里返回空表：本文件的用例只
+            // 关心「正文引用回收」的账，子树为空时 `bodyRefsForSession` 的调用次数与
+            // 语义和以前逐字一致，断言一条都没动。真要有子会话，那属于
+            // ChatRepository.sessionSubtreeIds 的用例面。
+            "childSessionIds" -> emptyList<String>()
             "runMessageSearchQuery" -> {
                 r.searchQueries++
                 r.searchRows

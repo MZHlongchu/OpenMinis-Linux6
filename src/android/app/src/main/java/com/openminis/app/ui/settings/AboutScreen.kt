@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material3.MaterialTheme
@@ -38,6 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
+import com.openminis.app.AppBuildInfo
 import com.openminis.app.BuildConfig
 import com.openminis.app.R
 import com.openminis.app.ui.components.openExternalUrl
@@ -97,8 +99,20 @@ fun AboutScreen(onBack: () -> Unit) {
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // [T-android-about-build-date] Selectable so it can be copied
+            // into a bug report. (upstream 1.14)
+            val buildDate = remember(context) { AppBuildInfo.buildDate(context) }
+            SelectionContainer {
+                Text(
+                    stringResource(R.string.about_built_format, buildDate),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                )
+            }
             // Build provenance — which commit this APK came from. Tapping
             // copies the full SHA (with the dirty marker) for bug reports.
+            // [T-android-about-commit-sha] our local增量: 与上游的构建时间行互补，
+            // 排查问题时既知道何时构建、也知道构建自哪个提交。
             val gitSha = BuildConfig.GIT_SHA
             val shaShort = if (gitSha.length > 7) gitSha.take(7) else gitSha
             val dirty = BuildConfig.GIT_DIRTY

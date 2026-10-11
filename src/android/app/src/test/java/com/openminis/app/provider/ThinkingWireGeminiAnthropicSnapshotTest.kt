@@ -26,6 +26,16 @@ import org.junit.Test
  * Phase 2 §1 is a pure refactor, so each platform keeps its own behaviour and each
  * snapshot is an oracle for its own side. Unifying them is a deliberate behaviour change
  * and belongs in its own commit.
+ *
+ * [T-gemini-25-family-ladder] RE-BASELINED ROWS — the `gemini-2.5-flash/*` block only.
+ * The [T-thinking-ladder-shared] refactor had given Pro and Flash ONE shared
+ * 32 768-scaled fallback ladder, so the two families emitted byte-identical budgets and
+ * the snapshot recorded that equality. That is the regression `GeminiThinkingBranchTest`
+ * pins from the other side ("pro must budget more than flash at <tier>": Pro rejects
+ * `thinkingBudget: 0` and its documented ladder sits above Flash's). Flash now scales
+ * against its own documented ceiling (16 384), so its rows are half of Pro's at every
+ * enabled tier — 1024 / 2048 / 4096 / 7168 / 11264 / 15360 — while Pro's rows are
+ * unchanged. Every non-Flash row in this file is untouched.
  */
 class ThinkingWireGeminiAnthropicSnapshotTest {
 
@@ -110,12 +120,12 @@ gemini/gemini-2.5-pro/XHIGH -> {includeThoughts:true,thinkingBudget:14336}
 gemini/gemini-2.5-pro/MAX -> {includeThoughts:true,thinkingBudget:22528}
 gemini/gemini-2.5-pro/ULTRA -> {includeThoughts:true,thinkingBudget:30720}
 gemini/gemini-2.5-flash/OFF -> {thinkingBudget:0}
-gemini/gemini-2.5-flash/LOW -> {includeThoughts:true,thinkingBudget:2048}
-gemini/gemini-2.5-flash/MEDIUM -> {includeThoughts:true,thinkingBudget:4096}
-gemini/gemini-2.5-flash/HIGH -> {includeThoughts:true,thinkingBudget:8192}
-gemini/gemini-2.5-flash/XHIGH -> {includeThoughts:true,thinkingBudget:14336}
-gemini/gemini-2.5-flash/MAX -> {includeThoughts:true,thinkingBudget:22528}
-gemini/gemini-2.5-flash/ULTRA -> {includeThoughts:true,thinkingBudget:30720}
+gemini/gemini-2.5-flash/LOW -> {includeThoughts:true,thinkingBudget:1024}
+gemini/gemini-2.5-flash/MEDIUM -> {includeThoughts:true,thinkingBudget:2048}
+gemini/gemini-2.5-flash/HIGH -> {includeThoughts:true,thinkingBudget:4096}
+gemini/gemini-2.5-flash/XHIGH -> {includeThoughts:true,thinkingBudget:7168}
+gemini/gemini-2.5-flash/MAX -> {includeThoughts:true,thinkingBudget:11264}
+gemini/gemini-2.5-flash/ULTRA -> {includeThoughts:true,thinkingBudget:15360}
 gemini/gemini-2.5-flash-lite/OFF -> null
 gemini/gemini-2.5-flash-lite/LOW -> null
 gemini/gemini-2.5-flash-lite/MEDIUM -> null

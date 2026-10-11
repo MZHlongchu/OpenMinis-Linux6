@@ -62,7 +62,22 @@ internal fun ChatViewModel.resolveProviderFromGroup(
                             available.size,
                         ),
                     ]
-                RoutingStrategy.fallback -> available.first()
+                RoutingStrategy.fallback ->
+                    // [T-android-compact-fallback] Prefer a member that has not
+                    // just failed, and fall back to `first()` when every
+                    // candidate is marked, so a fully-degraded group still
+                    // resolves rather than refusing to pick at all.
+                    //
+                    // Ported from upstream 1.14 (`upstream-1.14:src/android/app/
+                    // src/main/java/com/openminis/app/ui/chat/ChatViewModel.kt:7033-7039`);
+                    // the merge kept only `available.first()`, so the failure
+                    // marks this class-level set exists for were never read on
+                    // the group path: after model A ran out of quota, re-picking
+                    // the group handed A straight back and switching looked like
+                    // it did nothing (the recorded note below on
+                    // `recentlyFailedEntryIds` describes exactly this symptom).
+                    available.firstOrNull { it.id !in recentlyFailedEntryIds }
+                        ?: available.first()
             }
 
         val instance = providerRepository.instance(targetEntry.providerInstanceId) ?: return false

@@ -267,7 +267,6 @@ fun UsageStatsScreen(
 
     LaunchedEffect(Unit) {
         val records = chatDao.allUsageRecords()
-
         val modelLookup = mutableMapOf<String, Pair<String, String>>()
         for (m in LLMModel.allModels) modelLookup[m.id] = m.displayName to m.provider
         val instanceLabels = mutableMapOf<String, String>()

@@ -10,7 +10,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
@@ -20,9 +22,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import com.openminis.app.ui.theme.ChatColors
 
 /** Text composable that draws rounded-rect backgrounds for inline code spans. */
 @Composable
@@ -41,6 +45,15 @@ internal fun MdText(
      * so a long-press grabs exactly the cell. See [TextShard.isAtomicUnit].
      */
     isAtomicSelectionUnit: Boolean = false,
+    /**
+     * [T-android-table-column-align] Horizontal alignment for a WRAPPED block of
+     * text. Upstream 1.14 (`StreamingMarkdownText.kt` MdText) carries this as its
+     * last parameter; the merge dropped it, so a table cell whose text wrapped
+     * onto a second line stayed flush left even when the Box above it was
+     * centred or right-aligned — the snippet was half-aligned. Table cells are
+     * the only caller that passes it.
+     */
+    textAlign: TextAlign? = null,
 ) {
     var layoutResult by remember { mutableStateOf<androidx.compose.ui.text.TextLayoutResult?>(null) }
     // MinisTextKit registration: when this MdText is inside a markdown
@@ -119,6 +132,17 @@ internal fun MdText(
     // default (LocalAppendOnlyFade=false) so cold-loaded history and
     // completed messages render fully opaque without per-frame work.
     val fadeEnabled = LocalAppendOnlyFade.current
+    // [T-android-stream-fade-seed] Was fade on from this MdText's FIRST
+    // composition? Only then is the text it first receives genuinely new
+    // (a paragraph that appeared as the live tail). A block rendered opaque
+    // that only LATER became the live tail — the reported case: a bullet
+    // list that was not the last block until its next item's text landed —
+    // already showed its text; a controller created at that flip must adopt
+    // it, not re-fade it from alpha 0.
+    //
+    // Keyless remember on purpose: it must capture the value at birth and
+    // keep it, so a later flip cannot rewrite history.
+    val fadeFromBirth = remember { fadeEnabled }
     val fadeController = if (fadeEnabled) rememberFadeController() else null
     if (fadeController != null) {
         // Ingest synchronously during composition (not in a LaunchedEffect):
@@ -127,14 +151,66 @@ internal fun MdText(
         // Deferring to a LaunchedEffect committed the opaque text first,
         // making the fade invisible. ingest() is a cheap prefix-diff and
         // no-ops when text is unchanged, so calling it every compose is safe.
-        fadeController.ingest(text.text)
+        //
+        // [T-android-stream-fade-reentry] A controller's first text is only
+        // "new" if this node has never shown it. Re-entering a chat mid-stream,
+        // or scrolling the streaming message out and back, recreates the node
+        // from scratch; FadeShownText remembers what it showed, so only the
+        // text beyond that fades.
+        val fadeKey = baseShardId?.let { "${it.messageId}/${it.shardId}" }
+        if (!fadeController.hasSeenText) {
+            val plan = fadeBirthPlan(fadeFromBirth, fadeKey?.let { FadeShownText.get(it) } ?: emptyList(), text.text)
+            when (plan) {
+                FadeBirth.SeedAll -> fadeController.seed(text.text)
+                is FadeBirth.SeedPrefix -> {
+                    fadeController.seed(plan.shown)
+                    fadeController.ingest(text.text)
+                }
+                FadeBirth.FadeAll -> fadeController.ingest(text.text)
+            }
+            // Diagnostic: a node born into a fade of a long text is the replay
+            // symptom; trace which fragment and how much, so a leftover path
+            // shows up in a Verbose log.
+            if (plan == FadeBirth.FadeAll && text.text.length > 80) {
+                com.openminis.app.logging.AppLogger.trace("StreamFade") {
+                    "[T-android-stream-fade-reentry] fade-from-zero key=$fadeKey len=${text.text.length}"
+                }
+            }
+        } else {
+            fadeController.ingest(text.text)
+        }
+        if (fadeKey != null) FadeShownText.put(fadeKey, text.text)
         FadeFrameDriver(fadeController)
     }
-    // overlay() reads the SnapshotStateMap of alphas; tick() writes it each
-    // frame, so this expression re-runs (recomposing only THIS MdText) on
-    // every animation frame. When no ranges are active overlay() returns the
-    // base text unchanged.
-    val effectiveText = fadeController?.overlay(text, color) ?: text
+    // [T-u14-merge-fade-mask] (上游 1.14) fade 是画在淡入文字**上面**的一层遮罩，
+    // 不是逐帧重写的 AnnotatedString。
+    //
+    // 合并前我们这一侧走的是「组合期把 alpha 烘进 SpanStyle」：overlay() 每帧重建
+    // 整段字符串，Text 因此每帧对整段正在流式的段落重新 layout + record（实测
+    // record(draw) 随块从 2k 涨到 8k 字由 8ms 爬到 18ms，整个流式期间约 93% 的帧
+    // 超预算）。上游 1.14 把 fade 引擎换成 forEachActive + 遮罩后，合并只落下了
+    // 引擎（否则调用点编译不过），MdText 这一侧仍是 overlay()，逐帧重建又回来了。
+    //
+    // 层序是这套做法的全部要点：外层 graphicsLayer 拥有逐帧的遮罩重录，内层
+    // graphicsLayer 持有文字且在整个 fade 期间不再重录。在 drawWithContent 里读
+    // controller 的 snapshot state 只让外层失效 —— 不重组、不重新 layout。
+    val fadeMaskColor = ChatColors.background
+    val fadeMaskModifier = if (fadeController != null) {
+        Modifier
+            .graphicsLayer()
+            .drawWithContent {
+                drawContent()
+                val result = layoutResult ?: return@drawWithContent
+                val maxOffset = result.layoutInput.text.length
+                fadeController.forEachActive { start, end, alpha ->
+                    if (alpha >= 1f) return@forEachActive
+                    val e = end.coerceAtMost(maxOffset)
+                    if (e <= start) return@forEachActive
+                    drawPath(result.getPathForRange(start, e), color = fadeMaskColor.copy(alpha = 1f - alpha))
+                }
+            }
+            .graphicsLayer()
+    } else Modifier
     val tapModifier = if (hasUrlAnnotation || hasInlineCodeAnnotation) {
         Modifier.pointerInput(text) {
             detectTapGestures { pos ->
@@ -162,7 +238,7 @@ internal fun MdText(
         }
     } else Modifier
     Text(
-        text = effectiveText,
+        text = text,
         fontSize = fontSize,
         lineHeight = lineHeight,
         fontWeight = fontWeight,
@@ -170,6 +246,9 @@ internal fun MdText(
         maxLines = maxLines,
         overflow = overflow,
         inlineContent = inlineContent,
+        // [T-android-table-column-align] null keeps the previous behaviour for
+        // every non-table caller (Text defaults to TextAlign.Unspecified).
+        textAlign = textAlign,
         onTextLayout = { result ->
             layoutResult = result
             if (translateInk != null && translateToken >= 0) {
@@ -177,6 +256,7 @@ internal fun MdText(
             }
         },
         modifier = modifier
+            .then(fadeMaskModifier)
             .then(translateModifier)
             .then(tapModifier)
             .onGloballyPositioned { layoutCoordinatesHolder[0] = it }

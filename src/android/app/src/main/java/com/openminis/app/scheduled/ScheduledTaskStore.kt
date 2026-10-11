@@ -36,8 +36,15 @@ class ScheduledTaskStore(private val context: Context) {
 
     fun get(taskId: String): ScheduledTask? = all().firstOrNull { it.id == taskId }
 
-    private val lock = Any()
-
+    // [T-android-scheduled-fire-claim] Every write is a read-modify-write of
+    // the WHOLE list, and writers run on several threads (the alarm receiver,
+    // a run's completion on IO, the task screens, the CLI). Unserialised, two
+    // writes that overlap lose one of them — a count or anchor that just moved
+    // silently moves back, and an interval then overshoots its --count.
+    // The write below is commit(), i.e. synchronous: the in-memory map is
+    // updated before it returns, so the next read under the lock already sees
+    // the previous write (and the file is durable, so a crash cannot resurrect
+    // a row a delete just removed).
     fun upsert(task: ScheduledTask) {
         mutate { cur ->
             cur.removeAll { it.id == task.id }
@@ -45,6 +52,13 @@ class ScheduledTaskStore(private val context: Context) {
         }
     }
 
+    /**
+     * Removes the row and reports whether it is *actually* gone afterwards.
+     * [T-android-scheduled-fire-claim] The post-check makes the success signal
+     * truthful: callers (the CLI's `cron rm`, the task screen) branch on the
+     * return value, and a write that silently failed must not look like a
+     * successful delete.
+     */
     fun delete(taskId: String): Boolean {
         var removed = false
         mutate { cur ->
@@ -61,8 +75,30 @@ class ScheduledTaskStore(private val context: Context) {
         return tasks.filter { it.id.startsWith(idOrPrefix) }.singleOrNull()?.id
     }
 
+    /**
+     * [T-android-scheduled-fire-claim] Atomic read-modify-write of one row:
+     * [transform] sees the row as stored right now and returns its new value,
+     * or null to leave it unchanged. Returns what was written (null when the
+     * row is missing or nothing was written).
+     */
+    fun update(taskId: String, transform: (ScheduledTask) -> ScheduledTask?): ScheduledTask? = synchronized(LOCK) {
+        val tasks = all()
+        val cur = tasks.firstOrNull { it.id == taskId } ?: return null
+        val next = transform(cur) ?: return null
+        write(tasks.map { if (it.id == taskId) next else it })
+        next
+    }
+
+    /**
+     * [T-android-scheduled-fire-claim] Serialised read-modify-write used by
+     * every whole-list mutation above. The lock is process-wide ([LOCK], not a
+     * per-instance field): stores are constructed per call site — the provider
+     * repository, the session list, the manager, the CLI tools — and they all
+     * mutate the same prefs file, so a per-instance monitor would not exclude
+     * anything.
+     */
     private fun mutate(block: (MutableList<ScheduledTask>) -> Unit) {
-        synchronized(lock) {
+        synchronized(LOCK) {
             val cur = all().toMutableList()
             block(cur)
             write(cur)
@@ -117,6 +153,9 @@ class ScheduledTaskStore(private val context: Context) {
 
     companion object {
         private const val TAG = "ScheduledTaskStore"
+
+        /** Process-wide: stores are constructed per call site, the file is one. */
+        private val LOCK = Any()
         private const val PREFS_NAME = "minis_scheduled_tasks_prefs"
         private const val KEY_TASKS = "tasks_json"
     }

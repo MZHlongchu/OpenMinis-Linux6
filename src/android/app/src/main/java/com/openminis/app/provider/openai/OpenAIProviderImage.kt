@@ -30,7 +30,18 @@ internal fun OpenAIProvider.buildCodexImageBody(messages: List<LLMMessage>): JSO
             put("content", "Use the image generation tool to create: $prompt")
         }))
         put("store", false)
-        put("tools", JSONArray().put(JSONObject().put("type", "image_generation")))
+        // [T-codex-gpt-image25-android] (上游 1.14) 2.5 变体要在工具对象里自报
+        // 型号；gpt-image-2 保持裸 {type:image_generation}。
+        //
+        // 裸对象让后端挑默认型号，那正是 gpt-image-2 一直依赖的行为 —— 给它补
+        // 上 model 字段等于把一个当前属于后端的决定钉死，所以这里只做加法，那条
+        // 路径逐字节不变。镜像 CLIProxyAPI PR #5642。
+        //
+        // 拆分丢的是这一半：集合与路由门控在 OpenAIProvider.kt 里，写字段的
+        // 构造函数在 OpenAIProviderImage.kt 里，合并时只落了前者。
+        val imageTool = JSONObject().put("type", "image_generation")
+        if (model.id in OpenAIProvider.CODEX_IMAGE_25_MODEL_IDS) imageTool.put("model", model.id)
+        put("tools", JSONArray().put(imageTool))
         put("reasoning", JSONObject().put("effort", "low"))
         put("include", JSONArray())
         put("tool_choice", "auto")

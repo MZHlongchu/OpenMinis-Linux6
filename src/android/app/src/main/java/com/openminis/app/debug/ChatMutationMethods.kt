@@ -352,7 +352,13 @@ internal object ChatMutationMethods {
         // .launch(IO) — fire-and-forget. We can't observe a completion flow
         // (no isReverting flag), so after kicking it off we poll the marker
         // list briefly until the count drops by one (or timeout).
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+        // [T-u12-merge] 显式写 <Unit>：这里只是「等这次 revert 跑完」，
+        // HeadlessChatRunner.revertCompact 自己内部就 withContext(Main)，T 完全
+        // 由它推断。上游 1.14 那段被合并进来的 HeadlessChatRunner 一度丢了
+        // ChatViewModel 的 import（见那边 G1 的报错），revertCompact 的返回类型
+        // 随之推不出来，编译错误却落在本行的 withContext 上（Cannot infer type
+        // for this parameter）。参数写死后本文件不再依赖被调方的推断结果。
+        kotlinx.coroutines.withContext<Unit>(kotlinx.coroutines.Dispatchers.Main) {
             HeadlessChatRunner.revertCompact(context, sessionId)
         }
         var afterMarkers = app.chatRepository.dao.listCompactMarkers(sessionId)
@@ -382,14 +388,42 @@ internal object ChatMutationMethods {
         val app = app(context)
         app.chatRepository.dao.getSession(sessionId)
             ?: throw RPCException(-32602, "Session not found")
-        // Cancel any in-flight stream first so we don't leave a dangling job
-        // writing into a deleted session row.
-        HeadlessChatRunner.cancel(context, sessionId)
-        app.chatRepository.deleteSession(sessionId)
-        HeadlessChatRunner.forget(sessionId)
+        // [T-android-child-session-delete-storage] The funnel cancels the
+        // stream, drops rows/files/VM/badges for the session and every child.
+        val report = com.openminis.app.data.session.SessionDeleter.deleteTree(
+            context, app.chatRepository, sessionId, "rpc",
+        )
         return JSONObject().apply {
             put("sessionId", sessionId)
             put("deleted", true)
+            put("deletedSessionIds", org.json.JSONArray(report.deletedIds))
+            put("bytesFreed", report.bytesFreed)
+            put("jobsCancelled", report.jobsCancelled)
+        }
+    }
+
+    /** [T-agent-port-round3] Debug/e2e: run a scheduled agent-child task now. */
+    suspend fun runScheduledAgentChild(context: Context, params: JSONObject): JSONObject {
+        val sessionId = params.optString("sessionId", "").ifEmpty { throw RPCException(-32602, "Missing 'sessionId' param") }
+        val prompt = params.optString("prompt", "").ifEmpty { throw RPCException(-32602, "Missing 'prompt' param") }
+        val label = params.optString("label", "Agent child probe")
+        val app = app(context)
+        app.chatRepository.dao.getSession(sessionId) ?: throw RPCException(-32602, "Session not found")
+        val cal = java.util.Calendar.getInstance()
+        val task = com.openminis.app.scheduled.ScheduledTask(
+            label = label,
+            timeOfDayHour = cal.get(java.util.Calendar.HOUR_OF_DAY),
+            timeOfDayMinute = cal.get(java.util.Calendar.MINUTE),
+            repeatMode = com.openminis.app.scheduled.ScheduledRepeatMode.ONCE,
+            prompt = prompt,
+            targetMode = com.openminis.app.scheduled.ScheduledTargetMode.ChildOfCurrent(sessionId),
+            enabled = false,
+        )
+        com.openminis.app.scheduled.ScheduledTaskManager(app).create(task)
+        val childId = com.openminis.app.scheduled.ScheduledAgentRunner.run(app, task, waitForCompletion = false)
+        return JSONObject().apply {
+            put("taskId", task.id)
+            put("childSessionId", childId ?: JSONObject.NULL)
         }
     }
 

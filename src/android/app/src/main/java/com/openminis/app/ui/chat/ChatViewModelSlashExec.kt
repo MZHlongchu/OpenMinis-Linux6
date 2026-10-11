@@ -23,8 +23,20 @@ fun ChatViewModel.executeSlashCommand(cmd: SlashCommand, currentInput: String = 
     // they're a typing aid. Fill the composer with the literal slash
     // command; the user then taps Send and the model handles the skill via
     // the existing SKILL.md fragment injection in runAgentLoop.
-    if (cmd.isSkill) {
-        AppLogger.info(ChatViewModel.TAG, "[Slash] tap skill id=${cmd.id} title=${cmd.title} → composer fill only")
+    // [T-android-mcp-slash-dispatch] GH#372：MCP 行是 `isMcp = true` 的
+    // composer-fill 行（与 isSkill 有意分开的 flag，见 SlashCommand.isMcp 的 KDoc），
+    // 只看 isSkill 会让它掉进下面的 `when (cmd.id)`：四个内建 id 都不匹配 → 命中
+    // else 返回 ""，而调用方（ChatScreen 的 `setInputText(executeSlashCommand(…))`）
+    // 会把 "" 写回输入框 —— 用户看到菜单关闭、已输入的文字消失，日志里只有
+    // "[Slash] unrecognized id=mcp:<name> — no dispatch"。
+    // iOS 从 MCP 上线那天起就 gate 在 `cmd.isSkill || cmd.isMCP`（3c048b909）；
+    // Android 的 MCP 提交（04aed37a8，同一天）只加了 flag 与行，没加派发，isMcp
+    // 因此写了三个月没人读。分支体本来就是同一套 composer-fill 语义（前缀/光标/
+    // 关菜单），MCP 直接继承，无需另写一套。
+    if (cmd.isSkill || cmd.isMcp) {
+        // 报告是从 logcat 上诊断出来的：日志必须区分 mcp 与 skill。
+        val kind = if (cmd.isMcp) "mcp" else "skill"
+        AppLogger.info(ChatViewModel.TAG, "[Slash] tap $kind id=${cmd.id} title=${cmd.title} → composer fill only")
         savedInputBeforeSlash = null
         _showSlashMenu.value = false
         _slashMenuSelectedIndex.value = -1

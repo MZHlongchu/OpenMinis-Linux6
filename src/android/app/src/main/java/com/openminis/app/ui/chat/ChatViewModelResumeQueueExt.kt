@@ -80,7 +80,14 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
             try {
                 SessionConcurrencyManager.acquireSlot(activeSessionId)
                 AppLogger.debug(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob slot acquired")
-                SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+                // [T-a15-overlay-task-title] 上游 1.14 的五处 setActive 都带 sessionTitle：
+                // 悬浮胶囊按**任务名**而不是助手名标识这一条。合并拆文件时该实参丢了，
+                // tracker 的 upsertTask 收到 null，胶囊第一行只剩 Soul 名。
+                SessionActivityTracker.setActive(
+                    activeSessionId,
+                    onStop = { cancelStream() },
+                    sessionTitle = overlaySessionTitle(),
+                )
 
                 val activeFallbackStrategy = run {
                     val groupId = _selectedGroupId.value

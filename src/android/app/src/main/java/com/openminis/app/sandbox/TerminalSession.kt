@@ -25,7 +25,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Interactive PTY shell session backed by the Termux terminal emulator engine
- * (com.termux.terminal). Replaces the hand-rolled [PtyBridge] + TerminalEmulator
+ * (com.termux.terminal). Replaces the hand-rolled PtyBridge + TerminalEmulator
  * stack with industry-standard ANSI/CSI/OSC parsing, TUI compatibility, and
  * mature keyboard / text-selection handling.
  *
@@ -109,6 +109,18 @@ class TerminalSession(private val context: Context) {
     @Volatile private var cols: Int = DEFAULT_COLS
     @Volatile private var rows: Int = DEFAULT_ROWS
 
+    /** Session this PTY was started for; also what a seccomp retry restarts with. */
+    @Volatile private var activeSessionId: String? = null
+
+    /** [T-android-seccomp-selfheal / GH#186] Spawn time of the current PTY. */
+    @Volatile private var spawnedAtMs: Long = 0L
+
+    /** Whether the current PTY produced any screen output (retry precondition). */
+    @Volatile private var sawOutput: Boolean = false
+
+    /** [T-android-seccomp-selfheal / GH#186] Spend at most one retry per terminal. */
+    @Volatile private var useNoSeccomp: Boolean = false
+
     val isRunning: Boolean get() = _state.value == State.RUNNING
 
     // ──────────────────────────────────────────────
@@ -121,7 +133,7 @@ class TerminalSession(private val context: Context) {
      *
      * Termux [com.termux.terminal.TerminalSession] creates the PTY internally
      * from the supplied executable path and arguments — we pass PRoot as the
-     * executable with the same args the legacy [buildInteractiveCommand] built.
+     * executable with the same args the legacy buildInteractiveCommand built.
      */
     fun start(sessionId: String? = null, initialCols: Int = DEFAULT_COLS, initialRows: Int = DEFAULT_ROWS) {
         if (!scope.isActive) scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -145,9 +157,9 @@ class TerminalSession(private val context: Context) {
                 val rootfsManager = RootfsManager.getInstance(context)
                 val proot = rootfsManager.prootBinary.absolutePath
                 val filesDir = context.filesDir.absolutePath
-                // Refresh this chat's binds before reading the process-wide map,
-                // or the terminal inherits whichever session booted last.
-                sessionId?.let { ExecutionCoordinator.sessionBindMounts(it) }
+                activeSessionId = sessionId
+                spawnedAtMs = System.currentTimeMillis()
+                sawOutput = false
 
                 // Build PRoot arguments (mirrors legacy buildInteractiveCommand).
                 // Pass the proot binary path so it lands in argv[0] — critical
@@ -172,6 +184,11 @@ class TerminalSession(private val context: Context) {
                                 lastTranscriptLength = 0
                 _state.value = State.RUNNING
                 liveSessions.add(WeakReference(this@TerminalSession))
+                // [T-android-seccomp-selfheal / GH#186] A retry replaces the
+                // Termux session object while the same TerminalView is on screen;
+                // without re-attaching, the view keeps rendering the dead
+                // emulator (frozen screen) even though the new PTY is alive.
+                attachedView?.let { attachView(it) }
                 Log.i(TAG, "Termux PTY started: cols=$cols rows=$rows sessionId=$sessionId")
 
                 // If a session is active, cd into its workspace so the user lands
@@ -182,6 +199,14 @@ class TerminalSession(private val context: Context) {
                 }
                 val initCmd = (GuestLimits.interactivePrelude() + "cd /var/minis && clear\r").toByteArray()
                 session.write(initCmd, 0, initCmd.size)
+
+                // [T-android-terminal-banner] 上游那行"/var/minis 在这里是什么"
+                // 的提示，写在 `clear` 之后，所以它留在屏幕上而不是被清掉；
+                // 同时照上游把同样的字节投进 [outputBytes]（legacy delta 流）。
+                // Termux 引擎的 TerminalView 只认 PTY 里的字节，所以两条路都走。
+                val bannerBytes = banner(sessionId).toByteArray()
+                session.write(bannerBytes, 0, bannerBytes.size)
+                _outputBytes.emit(bannerBytes)
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to start Termux PTY session", t)
                 _outputBytes.emit("Error: ${t.message}\r\n".toByteArray())
@@ -384,6 +409,30 @@ class TerminalSession(private val context: Context) {
     }
 
     /**
+     * One-line notice of what `/var/minis` means in this terminal. A chat's
+     * terminal shares that chat's workspace with its agent; the global one
+     * belongs to no chat, and saying so up front prevents "I saved it in the
+     * terminal and the agent can't see it".
+     *
+     * [T-android-terminal-banner] Upstream 1.14 的原文，逐字保留（含 `\u001b[2m`
+     * 暗色与 `\r\n`）：`TerminalSessionTest` 之外，SessionIsolationTest 的
+     * `the terminal mounts its chat's dirs and says which files it sees` 用它钉住
+     * "终端要讲清楚自己看见哪些文件"。本移植把终端换成 Termux 引擎
+     * （[buildTermuxArgs]）时把这段提示整段丢了——chat 的终端仍然挂的是那个
+     * chat 的目录（见 buildTermuxArgs 里的
+     * [ExecutionCoordinator.sessionBindMounts]），但用户再也看不到任何说明。
+     */
+    private fun banner(sessionId: String?): String =
+        if (sessionId != null) {
+            "\u001b[2m[Minis] /var/minis/{workspace,attachments,offloads,browser} are this chat's " +
+                "(session ${sessionId.take(8)}) — the agent in that chat sees the same files.\u001b[0m\r\n"
+        } else {
+            "\u001b[2m[Minis] Global terminal — not tied to any chat. /var/minis/workspace here is NOT " +
+                "any chat's workspace; open the terminal from a chat's menu to work in its files. " +
+                "Shared: /var/minis/{shared,memory,skills}.\u001b[0m\r\n"
+        }
+
+    /**
      * Build the PRoot argument list for Termux TerminalSession.
      *
      * IMPORTANT: argv[0] must be the program name (the proot binary itself).
@@ -413,12 +462,32 @@ class TerminalSession(private val context: Context) {
         args.add("-b"); args.add("/sys")
         args.add("-w"); args.add("/root")
 
-        // Bind mounts — global + per-session overlay.
-        // Keep OpenMinis-Linux bind mounts (PRootKernel.bindMounts already
-        // includes /var/minis workspace). Do not overlay RikkaMinis minis-sessions/.
-        for ((linuxPath, hostPath) in PRootKernel.bindMounts) {
+        // Bind mounts — the global table plus THIS session's own `/var/minis` set.
+        // [T-android-session-private-mounts] The per-session dirs are no longer
+        // published into the process-wide PRootKernel.bindMounts (that table is
+        // last-writer-wins: whichever chat built a shell last decided what
+        // `/var/minis/workspace` meant for every reader, so the terminal used to
+        // show a random chat's files). A chat's terminal therefore asks the same
+        // builder the agent's shell uses, which also carries the external
+        // (SAF-picked) mounts and the shared-storage binds. The global (no
+        // session) terminal keeps reading the global table.
+        val merged = LinkedHashMap<String, String>(PRootKernel.bindMounts)
+        if (sessionId != null) {
+            for ((linuxPath, hostPath) in ExecutionCoordinator.sessionBindMounts(sessionId)) {
+                merged[linuxPath] = hostPath
+            }
+        }
+        for ((linuxPath, hostPath) in merged) {
             args.add("-b"); args.add("$hostPath:$linuxPath")
         }
+
+        // [T-android-fake-netlink-tty-parity] Same rtnetlink emulation the
+        // agent's shell gets — see PRootKernel.buildProotCommand, which is the
+        // authoritative copy of this rationale. The two ways into the sandbox
+        // must not disagree: a tool run by the agent saw an (empty) interface
+        // list while the SAME tool typed into this terminal hit the real
+        // AF_NETLINK refusal from Android's untrusted_app SELinux domain.
+        args.add("--fake-netlink")
 
         // Native offload socket.
         val handlers = NativeOffloadServer.registeredHandlers
@@ -460,6 +529,11 @@ class TerminalSession(private val context: Context) {
         envMap["LANG"] = "C.UTF-8"
         envMap["LC_ALL"] = "C.UTF-8"
         envMap["TZ"] = PRootKernel.guestTz()
+        // [T-android-seccomp-selfheal / GH#186] Set only for the one retry after
+        // the terminal died on an early fatal signal with no output.
+        if (useNoSeccomp) {
+            envMap[SeccompFallbackPolicy.NO_SECCOMP_ENV] = SeccompFallbackPolicy.NO_SECCOMP_VALUE
+        }
         for ((k, v) in PRootKernel.customEnvironment) envMap[k] = v
         ExecutionCoordinator.envVarRepository?.allAsDict()?.forEach { (k, v) -> envMap[k] = v }
         return envMap.map { (k, v) -> "$k=$v" }
@@ -480,6 +554,9 @@ class TerminalSession(private val context: Context) {
      */
     private inner class TermuxSessionClient : TerminalSessionClient {
         override fun onTextChanged(changedSession: com.termux.terminal.TerminalSession) {
+            // [T-android-seccomp-selfheal / GH#186] Any screen output means the
+            // guest got past dynamic linking, which is the retry precondition.
+            sawOutput = true
             // CRITICAL: this callback is what drives the TerminalView to
             // redraw when the PTY emits bytes. Termux 0.118.0's own
             // TermuxTerminalSessionClient.onTextChanged() calls
@@ -510,7 +587,37 @@ class TerminalSession(private val context: Context) {
         override fun onSessionFinished(
             changedSession: com.termux.terminal.TerminalSession,
         ) {
-            Log.i(TAG, "Termux session finished (exit=${changedSession.exitStatus})")
+            val status = changedSession.exitStatus
+            Log.i(TAG, "Termux session finished (exit=$status)")
+            // [T-android-seccomp-selfheal / GH#186] The agent's PersistentShell,
+            // ShellExecutor and FreshProcessShell all retry once with
+            // PROOT_NO_SECCOMP=1 when a proot child dies on an early fatal
+            // signal with no output; the interactive terminal had no such
+            // self-heal, so on an affected device it died on every open and the
+            // user had no terminal at all. Same narrow gate (SeccompFallbackPolicy):
+            // a normal exit, a timeout or a user Stop never qualifies, and at
+            // most one retry is spent per terminal.
+            val normalized = if (status < 0) 128 - status else status
+            val aliveMs = System.currentTimeMillis() - spawnedAtMs
+            if (SeccompFallbackPolicy.shouldRetryWithoutSeccomp(
+                    exitCode = normalized,
+                    durationMs = aliveMs,
+                    producedOutput = sawOutput,
+                    alreadyRetried = useNoSeccomp,
+                )
+            ) {
+                com.openminis.app.logging.AppLogger.warning(
+                    TAG,
+                    SeccompFallbackPolicy.retryLogLine(normalized, aliveMs, "interactive terminal"),
+                )
+                useNoSeccomp = true
+                // start() early-returns while RUNNING, and the finished session
+                // must not stay in liveSessions (it is re-registered below).
+                _state.value = State.IDLE
+                liveSessions.removeAll { it.get() === this@TerminalSession }
+                start(activeSessionId, cols, rows)
+                return
+            }
             _state.value = State.STOPPED
         }
         override fun onBell(session: com.termux.terminal.TerminalSession) {}

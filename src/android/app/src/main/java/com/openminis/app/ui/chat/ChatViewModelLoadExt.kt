@@ -201,6 +201,12 @@ internal fun ChatViewModel.loadSession() {
             var totalPartsChars = 0L
             for (entity in windowRows) {
                 totalPartsChars += entity.partsJson.length
+                // [T-android-error-persist-current-turn] 上游 1.14 ChatViewModel.kt:6374-6377
+                // 在这里有一条守卫：错误载体（空 assistant 行 + errorInfo）是纯 UI 行，
+                // 合并时被丢了。它必须留在库里给横幅/Retry 用，但绝不能进模型请求。
+                if (com.openminis.app.data.repository.ChatRepository
+                        .isEmptyAssistantCarrier(entity.role, entity.partsJson)
+                ) continue
                 llm.add(entity.toLLMMessage())
             }
             com.openminis.app.diagnostics.PerfLongCtx.step(
@@ -501,6 +507,12 @@ internal fun ChatViewModel.loadSession() {
                     .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
             }
             refreshContextUsage()
+            // [T-ctx-overflow-attribute-dispatch] 上游在 loadSession 里按本会话的
+            // 持久化 usage 行重新播种校准，并清掉上一次派发的记录
+            // （ChatViewModel.kt:6504 `seedContextCalibration(chatRepository
+            // .sessionTokenUsages(...))`）。放在开门之前：门一开，等在
+            // [sessionLoaded] 上的那次发送就会用这条校准比去判断上下文压力。
+            seedContextCalibrationFromUsageRows(chatRepository.sessionTokenUsages(sid))
             restoreQueuedPromptsFromDisk(sid) // [T-queue-disk-persistence]
             replaySafeDanglingToolCalls() // [T-recovery-layer]
             // [T-p2-checkpoint-restore-warmup] checkpoint 的磁盘恢复是懒加载：首个

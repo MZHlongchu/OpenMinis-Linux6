@@ -148,6 +148,31 @@ class OpenAIProvider private constructor(
     var thinkingRuleInstanceId: String? = null
 
     /**
+     * [T-android-model-custom-params] Per-model user overrides for this
+     * request: temperature / top_p / custom headers / extra body params.
+     *
+     * A post-construction `var` set by ProviderFactory, matching how
+     * [thinkingRuleInstanceId] and [sessionId] are wired — the private primary
+     * constructor is shared by a dozen call sites and several secondary
+     * constructors, so threading a new parameter through all of them would be a
+     * far larger change for no gain.
+     *
+     * Deliberately SEPARATE from [chatExtraBody] / [chatExtraHeaders], rather
+     * than reusing them: those are per-CALL passthrough owned by
+     * ModelUseOffloadHandler, which assigns them on a freshly built provider.
+     * Folding per-model settings into the same fields would mean one silently
+     * clobbering the other depending on call order. Keeping them apart also
+     * fixes the precedence deliberately — the merge lives in
+     * `OpenAIRequestBodies.mergeModelOverridesBody` (this移植把请求体构造整体
+     * 搬到了那个文件，合并逻辑必须跟着走，否则本字段只有写入点、没有读取点),
+     * where it runs BEFORE the per-call `extra_body` merge so an explicit
+     * passthrough still wins on the same key.
+     *
+     * null = no overrides (the default for every caller that does not set it).
+     */
+    var modelOverrides: com.openminis.app.data.model.ModelOverrides? = null
+
+    /**
      * [T-android-xai-priority] Whether this provider speaks xAI's Priority
      * Processing extension, i.e. whether it is eligible to carry
      * `service_tier: "priority"` when the user's global Fast Mode is on.
@@ -217,12 +242,71 @@ class OpenAIProvider private constructor(
 
     companion object {
         /**
+         * [T-codex-gpt-image25-android] The 2.5 image variants, which name
+         * themselves inside the image_generation tool object.
+         *
+         * Separate from [CODEX_IMAGE_MODEL_IDS] because the two questions are
+         * different: that one asks "does this route through the Codex image
+         * path", this one asks "does the tool object need an explicit model".
+         * gpt-image-2 answers yes to the first and no to the second.
+         *
+         * [T-codex-gpt-image25-android] `internal` 而非 `private`：body 构造在
+         * 拆分后的 OpenAIProviderImage.kt 里（上游同在一个文件内），可见性必须
+         * 放开，否则该集合只剩 [CODEX_IMAGE_MODEL_IDS] 一个读者，工具对象里的
+         * `model` 字段（2.5 变体自报型号的唯一途径）永远不会被写上。
+         */
+        internal val CODEX_IMAGE_25_MODEL_IDS = setOf(
+            "gpt-image-2.5-sunburst",
+            "gpt-image-2.5-flare",
+        )
+
+        /**
+         * [T-codex-gpt-image2-oauth-android] Every model that goes through the
+         * Codex OAuth image_generation path rather than the ordinary
+         * Chat Completions / Responses APIs. Must stay in step with the entries
+         * OpenAIModelsApi appends after enrichModels.
+         */
+        private val CODEX_IMAGE_MODEL_IDS = setOf("gpt-image-2") + CODEX_IMAGE_25_MODEL_IDS
+
+        /**
          * [T-android-thinking-level-arch] Codex OAuth client version advertised
          * in the Version / User-Agent headers. Bumped 0.142.3 → 0.144.1 to
          * match the CLIProxyAPI/sub2api upstream (fixes a gpt-5.6-luna 404 seen
          * on the older client). Shared constant so future bumps touch one place.
+         *
+         * [T-gpt6-astra] 0.144.1 → 0.153.3. OpenAI gates models on the
+         * advertised client version: gpt-6-astra's `minimal_client_version`
+         * is 0.153.0, and an older client gets a 400 or an empty reply for it.
+         * Tracks CLIProxyAPI c77b1369, which moved its default to 0.153.3.
+         * Only the number changes; the UA shape below is unchanged.
          */
-        private const val CODEX_CLIENT_VERSION = "0.144.1"
+        /**
+         * [T-codex-dynamic-discovery GH#319] `internal`, not `private`: model
+         * DISCOVERY must advertise the same client version as inference.
+         * OpenAI gates model availability on this number, so if the two ever
+         * drifted the picker could list a model that every send then refuses.
+         * Sharing the one constant makes that drift unrepresentable.
+         *
+         * GH#319 asked us to re-check whether a newer version is required, and
+         * the check was run rather than assumed: on a live ChatGPT account at
+         * 0.153.3, discovery returned gpt-6-astra / gpt-5.6-{sol,terra,luna} /
+         * gpt-5.5, and gpt-6-astra and gpt-5.6-luna both completed a real
+         * inference request (2026-09-11). At that point Codex CLI stable was
+         * 0.154.0 and bumping would have changed a validated fingerprint with
+         * no evidence behind it, so it was left alone — with the note that the
+         * signal to revisit is "a discovered model is listed and then refused".
+         *
+         * [T-gpt6-sol-luna] 0.153.3 → 0.155.0. That signal arrived: gpt-6-sol
+         * and gpt-6-luna are gated above 0.153.3, and CLIProxyAPI moved its
+         * default codex client to 0.155.0 in the same commit that added these
+         * two ids to its registry (2430354330af). The gate is a floor, so the
+         * models that were verified callable at 0.153.3 stay callable.
+         *
+         * NOT verified against a live account here — this session has no Codex
+         * OAuth token to probe with. If gpt-6-astra or a gpt-5.6-* model starts
+         * failing after this bump, this constant is the first thing to suspect.
+         */
+        internal const val CODEX_CLIENT_VERSION = "0.155.0"
 
         /**
          * Factory for OAuth-bearer OpenAI-compatible providers that aren't
@@ -239,12 +323,21 @@ class OpenAIProvider private constructor(
             oauthTokenProvider: suspend () -> String,
             model: LLMModel,
             basePath: String,
+            /**
+             * [T-copilot-provider] Static headers added to every request.
+             * Copilot needs a fixed editor-identity set (Editor-Version,
+             * Copilot-Integration-Id, …) alongside the bearer; without them
+             * the API refuses the request. Defaulted empty so existing
+             * callers (xAI, Kimi) are unchanged.
+             */
+            extraHeaders: Map<String, String> = emptyMap(),
         ): OpenAIProvider = OpenAIProvider(
             apiKey = null,
             oauthTokenProvider = oauthTokenProvider,
             model = model,
             basePath = basePath,
             forceChatCompletions = true,
+            extraHeaders = extraHeaders,
         )
     }
 
@@ -320,6 +413,52 @@ class OpenAIProvider private constructor(
      * Mirrors iOS OpenAIProvider.extraHeaders (promoted to all endpoints).
      */
     var chatExtraHeaders: Map<String, String> = emptyMap()
+
+    // MARK: - Per-request headers [T-android-copilot-per-request-headers]
+
+    /**
+     * Headers DERIVED from the outgoing body, applied to every chat/responses
+     * request. Null (the default) for every provider that does not need them.
+     *
+     * Exists because some headers are only correct per request and are wrong
+     * the moment they are pinned at construction. GitHub Copilot is the case
+     * that forced it: `X-Initiator` must say `agent` when the loop is feeding
+     * tool results back and `user` when a person typed, and
+     * `Copilot-Vision-Request` must be set only when images are actually
+     * attached. Both were fixed at build time to `user` / absent, so every
+     * agent turn was labelled as human traffic — which is the specific thing
+     * that gets a Copilot account flagged — and `X-Request-Id` repeated one
+     * UUID for the whole life of the provider instead of identifying a request.
+     *
+     * A lambda rather than a subclass hook, so the shared request builder stays
+     * free of provider-specific branching; the same reason iOS keeps it a
+     * closure. Applied in [buildRequest], which is the single choke point every
+     * chat and responses call already passes through.
+     */
+    var perRequestHeaders: ((org.json.JSONObject) -> Map<String, String>)? = null
+
+    /**
+     * [T-android-opencode-session-header] Id of the conversation this provider
+     * is serving, used only to derive OpenCode Go's `x-opencode-session`
+     * header (see [com.openminis.app.provider.OpenCodeSessionHeader]).
+     *
+     * A `var` read at request time rather than a constructor value, because a
+     * provider outlives the event this id changes on: a brand-new chat builds
+     * its provider while still a draft (`ChatViewModel.loadSession`), and the
+     * real UUID only exists once `ensureSession()` persists the row on the
+     * first send. Capturing at construction would leave that first turn — the
+     * one that opens the upstream cache entry — without the header, and the
+     * turn after it with one, which is precisely the instability OpenCode
+     * asks clients to avoid. Reading late means the promotion is picked up
+     * with no provider rebuild.
+     *
+     * Written from the chat ViewModel's main-thread flow and read on the
+     * request-building coroutine; `@Volatile` publishes that hand-off. Only
+     * ever a whole-reference assignment, so no further synchronisation is
+     * needed.
+     */
+    @Volatile
+    var sessionId: String? = null
 
     /**
      * Absolute-path endpoint override. When set (must start with "/"), it
@@ -464,8 +603,19 @@ class OpenAIProvider private constructor(
      * image_generation tool (wire model gpt-5.5, tools=[{type:image_generation}]).
      * Only meaningful on the Codex OAuth path; everything else (the GPT-5.x
      * Codex models and their existing OAuth flow) is untouched by this gate.
+     *
+     * [T-codex-gpt-image25-android] The 2.5 variants route identically — the
+     * only difference is that they name themselves inside the tool object
+     * (see [buildCodexImageBody]). Membership lives in
+     * [CODEX_IMAGE_MODEL_IDS] so the routing gate and the body builder cannot
+     * disagree about which ids are image models: a model listed in the picker
+     * but missing from this gate would silently take the ordinary Responses
+     * path and fail as an unknown model.
      */
-    internal val isCodexImageModel: Boolean get() = isOAuth && model.id == "gpt-image-2"
+    // [T-codex-gpt-image25-android] (上游 1.14) 改用集合常量而不是硬编码单个 id：
+    // 路由门与 Codex image body builder 共用 [CODEX_IMAGE_MODEL_IDS]，两边不会
+    // 各自漂移；保留我们的 internal 可见性（同包与测试可见）。
+    internal val isCodexImageModel: Boolean get() = isOAuth && model.id in CODEX_IMAGE_MODEL_IDS
 
     private suspend fun getToken(): String {
         oauthTokenProvider?.let { return it() }
@@ -575,6 +725,25 @@ class OpenAIProvider private constructor(
     private val isMistral: Boolean = basePath.lowercase().contains("mistral.ai")
 
     /**
+     * [T-android-cerebras-reasoning-400] Talking to Cerebras' inference API
+     * (OpenMinis#361). Mirrors iOS OpenAIProvider.isCerebras.
+     *
+     * Cerebras validates strictly in two ways that both bite us:
+     *  - its assistant message is a CLOSED schema, exactly like Mistral's, so
+     *    echoing a captured `reasoning_content` in history answers
+     *    `400 … property 'messages.N.assistant.reasoning_content' is unsupported`
+     *    — turn 1 succeeds and every turn after it fails;
+     *  - it re-hosts Qwen-named models (`qwen-3.8-27b`) that would otherwise
+     *    match the `*qwen*` thinking rule and be handed Qwen's native
+     *    `enable_thinking`, which Cerebras does not accept. Their documented
+     *    control is root `reasoning_effort`.
+     *
+     * Same known limit as [isMistral]: a relay under its own hostname is not
+     * detected, which fails safe — the request goes out as it does today.
+     */
+    private val isCerebras: Boolean = basePath.lowercase().contains("cerebras.ai")
+
+    /**
      * [OpenMinis#163] Talking to xAI's own API (api.x.ai), as opposed to a relay
      * that merely serves grok-named models. Mirrors iOS OpenAIProvider.isXAI.
      *
@@ -669,6 +838,16 @@ class OpenAIProvider private constructor(
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
     ): LLMResponse = withContext(Dispatchers.IO) {
+        // [T-A5-ceiling-at-the-wire] 思考天花板落在 provider 自己的请求入口。
+        //
+        // 公共入口 LLMProvider.sendMessage/streamMessage 已经按模型天花板夹过一次
+        // （[T-android-thinking-level-arch]），这里再夹一次是幂等的：对生产路径零
+        // 影响，但它保住了那条设计承诺 —— "任何代码路径都不可能发出超范围的天花板"
+        // —— 对**直接调用 *Clamped 的调用方**（Golden snapshot 等）成立。此前这道
+        // 保险写在 injectThinkingParams 里，等于让注入层替调用方改主意，而它同时
+        // 改掉了 OpenAI 原生分支的语义（原生分支按请求原样下发，声明集只约束通用
+        // 分支，见 OpenAIFamilyGatesTest）。夹在这里，两个契约同时成立。
+        val level = clampThinkingLevel(thinkingLevel)
         val textBuf = StringBuilder()
         var stopReason: String? = null
         var usage: LLMUsage? = null
@@ -684,7 +863,7 @@ class OpenAIProvider private constructor(
             temperature = temperature,
             imageParts = imageParts,
             tools = tools,
-            thinkingLevel = thinkingLevel,
+            thinkingLevel = level,
             // [T-android-sendmessage-stream-true] 这里必须是流式请求 —— 正是本方法
             // KDoc 承诺的 "we always issue a streaming request internally"。回归
             // 2f45981d 把它改成 stream=false，代价是：Codex OAuth 后端（同一后端的
@@ -718,7 +897,10 @@ class OpenAIProvider private constructor(
         thinkingLevel: ThinkingLevel,
         systemStablePrefixLen: Int,
     ): Flow<LLMStreamChunk> = rawStreamMessage(
-        messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel,
+        // [T-A5-ceiling-at-the-wire] 见 sendMessageClamped 的说明：天花板夹在
+        // provider 的请求入口，幂等，且保住「任何路径都发不出超范围层级」。
+        messages, systemPrompt, maxTokens, temperature, imageParts, tools,
+        clampThinkingLevel(thinkingLevel),
         stream = true,
     ).failOnSilentEmptyCompletion(name)
 
@@ -1675,6 +1857,16 @@ class OpenAIProvider private constructor(
         override val isOAuth get() = this@OpenAIProvider.isOAuth
         override val chatExtraBody get() = this@OpenAIProvider.chatExtraBody
         override val chatExtraHeaders get() = this@OpenAIProvider.chatExtraHeaders
+        // [T-android-model-custom-params] (上游 1.14) 端口转发，请求体侧据此合并
+        // 条目覆盖。此前该 var 只有写入点（ProviderFactory / ModelUseOffloadHandler）
+        // 而没有读取点，用户设置静默失效。
+        override val modelOverrides get() = this@OpenAIProvider.modelOverrides
+        // [T-android-copilot-per-request-headers] (上游 1.14) 端口转发，buildRequest
+        // 在发请求前用本次 body 现算派生头。
+        override val perRequestHeaders get() = this@OpenAIProvider.perRequestHeaders
+        // [T-android-opencode-session-header] (上游 1.14) 端口转发，buildRequest
+        // 按真实 requestUrl 现算 x-opencode-session。
+        override val sessionId get() = this@OpenAIProvider.sessionId
         override val absoluteEndpointOverride get() = this@OpenAIProvider.absoluteEndpointOverride
         override val isOpenRouter get() = this@OpenAIProvider.isOpenRouter
         override val needsOpenRouterAnthropicCacheControl get() =
@@ -1682,6 +1874,10 @@ class OpenAIProvider private constructor(
         override val isMistral get() = this@OpenAIProvider.isMistral
         override val isDashScope get() = this@OpenAIProvider.isDashScope
         override val isXAI get() = this@OpenAIProvider.isXAI
+        // [T-android-cerebras-reasoning-400] (上游 1.14) 端口转发。此前 isCerebras
+        // 只在 provider 上声明、无人读取，请求体侧两条门控（历史 reasoning_content
+        // 回显、qwen 命名模型的思考规则）因此全部失效。
+        override val isCerebras get() = this@OpenAIProvider.isCerebras
         override val usesUnifiedReasoningEffort get() = this@OpenAIProvider.usesUnifiedReasoningEffort
         override val thinkingRuleInstanceId get() = this@OpenAIProvider.thinkingRuleInstanceId
         override val isZenFree get() = this@OpenAIProvider.isZenFree

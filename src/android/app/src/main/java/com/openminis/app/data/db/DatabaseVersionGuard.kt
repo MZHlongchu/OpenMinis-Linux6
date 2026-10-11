@@ -58,7 +58,7 @@ object DatabaseVersionGuard {
      * treated the user's own database as "from a newer build" and blocked
      * opening. Keep this equal to `@Database(version=...)`.
      */
-    const val CODE_DB_VERSION = 22 // message_versions archive 21 -> 22
+    const val CODE_DB_VERSION = 23 // upstream 1.14: sessions.parent_session_id / parent_tool_use_id 22 -> 23
 
     /** Filename must match the one passed to `Room.databaseBuilder`. */
     private const val DB_NAME = "minis.db"
@@ -105,6 +105,12 @@ object DatabaseVersionGuard {
         return newer
     }
 
+    // [T-merge-1.14] 上游 1.14 在这里还提供过 `isHandledDowngrade(onDiskVersion)`，
+    // 用来放行「有已验证降级迁移」的版本跳变。本分支不采纳，理由见上面的
+    // [T-b11-no-downgrade-migrations]：降级迁移已全部删除，本构建的
+    // CODE_DB_VERSION 恒大于表里写死的 11/12 两个门槛，该函数对任何输入都返回
+    // false，且全仓库没有任何调用点——保留它只会让「降级可以被放行」这件事看起来
+    // 还有实现。真正生效的仍是下面 evaluate() 的默认拒绝。
     /** Result of the launch-time check. */
     enum class Decision {
         /** Normal path — open the database. */

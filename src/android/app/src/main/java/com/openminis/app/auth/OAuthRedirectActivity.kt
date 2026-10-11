@@ -24,7 +24,9 @@ class OAuthRedirectActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         val uri = intent?.data
-        Log.i(TAG, "OAuth redirect received")
+        // [T-android-oauth-log-redact, upstream 1.14] The redirect carries
+        // code + state, so only the masked form may reach the log.
+        Log.i(TAG, "OAuth redirect received: ${OAuthLogRedaction.url(uri?.toString())}")
 
         if (uri != null) {
             val code = uri.getQueryParameter("code")
@@ -37,7 +39,9 @@ class OAuthRedirectActivity : Activity() {
                     try {
                         val port = uri.port.takeIf { it > 0 } ?: 54545
                         val localUrl = "http://127.0.0.1:$port${uri.path}?${uri.query}"
-                        Log.d(TAG, "Forwarding OAuth callback to local server")
+                        // [T-android-oauth-log-redact, upstream 1.14] localUrl
+                        // carries the same code/state query.
+                        Log.d(TAG, "Forwarding to local server: ${OAuthLogRedaction.url(localUrl)}")
                         val conn = java.net.URL(localUrl).openConnection() as java.net.HttpURLConnection
                         conn.connectTimeout = 5000
                         conn.readTimeout = 5000

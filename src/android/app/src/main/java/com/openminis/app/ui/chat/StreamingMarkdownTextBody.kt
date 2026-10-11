@@ -61,15 +61,28 @@ internal fun StreamingMarkdownTextBody(
             // LocalAppendOnlyFade=true so MdText fades in newly-appended
             // word ranges (mirrors iOS TextFadeAnimator). Every other block
             // — completed prefix, non-streaming sessions — renders opaque.
+            // [T-android-stream-fade-seed] Every block goes through the SAME
+            // composable shape while streaming — a provider whose VALUE says
+            // whether it is the live tail — rather than an if/else that wraps
+            // only the last block. The two branches were different groups, so
+            // whenever `lastIdx` shifted (a trailing block re-parsed away, the
+            // list before it became last) Compose disposed and rebuilt the
+            // whole subtree: every MdText lost its fade controller and its
+            // already-visible text re-faded from alpha 0. Gated on isStreaming
+            // so frozen history composes exactly as before.
+            //
+            // [T-merge-upstream-1-14-stream-fade-seed] 上游 1.14 的
+            // StreamingMarkdownText.kt:815-837 就是这一段；合并把本文件留在了
+            // 「只包最后一块」的旧形状（if/else），等于把上游修掉的回归装回来。
             val lastIdx = blocks.size - 1
-            blocks.forEachIndexed { idx, block ->
-                if (isStreaming && idx == lastIdx) {
+            if (isStreaming) {
+                blocks.forEachIndexed { idx, block ->
                     androidx.compose.runtime.CompositionLocalProvider(
-                        LocalAppendOnlyFade provides true,
+                        LocalAppendOnlyFade provides (idx == lastIdx),
                     ) { RenderBlock(block) }
-                } else {
-                    RenderBlock(block)
                 }
+            } else {
+                blocks.forEach { RenderBlock(it) }
             }
         }
     }

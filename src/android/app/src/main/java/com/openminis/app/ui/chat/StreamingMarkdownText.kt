@@ -75,6 +75,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -111,9 +112,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 import java.io.File
+import androidx.compose.material3.LocalTextStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.LineHeightStyle
 
 // ─── MinisTextKit hook ────────────────────────────────────────────────────────
 // Each markdown fragment renders inside a [MarkdownBlock] / [RenderBlock]
@@ -220,6 +226,23 @@ val LocalMarkdownFontScale = compositionLocalOf { 1f }
 
 /** Handler invoked when a markdown URL span is tapped. Provided by ChatScreen. */
 val LocalMarkdownUrlClickHandler = compositionLocalOf<((String) -> Unit)?> { null }
+
+/**
+ * [T-android-usage-capsule-blank-tap] Handler invoked when the user taps a
+ * BLANK part of an assistant text block — past the end of a line, in the
+ * ragged right margin, or below the last line. Receives the message id.
+ *
+ * This is how the usage capsule is revealed, mirroring iOS `onTapBlank`
+ * (SelectableMarkdownView.swift:5636): iOS hit-tests the tap against the
+ * glyph rects and treats a miss as "blank". Gating on a separate tap strip
+ * instead — as this did first — makes the capsule's own 32dp row the ONLY
+ * target, which is not discoverable: the user is told to tap the reply and
+ * nothing happens anywhere they naturally tap.
+ *
+ * Deliberately fires only on a genuine miss, so it can never swallow a URL
+ * tap, an inline-code copy, or the start of a text selection.
+ */
+val LocalMarkdownBlankTapHandler = compositionLocalOf<((String) -> Unit)?> { null }
 
 /**
  * [T-android-markdown-image-gallery-cross-message] Handler invoked when a
@@ -370,7 +393,11 @@ fun MarkdownDocument(
     var blocks by remember(content) { mutableStateOf<List<MdBlock>>(emptyList()) }
     LaunchedEffect(content) {
         val computed = withContext(Dispatchers.Default) {
-            parseMarkdownBlocks(content).also {
+            // [T-android-md-parse-gate] Static document: no incremental reuse
+            // to be had, but it must still queue behind the same gate so
+            // opening a large .md while sub-agents stream cannot stack another
+            // full-document parse on top of them.
+            markdownParseGate.withPermit { parseMarkdownBlocks(content) }.also {
                 MarkdownParseCaches.prewarm(it, mdColors)
             }
         }
@@ -392,7 +419,7 @@ fun MarkdownDocument(
     }
 }
 
-// ─── Block-level splitting (Pattern A: ChatGPT/Claude-style scroll stability) ─
+// ─── Block-level splitting (Pattern A: stable scroll while streaming) ─────────
 //
 // Earlier the entire streaming markdown was rendered inside a single
 // LazyColumn item. When that item's height grew mid-stream, LazyList's
@@ -600,15 +627,35 @@ internal const val COLD_PARSE_PREVIEW_CHARS = 4_000
  * types) warm the exact keys RenderBlock will look up, off-main, before the
  * viewport rows first compose.
  */
+/**
+ * [T-android-md-parse-gate] Cold-scroll prewarmer.
+ *
+ * This is the path the Pixel 6 tombstone died on: ChatScreen launches it on
+ * `Dispatchers.Default` once per flatten tick per ChatViewModel, and each call
+ * runs `MarkdownParseCaches.blocks()` → `parseMarkdownBlocksBlocking` →
+ * `runBlocking { parseMarkdownBlocks(...) }` over up to 16 rows × 96 KB. With
+ * several sub-agent sessions flattening at once these stack up unbounded, one
+ * full ICU-matcher-allocating parse per core, until `operator new` throws
+ * `std::bad_alloc`.
+ *
+ * Made `suspend` so it can take the shared [markdownParseGate]: prewarming is
+ * pure look-ahead for scrolling, so it is exactly the work that should yield
+ * to a visible stream's parse rather than race it.
+ */
 @Composable
-internal fun rememberMarkdownPrewarmer(): (List<String>) -> Unit {
+internal fun rememberMarkdownPrewarmer(): suspend (List<String>) -> Unit {
     val mdColors = currentMdColors()
     return remember(mdColors) {
-        { raws: List<String> ->
+        val fn: suspend (List<String>) -> Unit = { raws ->
             for (raw in raws) {
-                MarkdownParseCaches.prewarm(MarkdownParseCaches.blocks(raw), mdColors)
+                markdownParseGate.withPermit {
+                    MarkdownParseCaches.prewarm(MarkdownParseCaches.blocks(raw), mdColors)
+                }
+                // Cooperative: a cancelled scroll must not keep prewarming.
+                coroutineContext.ensureActive()
             }
         }
+        fn
     }
 }
 
@@ -618,8 +665,281 @@ internal fun rememberMarkdownPrewarmer(): (List<String>) -> Unit {
  * the suspend version under a runBlocking on the calling thread — frozen
  * blocks parse once and the input is small, so this is fine.
  */
+// [T-u6-smt-merge] Upstream's indented-fence fix, adopted verbatim. Its call
+// site lives in the parser this port moved to StreamingMarkdownParse.kt (see
+// the leftover note for U6) — the function itself is unit-tested directly by
+// FencedCodeIndentTest, so it belongs in this file either way.
+/**
+ * [T-android-codeblock-fence-indent] A fenced code block's content, with the
+ * fence's own indentation removed from every line (CommonMark: a fence indented
+ * N spaces strips up to N spaces from each content line).
+ *
+ * The parser recognises an indented fence (it tests the trimmed line) but used
+ * to keep the content lines verbatim. Models put code blocks inside list items
+ * all the time —
+ *
+ *     - Install the dependencies:
+ *       ```bash
+ *       npm install
+ *       ```
+ *
+ * — so the copy button handed out "  npm install": two leading spaces under a
+ * bullet, three under "1.". iOS parses with cmark and strips them.
+ *
+ * Spaces only, and never more than the fence's indent: a line indented
+ * further keeps its extra indentation (it is part of the code), and a line
+ * indented less loses only what it has.
+ */
+internal fun fencedCodeContent(fenceLine: String, contentLines: List<String>): String {
+    val indent = fenceLine.length - fenceLine.trimStart(' ').length
+    if (indent == 0) return contentLines.joinToString("\n")
+    return contentLines.joinToString("\n") { line ->
+        var n = 0
+        while (n < indent && n < line.length && line[n] == ' ') n++
+        line.substring(n)
+    }
+}
+
 internal fun parseMarkdownBlocksBlocking(content: String): List<MdBlock> =
     kotlinx.coroutines.runBlocking { parseMarkdownBlocks(content) }
+
+// ─── [T-u6-smt-merge] Incremental block parse, adopted from upstream 1.14 ─────
+//
+// Upstream 1.14's answer to the O(n²) re-parse of a growing stream: keep the
+// blocks of the longest already-SEALED prefix and re-parse only the tail. The
+// port's own tree never had this (its incremental work covers the INLINE
+// layer — see MarkdownParseCaches.inlineIncremental), so the whole mechanism
+// comes across: the gate, the state, the boundary test and the two test hooks
+// (MarkdownIncrementalParseTest calls them directly).
+//
+// It calls the tree's existing `parseMarkdownBlocks` (StreamingMarkdownParse.kt)
+// rather than upstream's copy of it, so the block parser stays single-sourced.
+// Wiring it into StreamingMarkdownTextBody.kt is the remaining follow-up — see
+// the U6 leftover note.
+
+/**
+ * [T-android-md-parse-gate] One permit for the whole process, so N concurrent
+ * sub-agent streams cannot multiply peak native ICU allocation.
+ *
+ * A caller that is cancelled while waiting never runs its parse at all, which
+ * is exactly the desired behaviour for a superseded chunk.
+ */
+private val markdownParseGate = Semaphore(1)
+
+/**
+ * [T-android-md-parse-incremental] Longest already-parsed prefix of a growing
+ * stream, so an append-only update re-parses only the tail.
+ *
+ * Streaming content is append-only, and markdown block structure is
+ * prefix-stable up to the last blank-line boundary: everything before the
+ * final sealed boundary can no longer change no matter what arrives next (the
+ * parser never looks backwards past a blank line — each `when` branch consumes
+ * forward from its opening line). So we cache the blocks for that stable
+ * prefix and, on the next pass, parse only what follows it.
+ *
+ * The saving is what makes long streams survivable: without it, a 60 KB reply
+ * is re-parsed from byte 0 on every throttle tick — O(n²) native matcher
+ * allocations over the life of the stream. With it, each tick parses only the
+ * newly-arrived tail.
+ */
+private class IncrementalParseState {
+    var prefixLength: Int = 0
+    var prefixBlocks: List<MdBlock> = emptyList()
+
+    /**
+     * Cheap fingerprint of the frozen prefix, to detect that growth really was
+     * append-only (a retry / edit / shorter re-render must invalidate).
+     *
+     * Deliberately NOT the prefix text itself: holding a copy would retain a
+     * second full-size String per live composable and make the check O(n) on
+     * every tick — reintroducing exactly the memory and CPU pressure this
+     * change exists to remove. A length + hash of the boundary region is
+     * O(1)-ish and false-positives only if an edit preserved both.
+     */
+    var prefixHash: Int = 0
+}
+
+/** Fingerprint over the tail of [content] up to [end] (bounded work). */
+private fun prefixFingerprint(content: String, end: Int): Int {
+    if (end <= 0) return 0
+    val from = (end - 512).coerceAtLeast(0)
+    var h = end
+    for (i in from until end) h = h * 31 + content[i].code
+    return h
+}
+
+/**
+ * [T-android-md-parse-incremental] Test hook: the `raw` text of each block a
+ * parse produces. Lets a unit test assert that feeding a stream in chunks
+ * through [parseMarkdownIncremental] yields exactly the same block split as
+ * one full parse of the final text — the invariant the whole optimization
+ * rests on.
+ */
+internal fun debugParseBlockRaws(content: String): List<String> =
+    kotlinx.coroutines.runBlocking { parseMarkdownBlocks(content).map { it.raw } }
+
+/** Test hook: same, but replayed incrementally as the text grows. */
+internal fun debugParseIncrementalRaws(chunks: List<String>): List<String> =
+    kotlinx.coroutines.runBlocking {
+        val state = IncrementalParseState()
+        var last: List<MdBlock> = emptyList()
+        for (c in chunks) last = parseMarkdownIncremental(c, state)
+        last.map { it.raw }
+    }
+
+/**
+ * Offset of the end of the last "sealed" block boundary — the final blank line
+ * that is followed by more content. Returns [searchFrom] when nothing is
+ * sealed yet.
+ *
+ * Deliberately conservative: a fenced code block can contain blank lines, so
+ * an odd number of ``` fences before the candidate boundary means the boundary
+ * is inside a fence and is not safe to freeze. Same for `$$` display math.
+ */
+internal fun stableParsePrefixEnd(content: String, searchFrom: Int): Int {
+    var idx = content.lastIndexOf("\n\n")
+    while (idx >= searchFrom) {
+        val candidate = idx + 2
+        if (isSealedBoundary(content, candidate)) return candidate
+        if (idx == 0) break
+        idx = content.lastIndexOf("\n\n", idx - 1)
+    }
+    return searchFrom
+}
+
+/**
+ * True when [end] is not inside an open ``` fence, `$$` / `\[` display-math
+ * span, or a list that can still continue past the blank line.
+ * Counts delimiters that START a line, matching how [parseMarkdownBlocks]
+ * recognises them (it tests `trimmed.startsWith`).
+ *
+ * [T-android-md-sealed-boundary-lists] A blank line is only a safe freeze
+ * point if no block construct in [parseMarkdownBlocks] crosses it. Fences and
+ * `$$` were covered; two more constructs DO cross a blank line and were not:
+ *  - `\[ … \]` display math: its loop scans forward over blank lines to the
+ *    first line containing `\]`, so a blank line inside it is not a boundary.
+ *  - bullet / ordered lists: both list loops `continue` over blank lines and
+ *    keep consuming the next list item or indented line. A loose list or an
+ *    item with an indented continuation paragraph is ONE block in a full
+ *    parse; freezing at its blank line split it into several while streaming,
+ *    and the block re-laid out at the streaming -> frozen edge.
+ * Refusing costs only re-parse work; accepting wrongly changes the render.
+ */
+internal fun isSealedBoundary(content: String, end: Int): Boolean {
+    var fences = 0
+    var maths = 0
+    var bracketMathOpen = false
+    // Last non-blank line before [end] — a list only ever ends on a list item
+    // or an indented line, so this is what decides whether one is still open.
+    var lastNonBlankStart = -1
+    var lastNonBlankEnd = -1
+    var lineStart = 0
+    while (lineStart < end) {
+        var lineEnd = content.indexOf('\n', lineStart)
+        if (lineEnd < 0 || lineEnd > end) lineEnd = end
+        var p = lineStart
+        while (p < lineEnd && (content[p] == ' ' || content[p] == '\t')) p++
+        if (bracketMathOpen) {
+            // Mirrors the parser's `\[` loop: the first line containing `\]`
+            // anywhere closes the span.
+            if (content.indexOf("\\]", lineStart).let { it in lineStart until lineEnd }) {
+                bracketMathOpen = false
+            }
+        } else if (content.startsWith("\\[", p)) {
+            bracketMathOpen = content.indexOf("\\]", p + 2).let { it !in 0 until lineEnd }
+        }
+        if (content.startsWith("```", p)) fences++
+        else if (content.startsWith("$$", p)) {
+            // A single-line `$$ … $$` opens and closes on the same line.
+            maths += if (content.indexOf("$$", p + 2).let { it in 0 until lineEnd }) 0 else 1
+        }
+        if (p < lineEnd && content.substring(p, lineEnd).isNotBlank()) {
+            lastNonBlankStart = lineStart
+            lastNonBlankEnd = lineEnd
+        }
+        lineStart = lineEnd + 1
+    }
+    if (fences % 2 != 0 || maths % 2 != 0 || bracketMathOpen) return false
+    if (lastNonBlankStart < 0) return true
+    val prev = content.substring(lastNonBlankStart, lastNonBlankEnd)
+    if (!isListContinuationLine(prev)) return true
+    // A list is (possibly) open. The blank line is a boundary only if the
+    // next non-blank line is COMPLETE and would break the list — neither a
+    // list item nor indented. An unterminated line may still grow into one
+    // ("-" -> "- beta", "" -> "   more"), and no next line at all means the
+    // stream has not decided yet.
+    var q = end
+    while (q < content.length) {
+        val nl = content.indexOf('\n', q)
+        if (nl < 0) return false
+        val line = content.substring(q, nl)
+        if (line.isNotBlank()) return !isListContinuationLine(line)
+        q = nl + 1
+    }
+    return false
+}
+
+/**
+ * [T-android-md-sealed-boundary-lists] Whether [line] is something the list
+ * loops in [parseMarkdownBlocks] would keep consuming after a blank line: a
+ * list item, or any indented line (continuation / nested content).
+ */
+private fun isListContinuationLine(line: String): Boolean {
+    if (line.isEmpty()) return false
+    if (line[0] == ' ' || line[0] == '\t') return true
+    return line.matches(bulletListItemRegex) || line.matches(numberedListItemRegex) ||
+        line.matches(taskListItemRegex)
+}
+
+/**
+ * [T-android-md-parse-gate] The entry point every streaming parse must use.
+ *
+ * Combines the two protections: it takes the global [markdownParseGate]
+ * permit (so N concurrent sub-agent streams cannot multiply peak native ICU
+ * allocation) and reuses the already-parsed stable prefix carried in [state]
+ * (so an append-only stream is not re-parsed from byte 0 on every tick).
+ *
+ * The permit is taken around the parse only. Suspending here is the desired
+ * back-pressure: a caller whose LaunchedEffect is cancelled while queued
+ * never runs its parse, which is correct — a newer chunk has superseded it.
+ */
+private suspend fun parseMarkdownIncremental(
+    content: String,
+    state: IncrementalParseState,
+): List<MdBlock> = markdownParseGate.withPermit {
+    // Growth must be append-only for the cached prefix to remain valid. Any
+    // other edit (retry, edit-message, a shorter re-render) resets the state.
+    val reusable = state.prefixLength in 1..content.length &&
+        prefixFingerprint(content, state.prefixLength) == state.prefixHash
+    if (!reusable) {
+        state.prefixLength = 0
+        state.prefixBlocks = emptyList()
+        state.prefixHash = 0
+    }
+
+    val head = state.prefixLength
+    // Split the unparsed remainder at its newest sealed boundary, so the part
+    // that can never change again is parsed exactly once, here, and then
+    // frozen into the prefix for every later tick.
+    val sealedEnd = stableParsePrefixEnd(content, head)
+    val sealedTail = if (sealedEnd > head) {
+        parseMarkdownBlocks(content.substring(head, sealedEnd))
+    } else {
+        emptyList()
+    }
+    val liveTail = if (sealedEnd < content.length) {
+        parseMarkdownBlocks(content.substring(sealedEnd))
+    } else {
+        emptyList()
+    }
+
+    if (sealedEnd > head) {
+        state.prefixBlocks = state.prefixBlocks + sealedTail
+        state.prefixLength = sealedEnd
+        state.prefixHash = prefixFingerprint(content, sealedEnd)
+    }
+    state.prefixBlocks + liveTail
+}
 
 // ─── Block model ────────────────────────────────────────────────────────────
 
@@ -632,7 +952,13 @@ internal sealed class MdBlock(val raw: String) {
     class OrderedList(raw: String, val items: List<ListItem>, val startNum: Int = 1) : MdBlock(raw)
     class TaskList(raw: String, val items: List<TaskItem>) : MdBlock(raw)
     class HorizontalRule(raw: String) : MdBlock(raw)
-    class Table(raw: String, val headers: List<String>, val rows: List<List<String>>) : MdBlock(raw)
+    class Table(
+        raw: String,
+        val headers: List<String>,
+        val rows: List<List<String>>,
+        /** Per-column alignment from the separator row; missing columns are START. */
+        val alignments: List<MdTableAlign> = emptyList(),
+    ) : MdBlock(raw)
     class Image(raw: String, val alt: String, val url: String) : MdBlock(raw)
     class Video(raw: String, val alt: String, val url: String) : MdBlock(raw)
     class Audio(raw: String, val alt: String, val url: String) : MdBlock(raw)
@@ -834,8 +1160,38 @@ internal fun splitParagraphOnWideMath(text: String): List<MdBlock> {
     return result
 }
 
+// [T-u6-smt-merge] Upstream's wide-math split for list items, adopted whole.
+// Both data classes stay `internal` (the parser in StreamingMarkdownParse.kt
+// builds them) while upstream's `TaskItem.children` and the two helpers come
+// across, so wiring `items.map { it.withWideMathSplit() }` into the moved
+// parser is a one-line follow-up — see the U6 leftover note.
 internal data class ListItem(val text: String, val children: List<MdBlock> = emptyList())
-internal data class TaskItem(val checked: Boolean, val text: String)
+
+/**
+ * [T-android-math-overflow-wrap] A list item whose text holds wide inline
+ * math renders as [ListItem.children]: its prose as paragraphs and each wide
+ * formula as a display block that fits (and wraps to) the line. Top-level
+ * paragraphs already get this split ([splitParagraphOnWideMath]); list items
+ * kept the formula inline, in a fixed-size slot up to 22em wide, so on a
+ * phone a long formula in a list ran past the right edge and was clipped —
+ * the iOS report behind 7238a39d4. Items without wide math are unchanged.
+ */
+internal fun ListItem.withWideMathSplit(): ListItem {
+    val split = splitParagraphOnWideMath(text)
+    return if (split.any { it is MdBlock.MathDisplay }) copy(children = split) else this
+}
+
+internal data class TaskItem(
+    val checked: Boolean,
+    val text: String,
+    val children: List<MdBlock> = emptyList(),
+)
+
+/** [T-android-math-overflow-wrap] Same wide-math split as [ListItem.withWideMathSplit]. */
+internal fun TaskItem.withWideMathSplit(): TaskItem {
+    val split = splitParagraphOnWideMath(text)
+    return if (split.any { it is MdBlock.MathDisplay }) copy(children = split) else this
+}
 
 // ─── Block parser ───────────────────────────────────────────────────────────
 
@@ -907,12 +1263,53 @@ internal fun MutableList<MdBlock>.addCodeChunks(raw: String, lang: String, code:
     }
 }
 
-internal fun parseTable(lines: List<String>): Pair<List<String>, List<List<String>>> {
+// [T-u6-smt-merge] Upstream's GFM column alignment, adopted. `ParsedTable`
+// keeps `component1`/`component2` so the two callers that only want the grid
+// (StreamingMarkdownParse.kt destructures `val (headers, rows) = parseTable(…)`)
+// keep compiling unchanged — upstream's own call site reads `parsed.headers` /
+// `.rows` / `.alignments`, and TableColumnAlignTest asserts `.alignments`.
+/**
+ * [T-android-table-column-align] GFM column alignment, from the separator row:
+ * `:---:` centre, `---:` end, `---` / `:---` start (the default, as on iOS).
+ */
+enum class MdTableAlign { START, CENTER, END }
+
+internal class ParsedTable(
+    val headers: List<String>,
+    val rows: List<List<String>>,
+    val alignments: List<MdTableAlign> = emptyList(),
+) {
+    /** [T-u6-smt-merge] Grid-only destructuring: `val (headers, rows) = …`. */
+    operator fun component1(): List<String> = headers
+    operator fun component2(): List<List<String>> = rows
+}
+
+internal fun parseTableAlignments(separator: String): List<MdTableAlign> =
+    separator.trim().removePrefix("|").removeSuffix("|").split("|").map { raw ->
+        val cell = raw.trim()
+        val left = cell.startsWith(':')
+        val right = cell.endsWith(':') && cell.length > 1
+        when {
+            left && right -> MdTableAlign.CENTER
+            right -> MdTableAlign.END
+            else -> MdTableAlign.START
+        }
+    }
+
+internal fun parseTable(lines: List<String>): ParsedTable {
     val headers = mutableListOf<String>()
     val rows = mutableListOf<List<String>>()
+    var alignments: List<MdTableAlign> = emptyList()
     for (line in lines) {
         val trimmed = line.trim()
-        if (trimmed.matches(tableSeparatorRegex)) continue
+        if (trimmed.matches(tableSeparatorRegex)) {
+            // Only the separator right under the header defines alignment; a stray
+            // separator-looking row further down is skipped as before.
+            if (alignments.isEmpty() && headers.isNotEmpty() && rows.isEmpty()) {
+                alignments = parseTableAlignments(trimmed)
+            }
+            continue
+        }
         // T308: Strip the leading/trailing pipe (if present) before splitting.
         // The previous `.filter { isNotEmpty() }` swallowed legitimate empty
         // cells like the first column of `| | Manus | TikTok |`, leaving the
@@ -921,7 +1318,7 @@ internal fun parseTable(lines: List<String>): Pair<List<String>, List<List<Strin
         val cells = core.split("|").map { it.trim() }
         if (headers.isEmpty()) headers.addAll(cells) else rows.add(cells)
     }
-    return headers to rows
+    return ParsedTable(headers, rows, alignments)
 }
 
 // ─── Math (KaTeX) ───────────────────────────────────────────────────────────

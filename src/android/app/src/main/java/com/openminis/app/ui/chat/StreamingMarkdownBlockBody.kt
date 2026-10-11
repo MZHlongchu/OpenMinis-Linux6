@@ -41,12 +41,33 @@ internal fun MarkdownBlockBody(
     // breaker/degrade only cover isStreaming=true). Those parse off-main
     // with a bounded plain-text preview in the meantime — same structure as
     // the live branch below.
+    // [T-android-freeze-edge-carryover] The live branch's most recent parse
+    // and the text it was for, held ABOVE the live/frozen switch. The list key
+    // (mdblock:<msg>:<block>:<index>) does not include isStreaming, so this
+    // composable — and this remember — survive the flip.
+    //
+    // Why the cache deposit alone was not enough: the VM flushes on newline,
+    // so a real model routinely lands a table's last row and the blank line
+    // after it in ONE publish. The fragment then goes from "4 rows, live"
+    // straight to "5 rows, frozen" — its final text is never composed live,
+    // the deposit is keyed to the 4-row text, and the frozen lookup misses.
+    // The miss then paints the plain-text preview for as long as the
+    // off-main parse takes (that is the flash) — so the frozen branch below
+    // falls back to this carry, exact-match first, then prefix-match.
+    // A plain holder, not snapshot state: written from the parse coroutine,
+    // read in composition, must not invalidate anything by itself.
+    // （上游 1.14 StreamingMarkdownText.kt:1096-1112 原文。）
+    val liveCarry = remember { arrayOf<Pair<String, List<MdBlock>>?>(null) }
     if (!isStreaming) {
         // [T-android-freeze-edge-offmain-inline] 主题色快照提到分支最前：冻结边的
         // 「blocks 缓存命中」分支要用同一份 palette 做 off-main 权威预暖（键必须与
         // RenderBlock 稍后查的完全一致），下面的冷 MISS 分支继续复用它。
         val mdColors = currentMdColors()
-        val cached = remember(rawText) { MarkdownParseCaches.cachedBlocks(rawText) }
+        val cached = remember(rawText) {
+            MarkdownParseCaches.cachedBlocks(rawText)
+                // [T-android-freeze-edge-carryover] 沉积可能还在飞，carry 就是同一次解析。
+                ?: liveCarry[0]?.takeIf { it.first == rawText }?.second
+        }
         // [T-android-longtext-anr] Synchronous render ONLY on a real cache HIT.
         // The old `|| rawText.length <= COLD_PARSE_OFFMAIN_THRESHOLD_CHARS` clause
         // let a small fragment parse (block-split + per-block inline regex) on the
@@ -124,7 +145,14 @@ internal fun MarkdownBlockBody(
                     "blocks=${computed.size} parseMs=${(System.nanoTime() - tStartNs) / 1_000_000}",
             )
         }
-        val blocks = parsed
+        // [T-android-freeze-edge-carryover] While the parse of the FINAL text
+        // runs, keep painting the last parse this fragment showed while live,
+        // provided that text is a prefix of what we now hold (the same-flush
+        // case: 4 rows -> 5 rows). It is a rendered table missing its last
+        // row for one parse, instead of raw pipes. `blocks ?: carry` keeps
+        // both in ONE branch so the swap reuses the RenderBlock slots.
+        // （上游 1.14 StreamingMarkdownText.kt:1171-1180 原文。）
+        val blocks = parsed ?: liveCarry[0]?.takeIf { rawText.startsWith(it.first) }?.second
         Column(modifier = modifier) {
             if (blocks == null) {
                 // Bounded plain-text preview while the off-main parse runs —
@@ -184,6 +212,11 @@ internal fun MarkdownBlockBody(
     // composition of the live block becomes a pure cache hit.
     val mdColors = currentMdColors()
     var blocks by remember { mutableStateOf<List<MdBlock>>(emptyList()) }
+    // [T-android-freeze-edge-flash] The key of this fragment's most recent
+    // live deposit, so each tick can REPLACE it rather than add beside it.
+    // A plain holder, not snapshot state: it is written from the parse
+    // coroutine and must not invalidate anything.
+    val liveDepositKey = remember { arrayOf<String?>(null) }
     LaunchedEffect(displayContent) {
         // [T-android-stream-render-profile] Time the whole off-main tick
         // (block split + prewarm/incremental inline+math) — this is what the
@@ -209,18 +242,39 @@ internal fun MarkdownBlockBody(
                 // into the blocks cache so the freeze edge (isStreaming →
                 // false recomposes into the frozen branch with this exact
                 // text) HITs synchronously — no plain-text preview flash, no
-                // off-main re-parse. Only for segments big enough to take
-                // the off-main MISS path at freeze; small ones parse sub-ms
-                // synchronously anyway, and skipping them keeps live ticks
-                // from churning the LRU.
-                if (displayContent.length > COLD_PARSE_OFFMAIN_THRESHOLD_CHARS) {
-                    MarkdownParseCaches.putBlocks(displayContent, it)
+                // off-main re-parse.
+                //
+                // [T-android-freeze-edge-flash] This used to be gated on
+                // `length > COLD_PARSE_OFFMAIN_THRESHOLD_CHARS`, on the
+                // reasoning that a small fragment would parse sub-ms
+                // synchronously at freeze anyway. That was true once. The ANR
+                // fix (T-android-longtext-anr) then made EVERY cold miss go
+                // off-main behind a plain-text preview, and nobody revisited
+                // this gate — so a fragment under 2000 chars was guaranteed to
+                // miss at freeze and flash its raw markdown. A 462-char
+                // weather table did exactly that: rendered, went to
+                // `| 城市 | ... |---|` pipes for one parse, came back.
+                //
+                // Every tick deposits now, but each tick REMOVES the previous
+                // tick's entry first: one live entry per fragment, so the
+                // stream leaves no trail of intermediate texts in the LRU.
+                // Both ops are O(1) and the sizer is key length, so a
+                // replacement is budget-neutral to within one tick's growth.
+                // （上游 1.14 StreamingMarkdownText.kt:1281-1307 原文照搬。）
+                liveDepositKey[0]?.let { prev ->
+                    if (prev != displayContent) MarkdownParseCaches.removeBlocks(prev)
                 }
+                MarkdownParseCaches.putBlocks(displayContent, it)
+                liveDepositKey[0] = displayContent
             }
         }
         coroutineContext.ensureActive()
         StreamRenderProfiler.recordParse(displayContent.length, (System.nanoTime() - parseStartNs) / 1_000_000.0)
         blocks = computed
+        // [T-android-freeze-edge-carryover] Record what this fragment last
+        // rendered while live, for the freeze edge above to paint.
+        // （上游 1.14 StreamingMarkdownText.kt:1312-1315 原文。）
+        liveCarry[0] = displayContent to computed
     }
     // [T-android-stream-grow-anim] No height/scroll animation here. We tried
     // animateContentSize to ease the bottom-pinned item's exposed height into a
@@ -234,21 +288,24 @@ internal fun MarkdownBlockBody(
     // iOS-style continuous flow would require token-incremental rendering of the
     // streaming tail, not a height animation on an unstable item.
     Column(modifier = modifier) {
-        // Wrap the last block in LocalAppendOnlyFade=true so MdText fades in
-        // newly-appended words. [T-android-streaming-incremental-inline] Also
-        // flag it as the LIVE tail so its Paragraph inline/math parse goes
-        // through the incremental (frozen-prefix + fresh-suffix) path — this is
-        // the only block whose raw grows every tick.
+        // [T-android-streaming-incremental-inline] Flag the LIVE tail so its
+        // Paragraph inline/math parse goes through the incremental
+        // (frozen-prefix + fresh-suffix) path — this is the only block whose
+        // raw grows every tick — and so MdText fades in its newly-appended
+        // words.
+        // [T-android-stream-fade-seed] Same shape for every block — see the
+        // matching note in StreamingMarkdownTextBody. This is the live
+        // fragment, so there is no frozen path to protect; the provider is
+        // always present and only its VALUE tracks the tail. Flipping a
+        // value recomposes consumers; changing the group shape disposed them.
+        // （上游 1.14 StreamingMarkdownText.kt:1328-1347 的结构。）
         val lastIdx = blocks.size - 1
         blocks.forEachIndexed { idx, block ->
-            if (idx == lastIdx) {
-                androidx.compose.runtime.CompositionLocalProvider(
-                    LocalAppendOnlyFade provides true,
-                    LocalLiveIncremental provides true,
-                ) { RenderBlock(block) }
-            } else {
-                RenderBlock(block)
-            }
+            val isLast = idx == lastIdx
+            androidx.compose.runtime.CompositionLocalProvider(
+                LocalAppendOnlyFade provides isLast,
+                LocalLiveIncremental provides isLast,
+            ) { RenderBlock(block) }
         }
     }
 }

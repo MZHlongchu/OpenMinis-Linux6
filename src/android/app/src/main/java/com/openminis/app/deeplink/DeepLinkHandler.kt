@@ -182,7 +182,12 @@ object DeepLinkHandler {
             "mcp" -> DeepLinkAction.OpenSettingsScreen(Routes.MCP)
             "multi-agent", "multi_agent", "subagents" -> DeepLinkAction.OpenSettingsScreen(Routes.MULTI_AGENT)
             "memory" -> DeepLinkAction.OpenSettingsScreen(Routes.MEMORY)
+            // [T-u12-merge] Android-only routes (evolution) kept; upstream 1.14
+            // agent-settings deep links (agents / scheduled) adopted alongside.
             "evolution" -> DeepLinkAction.OpenSettingsScreen(Routes.EVOLUTION)
+            // [T-p2-agent-settings] Settings › Agents; scheduled tasks list.
+            "agents" -> DeepLinkAction.OpenSettingsScreen(Routes.AGENTS)
+            "scheduled", "scheduled-tasks", "scheduled_tasks" -> DeepLinkAction.OpenSettingsScreen(Routes.SCHEDULED_TASKS)
             "storage" -> DeepLinkAction.OpenSettingsScreen(Routes.STORAGE)
             "mount-external", "mount_external", "mounts", "mounted-folders", "mounted_folders" ->
                 DeepLinkAction.OpenSettingsScreen(Routes.MOUNTED_FOLDERS)

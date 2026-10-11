@@ -29,25 +29,20 @@ object StorageScanner {
             .apply()
     }
 
+    /**
+     * [T-android-storage-symlink-inflation] 这个 walk 曾经是本文件自己的一份
+     * `walkTopDown { total += it.length() }`：`walkTopDown` 会跟进目录符号链接、
+     * `isFile`/`length()` 会解析文件符号链接，于是 Alpine/Ubuntu rootfs 里成百上千
+     * 个 busybox applet 链接与 `lib -> usr/lib` 之类的目录链接被重复计入，存储页
+     * 报出的数字比 Android 自己的设置页大一个量级。skip/max 两个开关（虚拟目录、
+     * 文件数上限）现在留在 [SessionStorage.directorySize] 的重载里，与唯一的实现
+     * 放一起，这里只做转发——手写第二份正是这个 bug 反复出现的路径。
+     */
     fun directorySize(
         dir: File,
         skipNames: Set<String> = SKIP_DIR_NAMES,
         maxFiles: Int = 80_000,
-    ): Long {
-        if (!dir.exists()) return 0L
-        var total = 0L
-        var files = 0
-        dir.walkTopDown()
-            .onEnter { file -> file.name !in skipNames }
-            .forEach { file ->
-                if (file.isFile) {
-                    total += file.length()
-                    files++
-                    if (files >= maxFiles) return total
-                }
-            }
-        return total
-    }
+    ): Long = com.openminis.app.data.session.SessionStorage.directorySize(dir, skipNames, maxFiles)
 
     fun directorySizePreferDu(dir: File, timeoutSec: Long = 60L): Long {
         if (!dir.exists()) return 0L
@@ -80,19 +75,10 @@ object StorageScanner {
         }
     }
 
-    fun mediaSizesBySession(mediaDir: File, sessionIds: Set<String>): Map<String, Long> {
-        if (!mediaDir.exists() || sessionIds.isEmpty()) return emptyMap()
-        val sizes = mutableMapOf<String, Long>()
-        mediaDir.walkTopDown()
-            .onEnter { file -> file.name !in SKIP_DIR_NAMES }
-            .forEach { file ->
-                if (file.isFile) {
-                    val sid = file.parentFile?.name ?: return@forEach
-                    if (sessionIds.contains(sid)) {
-                        sizes[sid] = (sizes[sid] ?: 0L) + file.length()
-                    }
-                }
-            }
-        return sizes
-    }
+    /**
+     * [T-android-storage-symlink-inflation] 同上：按会话归集的媒体体量也只留一份
+     * 实现（[SessionStorage.mediaSizesBySession]），这里转发。
+     */
+    fun mediaSizesBySession(mediaDir: File, sessionIds: Set<String>): Map<String, Long> =
+        com.openminis.app.data.session.SessionStorage.mediaSizesBySession(mediaDir, sessionIds)
 }

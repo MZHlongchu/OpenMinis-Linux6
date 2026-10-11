@@ -1,9 +1,6 @@
 package com.openminis.app.harness.agent
 
 import com.openminis.app.harness.HarnessLog
-import org.json.JSONArray
-import org.json.JSONObject
-import java.security.MessageDigest
 
 /**
  * Per-session tool-call sliding window record. Filled in two passes:
@@ -69,10 +66,29 @@ data class ToolLoopConfig(
  *   3. known_poll_no_progress    — poll-style tool with frozen results.
  *   4. generic_repeat            — same args ≥10, regardless of result.
  *
- * One detector instance per Session. Not thread-safe; serialize calls
- * through the agent loop's existing single-threaded dispatch.
+ * One detector instance per Session.
+ *
+ * [T-android-concurrent-tools] Thread-safe by an instance lock. This class used
+ * to say "serialize calls through the agent loop's existing single-threaded
+ * dispatch" — and that dispatch is no longer single-threaded: a turn's tool
+ * calls now run concurrently, so several threads reach [check] and [record] on
+ * the same detector at once.
+ *
+ * The failure was not theoretical. On a Pixel 6 a sub agent died with
+ * "Attempt to invoke virtual method 'String ToolCallRecord.getToolName()' on a
+ * null object reference": ArrayDeque is unsynchronized, so a concurrent
+ * `addLast` that grows the backing array leaves a transiently-null slot, and
+ * the scans below dereference it. The whole run was lost — the parent got
+ * "the agent ended with status failed before writing a final answer".
+ *
+ * Every public entry point takes the lock. Contention is irrelevant here: the
+ * work is hashing a small map and scanning a 30-element window, next to tool
+ * calls that take seconds.
  */
 class ToolLoopDetector(private val config: ToolLoopConfig = ToolLoopConfig()) {
+
+    /** [T-android-concurrent-tools] Guards [history] and [warningBuckets]. */
+    private val lock = Any()
 
     private val history = ArrayDeque<ToolCallRecord>()
     // warningKey -> last bucket index already emitted, used to throttle warnings
@@ -80,13 +96,13 @@ class ToolLoopDetector(private val config: ToolLoopConfig = ToolLoopConfig()) {
     private val warningBuckets = HashMap<String, Int>()
 
     /** Drop all in-flight state. Call on session reset / new chat. */
-    fun reset() {
+    fun reset() = synchronized(lock) {
         history.clear()
         warningBuckets.clear()
     }
 
     /** Test-only window inspection. */
-    internal fun historySnapshot(): List<ToolCallRecord> = history.toList()
+    internal fun historySnapshot(): List<ToolCallRecord> = synchronized(lock) { history.toList() }
 
     // ─── before-execution hook ────────────────────────────────────────────────
 
@@ -95,7 +111,7 @@ class ToolLoopDetector(private val config: ToolLoopConfig = ToolLoopConfig()) {
      * skip tool execution and surface `result.message` as a tool-error result
      * when `result.level == CRITICAL`.
      */
-    fun check(toolName: String, params: Map<String, Any?>): LoopCheckResult {
+    fun check(toolName: String, params: Map<String, Any?>): LoopCheckResult = synchronized(lock) {
         val argsHash = ToolCallFingerprint.argsHash(toolName, params)
 
         // 1. unknown_tool_repeat — most specific signal, runs first.
@@ -172,7 +188,7 @@ class ToolLoopDetector(private val config: ToolLoopConfig = ToolLoopConfig()) {
         result: String?,
         errorMessage: String? = null,
         toolCallId: String? = null,
-    ): LoopCheckResult {
+    ): LoopCheckResult = synchronized(lock) {
         val argsHash = ToolCallFingerprint.argsHash(toolName, params)
         val resultHash = ToolCallFingerprint.resultHash(result, errorMessage)
         val unknownToolName = extractUnknownToolName(errorMessage)
@@ -288,14 +304,13 @@ class ToolLoopDetector(private val config: ToolLoopConfig = ToolLoopConfig()) {
         return null
     }
 
-
     companion object {
         /**
-         * Param keys excluded from `argsHashFor`. Currently just `tool_title`
-         * (a required UI label that models commonly counter-suffix). Add new
-         * entries here if other purely-cosmetic fields ever leak into params.
+         * The argument/result hashing this class used to own — including the
+         * `tool_title` key it deliberately ignores — now lives in
+         * [ToolCallFingerprint] ([T-p0-1-extraction]); add purely cosmetic
+         * params to its `ARGS_HASH_IGNORED_KEYS`, not here.
          */
-
         private val UNKNOWN_TOOL_RE_1 = Regex(
             """unknown tool[:\s]+["']?([a-zA-Z0-9_.\-]+)["']?""",
             RegexOption.IGNORE_CASE,

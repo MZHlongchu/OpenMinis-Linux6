@@ -122,7 +122,12 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                     codeLines.add(lines[i])
                     i++
                 }
-                blocks.addCodeChunks(rawLines.joinToString("\n"), lang, codeLines.joinToString("\n"))
+                // [T-android-codeblock-fence-indent] [T-merge-upstream-1-14] 上游
+                // 1.14 StreamingMarkdownText.kt:2090 在提交代码块之前按围栏的缩进剥掉
+                // 行首空格；合并时块解析器搬进了本文件，这个调用点却丢了，于是
+                // fencedCodeContent 成了死代码，复制列表项里的代码块又会带回
+                // "  npm install" 的前导空格。raw 仍保留原样行（渲染/复制按 code 走）。
+                blocks.addCodeChunks(rawLines.joinToString("\n"), lang, fencedCodeContent(line, codeLines))
             }
 
             // Heading

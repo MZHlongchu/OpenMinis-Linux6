@@ -227,12 +227,15 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
     // Match iOS order exactly: skills → global memory → recent daily memory.
     // See ios/Agent/Chat/AIChatViewModel.swift:4375-4387. Each fragment is
     // appended only when non-null; absent fragments leave no separator.
-    // T-skillscan: rescan disk before reading the fragment so a skill
-    // that an earlier turn dropped via shell `git clone` (which bypasses
-    // the file_write hook below) becomes visible on the very next user
-    // turn instead of "after kill app". Cheap: loadAll is a SQLite
-    // SELECT + listFiles, no network.
-    skillRepository?.reloadFromDisk()
+    // [T-android-skill-scan-parity] No disk access here — this runs on the
+    // main thread, twice per send (checkContextBeforeSend and the send
+    // coroutine). Like iOS SkillStore.skillPromptFragment(), the fragment
+    // reads only the in-memory list loaded from skills.db. Out-of-band
+    // installs (shell `git clone`, file_write of a SKILL.md, backup
+    // restore, returning to the app) queue a background rescan instead;
+    // see SkillRepository.requestReload. The old per-send
+    // reloadFromDisk() cost ~2 s per send for a user with 490 skills.
+    // （上游 1.14 ChatViewModel.kt:15265-15273；合并时这里退回了每次 send 同步重扫。）
     val skillFragment = skillRepository?.skillPromptFragment(activeSessionId)
     // [T-mcp-integration-android] Re-read servers.json (the CLI / file
     // browser may have changed it out-of-band) then build the Top-20

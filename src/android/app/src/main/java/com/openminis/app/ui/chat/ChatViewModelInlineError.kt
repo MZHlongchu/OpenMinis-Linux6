@@ -36,18 +36,23 @@ internal fun ChatViewModel.setInlineError(errorText: String) {
             isAwaitingModelResponse = false,
         )
         _messages.value = msgs
-        // [T-error-persist-android] Persist the terminal error onto the
-        // session's last assistant DB row so the inline error + Retry button
-        // survive a session reload. This is a targeted UPDATE (not a fresh
-        // insert): the in-memory bubble id differs from the persisted row id,
-        // so we address the row by "last assistant" — matching the load-side
-        // merge that keeps the last assistant row's identity. No-op when the
-        // failing turn never persisted a row (first-turn failure).
+        // [T-error-persist-android] Persist the terminal error so the inline
+        // error + Retry button survive a session reload. The in-memory bubble
+        // id differs from the persisted row id, so the row is found in the DB.
+        //
+        // [T-android-error-persist-current-turn] GH#263: 目标行必须属于**当前这一回合**。
+        // 上游 1.14（ChatViewModel.kt:9518-9531）用 persistTurnError 替换了「更新会话里
+        // 最后一条 assistant 行」的写法——后者在本回合还没落任何输出时，会把错误横幅盖在
+        // 上一回合那条正常回复上。persistTurnError 盖本回合最新的 assistant 行，本回合没有
+        // 行时插一条空载体行。清除路径仍用 updateLastAssistantError(null)。
+        // 合并时这个接线被丢了（本文件此前还在调用 updateLastAssistantError 写错误）。
         val sid = realSessionId.ifEmpty { sessionId }
         if (sid.isNotEmpty()) {
             viewModelScope.launch(Dispatchers.IO) {
-                try { chatRepository.updateLastAssistantError(sid, safeError) }
-                catch (e: Exception) { Log.w(ChatViewModel.TAG, "persist error_info failed: ${e.message}") }
+                try {
+                    val write = chatRepository.persistTurnError(sid, safeError)
+                    Log.i(ChatViewModel.TAG, "[ErrorPersist] sid=${sid.take(8)} $write")
+                } catch (e: Exception) { Log.w(ChatViewModel.TAG, "persist error_info failed: ${e.message}") }
             }
         }
     } else {

@@ -38,6 +38,11 @@ class PersistentShell(
         private const val MAX_OUTPUT_CHARS = 128 * 1024
         private const val TAG = "PersistentShell"
 
+        // [T-android-shell-marker-chunk-split] 上游 1.14 用 MARKER_CARRY(96) 在自己
+        // 的读循环里留一段尾巴，防止 DONE 标记被 read() 边界切开。本分支的
+        // [MarkerFramer] 内部持有 carry（按前缀长度精确 hold），覆盖同一问题且
+        // 不依赖固定字节数，所以这里不再保留那个常量。
+
         /**
          * [T-android-shell-death-diagnosability] Death-capture windows. The
          * head must comfortably hold proot's error line(s) printed BEFORE the
@@ -127,6 +132,21 @@ class PersistentShell(
         val output: BoundedOutputBuffer = BoundedOutputBuffer(),
         val lineCallback: ((String) -> Unit)?,
         var onComplete: ((String, Int) -> Unit)? = null,
+        /**
+         * [T-android-shell-timeout-pgid] Process group of this command's
+         * `setsid` wrapper, learned from the `__MINIS_PGID_…__` line the
+         * wrapper prints before the command runs. Null until it arrives (or
+         * forever, if the wrapper does not isolate the command) — and null must
+         * mean "do not kill", never "kill something else".
+         *
+         * 本分支的命令包装（见 [executeCommand] 的 `wrappedCommand`）刻意沿用
+         * [GuardianScript] 的「命令跑在持久 shell 自己的进程组里」模型——这是
+         * 跨命令保留 cwd/导出的前提（[T-android-ghost-cwd] 就是为它写的诊断）。
+         * 因此该字段目前恒为 null，超时路径据此退化为「回收 shell 并保留部分输出」
+         * （与上游 shellIsReusableAfterTimeout()==false 的结论一致）；一旦将来
+         * 有包装器上报真实 pgid，这条精确 kill 会自动生效。
+         */
+        @Volatile var pgid: Int? = null,
     ) {
         val framer = MarkerFramer(marker, frameTag)
         val heartbeat = SilentOutputHeartbeat()
@@ -220,6 +240,12 @@ class PersistentShell(
         } finally {
             isStarting.set(false)
         }
+        // [T-android-env-first-turn] A shell that just came up has an empty
+        // environment, whether this was the first spawn or a respawn after a
+        // death. Replay whatever snapshot the coordinator last handed us, so
+        // the env cannot be lost by a process swap the caller never sees.
+        // Outside the finally: only worth doing when we actually started.
+        replayEnvironmentIfAny()
     }
 
     /**
@@ -301,7 +327,7 @@ class PersistentShell(
             ),
         )
 
-        val debugOffload = com.openminis.app.BuildConfig.DEBUG
+        val debugOffload = com.openminis.app.BuildConfig.DEV_TOOLS
 
         val processBuilder = ProcessBuilder(cmd)
         // In debug builds we want proot's native_offload stderr logs in
@@ -480,6 +506,13 @@ class PersistentShell(
     }
 
     private fun readLoop(p: Process) {
+        // [T-android-stale-stream-gate + T-p1-3-shell-auth-frames] 上游 1.14 在
+        // 这个循环里内联了 marker 匹配（carryOver 跨读保留）+ `__MINIS_PGID__`
+        // 学习 + stripControlMarkers。本分支已把这三件事收进 [MarkerFramer] /
+        // [Utf8ChunkDecoder]：framer 自己保留"可能是 marker 前缀"的尾巴（跨读
+        // 分割不会漏帧），并额外提供 BEGIN 门（丢弃上一条命令的迟到字节）与
+        // 认证帧校验。所以这里保持解码器 + framer 这一条路径，不再内联第二套
+        // 匹配逻辑（两套同时存在会让 DONE 归属互相打架）。
         val decoder = utf8
         try {
             val buffer = ByteArray(4096)
@@ -697,6 +730,14 @@ class PersistentShell(
         // the session (the bug report had to kill the app). `$PWD` is used
         // instead of `pwd` on purpose: it is a shell variable, so the probe
         // cannot itself fail with ENOENT in the very state it detects.
+        // [T-android-shell-timeout-pgid-decision] 上游 1.14 的包装器是
+        // `ForegroundCommandGroup.wrap()`：`setsid sh -c '…'` 让命令自成一个
+        // session/pgid，超时就能只杀这个前台组。本分支保留自己的包装器，理由是
+        // GuardianScript 的命令**就跑在持久 shell 自己的进程组里**——这正是
+        // "跨命令保留 cwd 与导出变量"的实现方式（[T-android-ghost-cwd] 的整套
+        // 自愈逻辑依赖它）。改用 setsid 会把命令塞进子 shell，cwd/变量不再回写，
+        // 与我们的会话模型相反。超时行为因此走「回收 shell + 保留部分输出」
+        // （上游 shellIsReusableAfterTimeout() 也返回 false，结论一致）。
         val wrappedCommand = buildString {
             append(bootstrap)
             append(offloadExitPrelude())
@@ -815,12 +856,52 @@ class PersistentShell(
             authSeen = authSeen ?: cb?.framer?.authTag
 
             if (result == null) {
-                // The guest shell reads the next command only after the previous
-                // one exits. Leaving it alive makes the timeout a no-op and lets
-                // the old marker/output land on the next command.
-                Log.w(TAG, "command timed out after ${armed / 1000}s; killing shell tree")
-                stop()
-                Pair("[Command timed out after ${armed / 1000}s; guest process group killed]", 124)
+                // [T-android-shell-timeout-pgid] Issue #358. The old code
+                // here did nothing but drop the callback — "cancel pending,
+                // but don't kill the shell" — and the runaway kept running in
+                // this REUSED shell, still writing to stdout. /bin/sh reads
+                // stdin serially, so every later command in the session just
+                // queued behind it and burned its own timeout, `echo alive`
+                // included. That is the reported permanent wedge.
+                val cb = pendingCallback
+                pendingCallback = null
+
+                // Whatever the command managed to produce before the deadline
+                // is worth keeping — it usually says where it got stuck.
+                // Mirrors iOS T-ish-shell-timeout-preserve-output.
+                val partial = cb?.output?.toString().orEmpty()
+
+                // Kill the command's OWN process group. A `&` job started by
+                // the command shares that group and goes with it, which is
+                // correct: it belongs to the command the user is stopping.
+                // Work meant to outlive the command detaches into its own
+                // session (setsid/nohup) and is untouched — verified on
+                // device, see ForegroundCommandGroup.
+                cb?.pgid?.let { pgid ->
+                    runCatching {
+                        stdinWriter?.let { w ->
+                            w.write(ForegroundCommandGroup.killGroupCommand(pgid))
+                            w.flush()
+                        }
+                    }.onFailure {
+                        Log.w(TAG, "timeout kill for pgid=$pgid failed: ${it.message}")
+                    }
+                    Log.i(TAG, "[timeout] killed foreground process group $pgid")
+                }
+
+                // Recycle regardless of whether the kill landed: the shell's
+                // stdout may still hold bytes the runaway wrote before dying,
+                // and those would be misattributed to whichever command reads
+                // next. ensureStarted() replays the environment snapshot, so
+                // nothing the user configured is lost.
+                if (!ForegroundCommandGroup.shellIsReusableAfterTimeout()) {
+                    runCatching { stop() }
+                        .onFailure { Log.w(TAG, "timeout recycle failed: ${it.message}") }
+                }
+
+                val notice = "[Command timed out after ${timeout / 1000}s]"
+                val text = if (partial.isBlank()) notice else "$partial\n$notice"
+                Pair(text, 124)
             } else {
                 result
             }
@@ -879,7 +960,48 @@ class PersistentShell(
         envVars: Map<String, String>,
         previousKeys: Set<String> = emptySet(),
     ) {
+        // [T-android-env-first-turn] Remember the snapshot BEFORE the liveness
+        // check, and remember it even if the write below fails.
+        //
+        // This is the first-turn bug. The old code opened with
+        // `if (!isAlive) return` and told the caller nothing, so on a cold
+        // start the sequence was:
+        //
+        //   1. the lease spawns shell #1 while PROOT_LOADER is still unset,
+        //      and SELinux kills it (`execve("/bin/sh"): Permission denied`);
+        //   2. the coordinator exports the user's env into that corpse — this
+        //      method returns silently, and the coordinator nonetheless records
+        //      the keys in lastInjectedKeys as though they had landed;
+        //   3. executeCommand() calls ensureStarted(), which quietly spawns
+        //      shell #2 — a brand new process that never saw an `export`.
+        //
+        // The command then ran with no env at all, which is exactly the
+        // reported "first tool call has no environment variables, retrying
+        // works". Retrying worked because by then a live shell existed and
+        // step 2 actually wrote to it.
+        //
+        // Holding the snapshot on the shell lets startProcess() replay it into
+        // whatever process comes up next, so a respawn can no longer silently
+        // drop the user's environment.
+        pendingEnv = envVars
+        pendingEnvPreviousKeys = previousKeys
         if (!isAlive) return
+        writeEnvironment(envVars, previousKeys)
+    }
+
+    /**
+     * [T-android-env-first-turn] The snapshot last handed to
+     * [applyEnvironment], replayed by [startProcess] into every subsequent
+     * shell incarnation.
+     */
+    private var pendingEnv: Map<String, String> = emptyMap()
+    private var pendingEnvPreviousKeys: Set<String> = emptySet()
+
+    /** Actually write the exports. Assumes the shell is up. */
+    private suspend fun writeEnvironment(
+        envVars: Map<String, String>,
+        previousKeys: Set<String>,
+    ) {
         val writer = stdinWriter ?: return
         withContext(Dispatchers.IO) {
             try {
@@ -901,6 +1023,21 @@ class PersistentShell(
                 Log.w(TAG, "Failed to apply env vars: ${e.message}")
             }
         }
+    }
+
+    /**
+     * [T-android-env-first-turn] Re-export the remembered snapshot into a
+     * freshly spawned process. A respawn is a NEW `/bin/sh` with an empty
+     * environment, so without this the exports written to the previous
+     * incarnation are simply gone.
+     *
+     * `previousKeys` is deliberately empty: the new process has nothing to
+     * unset, and replaying the old unset list would be a no-op at best.
+     */
+    private suspend fun replayEnvironmentIfAny() {
+        if (pendingEnv.isEmpty()) return
+        if (!isAlive) return
+        writeEnvironment(pendingEnv, previousKeys = emptySet())
     }
 
     /**

@@ -39,7 +39,8 @@ import com.openminis.app.i18n.uppercaseForDisplay
  *   - Context: Context Used / Context Window / Max Output
  *   - Thinking (only when the model supports reasoning): On/Off / Level / Supported
  *   - Tokens (Session Total): Input (incl. cache) / Output
- *   - Cache (Session Total): Cache Read / Cache Write
+ *   - Cache (Session Total): Cache Read / Cache Write / Cache Hit Rate
+ *   - Speed (Session Total): Output Speed
  *   - Agent Loop: Total Loops
  *
  * Data loads asynchronously via [ChatViewModel.loadSessionTokenStats] when the
@@ -56,8 +57,6 @@ fun TokenUsageSheet(
     val contextWindow = viewModel.currentModelContextWindow
     val maxOutput = viewModel.currentModelMaxOutputTokens
     val thinking = remember { viewModel.thinkingInfo() }
-    // [T-cache-hit-rate] 最近一轮的缓存命中率（0..1，无真实 usage 时为 null）。
-    val lastCacheHitRate by viewModel.lastCacheHitRate.collectAsState()
 
     LaunchedEffect(Unit) {
         // Recompute the context rows on open: contextUsage is a snapshot that
@@ -123,17 +122,27 @@ fun TokenUsageSheet(
             StatSection(title = stringResource(R.string.token_usage_section_cache)) {
                 StatRow(stringResource(R.string.token_usage_cache_read), formatTokens(s?.cacheRead ?: 0L))
                 StatRow(stringResource(R.string.token_usage_cache_write), formatTokens(s?.cacheWrite ?: 0L))
-                // [T-cache-hit-rate] 最近一轮缓存命中率（session 总数外的实时维度）。
-                if (s != null && (s.cacheRead > 0 || s.input > 0)) {
+                // [T-android-token-usage-cache-hit-rate] iOS parity. Hidden
+                // rather than shown as 0.0% when nothing was cached, so a
+                // provider that does no caching does not look like a cache
+                // miss — see SessionTokenStats.cacheHitRate.
+                s?.cacheHitRate?.let {
                     StatRow(
                         stringResource(R.string.token_usage_cache_hit_rate),
-                        if (lastCacheHitRate > 0.0) {
-                            "${(lastCacheHitRate * 100).toInt()}%"
-                        } else {
-                            "—"
-                        },
+                        String.format(java.util.Locale.US, "%.1f%%", it),
                     )
                 }
+            }
+
+            // [T-android-token-usage-output-speed] iOS parity. Always shown,
+            // with "—" until a turn has streamed measurably — the row's
+            // absence would otherwise read as "this build has no speed".
+            StatSection(title = stringResource(R.string.token_usage_section_speed)) {
+                val speed = s?.outputTokensPerSecond
+                StatRow(
+                    stringResource(R.string.token_usage_output_speed),
+                    if (speed != null) String.format(java.util.Locale.US, "%.1f tok/s", speed) else "—",
+                )
             }
 
             StatSection(title = stringResource(R.string.token_usage_section_agent_loop)) {

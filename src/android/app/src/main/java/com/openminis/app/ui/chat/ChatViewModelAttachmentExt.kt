@@ -12,42 +12,6 @@ import java.io.ByteArrayOutputStream
 import org.json.JSONObject
 
 /**
- * T209: resize image bytes for the LLM inference payload only — the
- * full-resolution original is preserved on disk (mediaStore + uploads
- * dir) so chat history fullscreen view, agent shell `cat`, and
- * `read_image` all see the user's original picture, matching iOS.
- *
- * Returns null when the source already fits within [maxEdge] (caller
- * should fall back to [rawBytes]) or on any decode/compress failure.
- */
-private fun ChatViewModel.resizeImageBytes(
-    rawBytes: ByteArray,
-    mimeType: String,
-    maxEdge: Int = 2000,
-): ByteArray? {
-    return try {
-        val original = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size) ?: return null
-        if (original.width <= maxEdge && original.height <= maxEdge) {
-            original.recycle()
-            return null
-        }
-        val scale = maxEdge.toFloat() / maxOf(original.width, original.height)
-        val w = (original.width * scale).toInt()
-        val h = (original.height * scale).toInt()
-        val scaled = Bitmap.createScaledBitmap(original, w, h, true)
-        val out = ByteArrayOutputStream()
-        val format = if (mimeType.contains("png")) Bitmap.CompressFormat.PNG
-        else Bitmap.CompressFormat.JPEG
-        scaled.compress(format, 85, out)
-        if (scaled !== original) scaled.recycle()
-        original.recycle()
-        out.toByteArray()
-    } catch (_: Exception) {
-        null
-    }
-}
-
-/**
  * Bundle of everything derived from a user-message's input attachments:
  * the resized in-memory image bytes for the LLM, file:// URIs of the
  * persisted copies (for stable rendering across app restarts), the
@@ -69,6 +33,10 @@ internal data class PreparedAttachments(
     //   attachedFilesXml:  null when no attachments, otherwise the
     //     <user-attached-files> XML block iOS appends to the user turn.
     val imageUploadPaths: List<String>,
+    // [T-android-image-downscale-parity] 与 `imageParts` 一一对应的「给你看的是缩略版」
+    // 提示（null = 这张没被缩过，不需要提示）。首次发送与重载各重建一次、从不持久化，
+    // 所以不会重复叠加，老会话也能拿到它。上游 1.14 ChatViewModel.kt:15452。
+    val imageModelNotes: List<String?> = emptyList(),
     val attachedFilesXml: String?,
     // T150: file:// URIs of persisted non-image attachments, in the same
     // order as the non-image suffix of `attachmentNames`. Carried into
@@ -105,6 +73,9 @@ internal fun ChatViewModel.prepareUserAttachments(
     val imageMediaRefPartsJson = mutableListOf<String>()
     val nonImageMediaRefPartsJson = mutableListOf<String>()
     val imageUploadPaths = mutableListOf<String>()
+    // [T-android-image-downscale-parity] 与 imageParts / imageUploadPaths 平行的
+    // 「缩略图提示」列；送到模型时由 addModelImage 贴在图片后面（上游 15485）。
+    val imageModelNotes = mutableListOf<String?>()
     // T132: also write the resized bytes into the session's iSH-bound
     // attachments dir (filesDir/minis-sessions/<sid>/attachments/uploads/),
     // which is mounted at /var/minis/attachments/ inside iSH. This makes
@@ -150,8 +121,14 @@ internal fun ChatViewModel.prepareUserAttachments(
             // close-enough sketch of the picture for the model. Falls
             // back to raw bytes if the source is already small or the
             // decode/compress step fails.
-            val inferenceBytes = resizeImageBytes(rawBytes, attachment.mimeType, maxEdge = 2000)
-                ?: rawBytes
+            // [T-android-image-downscale-parity] The same function rebuilds
+            // this copy from the saved original on reload (toLLMMessage), so
+            // every turn sends the same ≤2000 px image, as iOS does.
+            // 合并 1.14 时这一段丢了（上游位置 ChatViewModel.kt:15531-15539）：
+            // 本移植曾用 resizeImageBytes 全解码缩放，重载路径却回放全尺寸原图，
+            // 长截图重启后每回合都被 DeepSeek 400 "unsupported image"。
+            val downscaled = ImageBudget.downscaleForModel(rawBytes)
+            val inferenceBytes = downscaled?.bytes ?: rawBytes
 
             // Mirror ORIGINAL bytes into the iSH uploads dir under a
             // unique safe name so agent shell tools see the full-res
@@ -176,7 +153,24 @@ internal fun ChatViewModel.prepareUserAttachments(
                 metas.add(UploadMeta(linuxPath = linuxPath, size = rawBytes.size.toLong(), modifiedIso = nowStr))
             }
 
-            imageParts.add(LLMMessage.ImagePart(inferenceBytes, attachment.mimeType, linuxPath = linuxPath))
+            // [T-android-image-upload-format] Label the part with what
+            // inferenceBytes ARE, not what the attachment was. The resize pass
+            // re-encodes anything over 2000 px (a HEIC photo comes out JPEG),
+            // and the old code kept "image/heic" on those JPEG bytes — which
+            // DeepSeek rejects on the label alone. The provider boundary
+            // re-derives the MIME too; this keeps the in-memory part honest
+            // for every other consumer (Vision Group, model-use, audits).
+            //
+            // 合并 1.14 时这一段丢了（上游位置：
+            // git show upstream-1.14:src/android/app/src/main/java/com/openminis/
+            // app/ui/chat/ChatViewModel.kt:15564-15572），本移植仍把
+            // `attachment.mimeType` 原样贴上去。ImageUploadFormatTest 的
+            // `first send labels the part by its encoded bytes` 正守着它。
+            val inferenceMime = ImageBudget.sniffFormat(inferenceBytes).mimeType ?: attachment.mimeType
+            imageParts.add(LLMMessage.ImagePart(inferenceBytes, inferenceMime, linuxPath = linuxPath))
+            // [T-android-image-downscale-parity] 只有真的缩过才给提示——告诉模型
+            // 它看的是缩略图、原图在哪个路径（上游 ChatViewModel.kt:15573）。
+            imageModelNotes.add(downscaled?.let { ImageBudget.downscaleNote(it, linuxPath) })
             val savedFile = java.io.File(mediaStore.mediaBaseDir, ref.relativePath)
             imageUris.add(Uri.fromFile(savedFile))
             imageNames.add(attachment.fileName)
@@ -263,6 +257,9 @@ internal fun ChatViewModel.prepareUserAttachments(
         while (imageNames.size > newSize) imageNames.removeAt(imageNames.size - 1)
         while (imageMediaRefPartsJson.size > newSize) imageMediaRefPartsJson.removeAt(imageMediaRefPartsJson.size - 1)
         while (imageUploadPaths.size > newSize) imageUploadPaths.removeAt(imageUploadPaths.size - 1)
+        // [T-android-image-downscale-parity] notes 与图片一一对应，尾部落图时同步裁，
+        // 否则提示会串到另一张图上（上游 ChatViewModel.kt:15660）。
+        while (imageModelNotes.size > newSize) imageModelNotes.removeAt(imageModelNotes.size - 1)
         if (budgetResult.mutated) {
             AppLogger.info(
                 ChatViewModel.TAG,
@@ -300,6 +297,7 @@ internal fun ChatViewModel.prepareUserAttachments(
         attachmentNames = imageNames + nonImageNames,
         mediaRefPartsJson = imageMediaRefPartsJson + nonImageMediaRefPartsJson,
         imageUploadPaths = imageUploadPaths,
+        imageModelNotes = imageModelNotes,
         attachedFilesXml = xml,
         nonImageUris = nonImageUris,
     )

@@ -29,7 +29,7 @@ import kotlinx.coroutines.runBlocking
         SessionGoalEntity::class,
         MessageVersionEntity::class,
     ],
-    version = 22, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
+    version = 23, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
     // Kept ON so MigrationTestHelper and CI can validate every migration
     // against the committed schema json. Without it the upgrade chain has no
     // automated check at all and only a real device install can catch a break.
@@ -345,9 +345,28 @@ abstract class AppDatabase : RoomDatabase() {
          * [T-code-graph] Adds the code_symbols and code_edges tables for the
          * lightweight code index used by CodeGraphTool. Pure additive — no
          * existing entity is modified and no data is rewritten.
+         *
+         * [T-merge-1.14] Also absorbs upstream 1.14's child-session columns
+         * (`parent_session_id` + `parent_tool_use_id`, design v4 §3.1), which
+         * upstream ships as its own 12 → 13. Both sides bump 12 → 13 to
+         * different content and only one Migration(12, 13) may exist, so the
+         * two are folded into this single step: a v12 database that walks this
+         * branch's chain to v22 must end up with BOTH the code-graph tables and
+         * the two columns, or Room's open-time entity validation aborts.
+         *
+         * They stay nullable TEXT with no DEFAULT and no index — children are
+         * only ever enumerated on parent delete, and the sessions table is
+         * small. Existing rows read NULL = "top-level session", which is
+         * exactly what they are.
          */
         val MIGRATION_12_13 = object : Migration(12, 13) {
             override fun migrate(db: SupportSQLiteDatabase) {
+                // [T-p1-delegate-task] Child-session ownership. Written with
+                // addColumnIfMissing rather than a bare ALTER so a partial
+                // upgrade that already added a column (and rolled the version
+                // back) does not fail with "duplicate column name".
+                db.addColumnIfMissing("sessions", "parent_session_id", "TEXT")
+                db.addColumnIfMissing("sessions", "parent_tool_use_id", "TEXT")
                 db.execSQL(
                     """
                     CREATE TABLE IF NOT EXISTS code_symbols (
@@ -385,6 +404,25 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_code_edges_toName ON code_edges(toName)")
             }
         }
+
+        // [T-b11-no-downgrade-migrations] 上游 1.14 在这里还带了一整套「降级迁移」
+        // （13 → 12 的空操作、12 → 11，以及 14 → 13 的 DROP INDEX），本分支一律
+        // **不声明、不注册**，见 DatabaseVersionGuardTest 的同名用例：
+        //
+        //   * Room 用**当前运行的（旧）构建**编译进来的表来处理降级，所以放在本
+        //     源码树里的降级迁移永远不可能执行——[DatabaseVersionGuard] 会把
+        //     onDisk > CODE_DB_VERSION 的库直接送进引导页，而真需要它的旧构建早
+        //     于它存在；
+        //   * 它们还曾经是一条静默数据丢失通道（最后一条降级会丢掉
+        //     `message_versions`）；
+        //   * 声明本身就是缺陷：哪怕不可达也有误导性。
+        //
+        // 上游 1.14 的 `ChildSessionMigrationTest` 有一半用例（「降级保留子会话
+        // 两列」）依赖其中一个常量，本移植无法提供，那个用例已改为显式 Assume
+        // 跳过并写明原因，而不是让生产代码保留一条永远不会跑的迁移。
+        //
+        // 语义上确实没有损失：子会话那两列是可空 TEXT，降级后旧构建按列名绑定、
+        // 忽略它们（见 ChatSessionEntity 的 [parentSessionId] 说明）。
 
         /**
          * [T-kanban] Adds the kanban_tasks table for the task board.
@@ -546,6 +584,23 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * [T-upstream-1-14-session-parent] 上游 1.14 的 12→13 增量（子会话委派）：
+         * 我们的谱系在 12→13 建的是 `code_symbols`（版本号同名、DDL 不同），所以
+         * 上游那两列在本移植里必须由**本迁移**补上——照搬上游的 `Migration(12, 13)`
+         * 永远不会执行（我们的库早已越过 12）。`addColumnIfMissing` 是幂等的，
+         * 因此从上游 1.13 直升与本移植旧版升级两条来源都安全。
+         *
+         * sessions 上的 `index_sessions_updated_at` 我们在 15→16 已建（同名同定义），
+         * 上游 1.14 的 13→14 也只加了它，故此处不重复。
+         */
+        val MIGRATION_22_23 = object : Migration(22, 23) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.addColumnIfMissing("sessions", "parent_session_id", "TEXT")
+                db.addColumnIfMissing("sessions", "parent_tool_use_id", "TEXT")
+            }
+        }
+
         val MIGRATION_16_17 = object : Migration(16, 17) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.addColumnIfMissing("sessions", "permission_mode", "TEXT")
@@ -554,6 +609,16 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("UPDATE sessions SET permission_mode = 'ASK' WHERE permission_mode IS NULL OR TRIM(permission_mode) = ''")
             }
         }
+
+        // [T-merge-1.14] 上游 1.14 在这里另外声明了四个迁移对象，出处与去向：
+        //   * 两个「给 sessions 加子会话列」的语句：合并进上面的 12 → 13（见那里的
+        //     说明），否则 v12 库沿本分支链条升到 v22 时 sessions 永远不会有这两列，
+        //     而 Room 开库时按实体校验列集合，会直接 IllegalStateException。
+        //   * 一个「给 sessions 加 index_sessions_updated_at」的 13 → 14：该索引早已
+        //     由本分支的 15 → 16 建立，上游那条在这里是重复语句，且会把 v14 的 schema
+        //     快照（14.json 里没有该索引）对不上，故不重复声明。
+        //   * 其余四条**降级**迁移（版本号递减 / DROP INDEX）：不采纳，理由与写法见
+        //     上面 [T-b11-no-downgrade-migrations] 那段——本文件只允许出现升序迁移。
 
         fun getInstance(context: Context): AppDatabase {
             INSTANCE?.let { return it }
@@ -599,6 +664,7 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_19_20,
                         MIGRATION_20_21,
                         MIGRATION_21_22,
+                        MIGRATION_22_23,
                     )
                     .build()
                     .also { INSTANCE = it }

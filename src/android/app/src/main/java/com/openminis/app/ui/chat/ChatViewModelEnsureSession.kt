@@ -68,5 +68,16 @@ internal suspend fun ChatViewModel.ensureSession(): String {
     if (binding != null) {
         chatRepository.updateSessionBinding(realSessionId, binding, modelId)
     }
+    // [T-android-draft-no-row-on-open] Flush the thinking level the draft
+    // was carrying in memory. `applyGroupSessionDefaults` (group default)
+    // and the user's own pre-send pick both land in `_thinkingLevel` and
+    // deliberately skip the DB while there is no row; this is the single
+    // point where that becomes persistent, mirroring iOS's
+    // `flushPendingThinkingLevel()` call inside `ensureSessionReturningId`.
+    // Without it, a level chosen before the first message would be lost on
+    // re-entry — the regression that would otherwise come with not writing
+    // eagerly in those two writers.
+    // （上游 1.14 ChatViewModel.kt:6087-6096 原文。）
+    chatRepository.dao.updateThinkingOverride(realSessionId, _thinkingLevel.value.name)
     return realSessionId
 }

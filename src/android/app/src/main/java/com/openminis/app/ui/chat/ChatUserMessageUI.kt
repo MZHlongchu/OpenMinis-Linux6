@@ -41,6 +41,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Close
+// Upstream 1.14's "compact everything above" menu entry is the only addition
+// that needs an icon the port's trimmed import list did not already carry
+// ([T-android-compact-above], used below).
+import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Delete
@@ -104,6 +108,10 @@ internal fun UserMessageBubble(
     // [T-checkpoint-rewind] Rewind this turn; null while streaming (see
     // ChatRewindDialog.kt for the body and the gating rationale).
     onRewind: (() -> Unit)? = null,
+    // [T-android-compact-above] Summarize everything above this message
+    // (iOS parity: ChatMessageViews.swift's `onCompact`). Null hides the
+    // action — same streaming gate as Retry/Edit/Delete From Here.
+    onCompactAbove: (() -> Unit)? = null,
     onWithdraw: (() -> Unit)? = null,
     // [T-queue-shelved] 搁置气泡的长按「重新排队」：打断/异常后滞留的消息
     // 不自动重发，用户主动恢复。仅搁置态非 null（由 promptQueue 推导）。
@@ -382,6 +390,33 @@ internal fun UserMessageBubble(
                         leadingIcon = {
                             Icon(
                                 Icons.Default.Delete,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        },
+                    )
+                }
+                // [T-android-compact-above] Summarizes every message above this
+                // one. Sits last, after Delete From Here, matching the iOS
+                // context menu's order. Warning-tinted like Delete rather than
+                // plain: the replaced history is not recoverable, even though
+                // nothing is literally deleted from the DB. The caller passes
+                // null while streaming — compactAll() would reject the request
+                // anyway, so hiding it avoids a menu entry that only produces a
+                // "cannot compact while a turn is in progress" notice.
+                if (onCompactAbove != null) {
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                stringResource(R.string.chat_longpress_compact_above),
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        },
+                        onClick = { showMenu = false; onCompactAbove() },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Compress,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.error,
                                 modifier = Modifier.size(18.dp),

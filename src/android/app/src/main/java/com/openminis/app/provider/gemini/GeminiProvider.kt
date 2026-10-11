@@ -107,6 +107,23 @@ class GeminiProvider(
         messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel,
     ).failOnSilentEmptyCompletion(name)
 
+    /**
+     * [T-android-image-upload-format] One inline image as a Gemini part. Goes
+     * through [ImageBudget.prepareForUpload] like every other provider: the
+     * user-image and legacy image paths here used to inline the stored bytes
+     * with their stored MIME — no byte budget at all — and the tool-result
+     * path only had the budget. An image that cannot be made sendable becomes
+     * a text part.
+     */
+    private fun inlinePart(data: ByteArray, declaredMime: String?): JSONObject {
+        val upload = ImageBudget.prepareForUpload(data, declaredMime)
+            ?: return JSONObject().put("text", ImageBudget.UNSENDABLE_IMAGE_PLACEHOLDER)
+        return JSONObject().put("inlineData", JSONObject().apply {
+            put("mimeType", upload.mimeType)
+            put("data", upload.base64())
+        })
+    }
+
     private fun rawStreamMessage(
         messages: List<LLMMessage>,
         systemPrompt: String?,
@@ -213,12 +230,34 @@ class GeminiProvider(
         // field). For these, both the functionCall AND its paired functionResponse
         // are downgraded to plain-text summaries so no unsigned functionCall is
         // ever sent. Mirrors iOS convertMessages `unsignedToolCallIds`.
+        //
+        // [T-android-gemini3-parallel-thoughtsig] The set is computed PER
+        // MESSAGE and covers the whole message once any of its calls is
+        // unsigned — not per call.
+        //
+        // Gemini emits ONE thoughtSignature for a parallel batch, on the FIRST
+        // functionCall only; the rest of the batch legitimately has none. The
+        // per-call rule therefore replayed call #1 as a signed functionCall and
+        // downgraded #2..#5 to text, splitting a batch the signature describes
+        // as a whole. Gemini rejected that with
+        // `400 "Corrupted thought signature."` — reproduced on a Pixel 6:
+        // gemini-3.8-flash, five parallel subagent_task calls in one message,
+        // exactly one with a signature (len 4096) and four null, failing on
+        // every retryLast after a restart.
+        //
+        // A signature belongs to the model turn, so the turn is the unit that
+        // can be replayed or downgraded. All-or-nothing per message keeps a
+        // fully-signed turn on the fast path and sends a mixed one entirely as
+        // text, which is always accepted.
         val unsignedToolCallIds: Set<String> = if (!requiresSig) emptySet() else buildSet {
             for (msg in messages) {
-                for (part in msg.contentParts) {
-                    if (part is AgentContentPart.ToolUse && part.thoughtSignature.isNullOrEmpty()) {
-                        add(part.id)
-                    }
+                val toolUses = msg.contentParts.filterIsInstance<AgentContentPart.ToolUse>()
+                if (toolUses.isEmpty()) continue
+                // One unsigned call condemns the whole message's batch: sending
+                // the signed remainder alone is precisely what Gemini calls
+                // corrupted.
+                if (toolUses.any { it.thoughtSignature.isNullOrEmpty() }) {
+                    toolUses.forEach { add(it.id) }
                 }
             }
         }
@@ -244,12 +283,11 @@ class GeminiProvider(
                         is AgentContentPart.ToolUse -> {
                             if (part.id in unsignedToolCallIds) {
                                 // [T-android-gemini3-thoughtsig / #179] No signature
-                                // to replay → downgrade to a text summary rather than
-                                // send a bare functionCall (which gemini-3.x 400s on).
-                                val argsDesc = part.input.toString().let {
-                                    if (it.length > 500) it.take(500) + "…" else it
-                                }
-                                parts.put(JSONObject().put("text", "[Called ${part.name} with: $argsDesc]"))
+                                // to replay → downgrade to text rather than send a
+                                // bare functionCall (which gemini-3.x 400s on).
+                                // [T-gemini-unsigned-narration] As plain prose, not a
+                                // bracketed marker the model would imitate.
+                                parts.put(JSONObject().put("text", narratedToolCall(part.name, part.input)))
                             } else {
                                 parts.put(JSONObject().apply {
                                     // [T-android-gemini3-thoughtsig / #179] The
@@ -271,11 +309,14 @@ class GeminiProvider(
                                 // functionCall became text, so this result must too —
                                 // a functionResponse with no matching functionCall is
                                 // itself a 400.
-                                val safe = part.content.ifEmpty { " " }.let {
-                                    if (it.length > 1000) it.take(1000) + "…" else it
+                                // [T-gemini-unsigned-narration] Prose again (see
+                                // narratedToolResult), and the image a result
+                                // carried still goes along, as on the signed path.
+                                parts.put(JSONObject().put("text", narratedToolResult(part.content, part.isError)))
+                                val trBytes = part.imageData
+                                if (trBytes != null && trBytes.isNotEmpty()) {
+                                    parts.put(inlinePart(trBytes, part.imageMimeType))
                                 }
-                                val prefix = if (part.isError) "Error from" else "Result of"
-                                parts.put(JSONObject().put("text", "[$prefix ${part.name}: $safe]"))
                             } else {
                                 val responseObj = JSONObject()
                                 responseObj.put("name", part.name)
@@ -292,22 +333,12 @@ class GeminiProvider(
                                 // so the bytes go straight after as inlineData.
                                 val trBytes = part.imageData
                                 if (trBytes != null && trBytes.isNotEmpty()) {
-                                    val safeBytes = ImageBudget.compressUnderBudget(trBytes)
-                                    val safeMime = if (safeBytes === trBytes) {
-                                        part.imageMimeType ?: "image/jpeg"
-                                    } else "image/jpeg"
-                                    parts.put(JSONObject().put("inlineData", JSONObject().apply {
-                                        put("mimeType", safeMime)
-                                        put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
-                                    }))
+                                    parts.put(inlinePart(trBytes, part.imageMimeType))
                                 }
                             }
                         }
                         is AgentContentPart.ImageData -> {
-                            parts.put(JSONObject().put("inlineData", JSONObject().apply {
-                                put("mimeType", part.mimeType)
-                                put("data", Base64.encodeToString(part.data, Base64.NO_WRAP))
-                            }))
+                            parts.put(inlinePart(part.data, part.mimeType))
                         }
                     }
                 }
@@ -315,10 +346,7 @@ class GeminiProvider(
                 // Legacy: plain text with optional images
                 if (index == lastUserIndex && imageParts.isNotEmpty()) {
                     for (part in imageParts) {
-                        val inlineData = JSONObject()
-                        inlineData.put("mimeType", part.mimeType)
-                        inlineData.put("data", Base64.encodeToString(part.data, Base64.NO_WRAP))
-                        parts.put(JSONObject().put("inlineData", inlineData))
+                        parts.put(inlinePart(part.data, part.mimeType))
                     }
                 }
                 val legacyText = msg.content.ifEmpty { " " }
@@ -350,12 +378,33 @@ class GeminiProvider(
         }
 
         // Tools
+        //
+        // [T-android-gemini-tool-field] The wrapper key is `functionDeclarations`,
+        // camelCase — the REST JSON spelling. `function_declarations` is the
+        // proto/gRPC field name; Google's own endpoint accepts either, which is
+        // why this went unnoticed, but relays that transcode the request do not:
+        // a control-variable probe against the same Flash model returned a real
+        // `functionCall` for camelCase and TOOL_UNAVAILABLE for snake_case, and
+        // one native streaming request came back HTTP 200 with `parts: []` and
+        // finishReason STOP — the "model returned an empty response" the user
+        // sees. iOS has always sent camelCase (GeminiProvider.swift:193, :262),
+        // which is why the same account works there and not here.
+        //
+        // toolConfig goes with it for the same reason: iOS sends an explicit
+        // AUTO functionCallingConfig on both the streaming and non-streaming
+        // paths. Omitting it leaves the calling mode to the endpoint's default,
+        // and a relay that defaults differently can decline to call tools at all
+        // while still answering 200.
         if (tools.isNotEmpty()) {
             val funcDecls = JSONArray()
             for (tool in tools) {
                 funcDecls.put(tool.toGeminiJson())
             }
-            body.put("tools", JSONArray().put(JSONObject().put("function_declarations", funcDecls)))
+            body.put("tools", JSONArray().put(JSONObject().put("functionDeclarations", funcDecls)))
+            body.put(
+                "toolConfig",
+                JSONObject().put("functionCallingConfig", JSONObject().put("mode", "AUTO")),
+            )
         }
 
         val config = JSONObject()
@@ -517,33 +566,129 @@ class GeminiProvider(
         }
     }
 
+    /**
+     * Parse `usageMetadata` into [LLMUsage]. [GH#384]
+     *
+     * Google's shape differs from this app's convention in two ways:
+     *
+     * 1. `candidatesTokenCount` counts ONLY the visible answer. Gemini 3.x
+     *    bills thinking separately in `thoughtsTokenCount`, the API keeping
+     *    `totalTokenCount = prompt + candidates + thoughts`, so reading
+     *    candidates alone drops every thinking token. Captured on
+     *    gemini-3.8-flash: prompt 11, candidates 20, thoughts 310 — 94% of the
+     *    output went unreported.
+     *
+     * 2. `promptTokenCount` is the FULL input, cache included, while
+     *    `inputTokens` here means the FRESH part and the cached part travels in
+     *    `cacheReadInputTokens` (same as [OpenAIProvider]'s extractUsage).
+     *    Reporting the full prompt AND the cache double-counts it: hit rate is
+     *    `cacheRead / (input + cacheRead)`, so a real 91.8% hit (45026 of
+     *    49016) would render as 47.8%. `latestContextTokens` keeps the full
+     *    prompt, since that IS the context size.
+     *
+     * `cachedContentTokenCount` appears only on the FINAL chunk of a stream, so
+     * most chunks legitimately report no cache; null (not 0) marks "this chunk
+     * said nothing about caching".
+     */
     private fun extractUsage(json: JSONObject): LLMUsage? {
         val usage = json.optJSONObject("usageMetadata") ?: return null
-        // [T-gemini-usage-thoughts] 思考型模型（2.5/3.x，档位经
-        // buildThinkingConfig 真的下发）把思考 token 单独记在
-        // thoughtsTokenCount 里，candidatesTokenCount 只是可见输出。旧写法漏读
-        // 该项 → 输出用量被系统性低估，下游 noteRunUsage / goalManager
-        // .recordUsage / SubAgentRunner 的共享预算（注释明确是硬停）都按 output
-        // 计账，少算会让硬停偏晚。cachedContentTokenCount 是隐式缓存命中量，
-        // 补进 cacheReadInputTokens 让缓存命中率统计有数。
-        val cachedContentTokens = usage.optInt("cachedContentTokenCount", 0).takeIf { it > 0 }
-        val promptTokens = usage.optInt("promptTokenCount", 0)
-        // [T-b15-usage-fresh-input] inputTokens 必须是 fresh-only：Gemini 的
-        // promptTokenCount 是**完整**输入（官方语义已含 cachedContentTokenCount
-        // 那部分），直接写回会让下游按「fresh + cache 不相交」求和/求率时把缓存
-        // 前缀重复计入——100% 命中显示成 ~50%，与 OpenAIProviderUsage 的
-        // [T-b15-usage-fresh-input] 口径不一致。对齐 Chat Completions / Responses
-        // 两处：非负才减，无缓存字段则原样。latestContextTokens 仍是完整 prompt
-        // （那才是真实上下文占用，dynamicMaxTokens / ContextPolicy 依赖它）。
-        val freshInput = cachedContentTokens
-            ?.let { cached -> (promptTokens - cached).takeIf { it >= 0 } }
-            ?: promptTokens
-        return LLMUsage(
-            inputTokens = freshInput,
-            outputTokens = usage.optInt("candidatesTokenCount", 0) + usage.optInt("thoughtsTokenCount", 0),
-            cacheReadInputTokens = cachedContentTokens,
-            latestContextTokens = promptTokens,
-        )
+        // [T-a15-usage-fresh-input-parity] provider 的用量口径，与上游 OpenAI 的
+        // parseChatCompletionsUsage / parseResponsesAPIUsage 同形：只有当
+        // `prompt - cached` 仍非负时才相减，减成负数（中继把
+        // cachedContentTokenCount 报得比 promptTokenCount 还大，实测有这种中继）说明
+        // 缓存那个数不可信，此时回退成**完整 prompt**，而不是回 0 —— 回 0 会让这次
+        // 请求看起来"100% 命中"，把下游所有用量/预算记账（noteRunUsage /
+        // goalManager.recordUsage / SubAgentRunner 的共享预算）一起带偏。
+        //
+        // 与同伴对象里 [parseUsageMetadata] 的分工是**分层**，不是重复：
+        // parseUsageMetadata 是线格式解析器，回答"这段 JSON 说了什么"，契约是
+        // `coerceAtLeast(0)`（"never negative"，由 GeminiProviderTest 的
+        // `extractUsage clamps input …` 钉住）；这里是 provider 报给下游的记账口径，
+        // 与 OpenAI 两处同口径。两条断言因此都成立，且都不是被让路让出来的。
+        val parsed = parseUsageMetadata(usage)
+        val cached = parsed.cacheReadInputTokens
+        val prompt = parsed.latestContextTokens
+        return if (cached != null && cached > prompt) parsed.copy(inputTokens = prompt) else parsed
+    }
+
+    companion object {
+        /**
+         * [T-gemini-unsigned-narration] How much of a downgraded tool result
+         * to inline. Large outputs are offloaded upstream already, so this
+         * only bounds genuinely inline results (was 1000 here, 500 on iOS).
+         */
+        const val NARRATED_RESULT_LIMIT = 2000
+
+        /**
+         * [T-gemini-unsigned-narration] Port of iOS 1a33fc85f. Gemini 3.x
+         * needs a thoughtSignature on every historical functionCall; a call
+         * without one (made by another model before a switch, or older than
+         * signature capture) is sent as history TEXT instead. That text was
+         * `[Called shell_execute with: {...}]` - a bracketed pseudo-marker the
+         * model reads as part of the transcript and imitates: it starts
+         * writing `[Called ...]` as its answer instead of calling the tool.
+         * Plain prose carries the same facts with no syntax worth copying.
+         */
+        internal fun narratedToolCall(name: String, input: JSONObject): String =
+            "Earlier in this conversation, the $name tool was run with arguments ${canonicalJson(input)}."
+
+        /** Follows the call's sentence, so it names no tool of its own. */
+        internal fun narratedToolResult(content: String, isError: Boolean = false): String {
+            val lead = if (isError) "It failed" else "It returned"
+            if (content.isEmpty()) return if (isError) "It failed with no output." else "It returned no output."
+            if (content.length <= NARRATED_RESULT_LIMIT) return "$lead:\n$content"
+            // Head kept; the cut is stated in words, not with a marker.
+            return "$lead (showing the first $NARRATED_RESULT_LIMIT of ${content.length} characters):\n" +
+                content.take(NARRATED_RESULT_LIMIT)
+        }
+
+        /** JSON with object keys sorted, so identical history gives an identical prompt (cache stability). */
+        internal fun canonicalJson(value: Any?): String = when (value) {
+            is JSONObject -> value.keys().asSequence().sorted()
+                .joinToString(",", "{", "}") { k -> JSONObject.quote(k) + ":" + canonicalJson(value.opt(k)) }
+            is org.json.JSONArray -> (0 until value.length()).joinToString(",", "[", "]") { canonicalJson(value.opt(it)) }
+            null, JSONObject.NULL -> "null"
+            is String -> JSONObject.quote(value)
+            // numberToString throws on a non-finite value; a replayed call must never fail the request build.
+            is Number -> runCatching { JSONObject.numberToString(value) }.getOrDefault("null")
+            is Boolean -> value.toString()
+            else -> JSONObject.quote(value.toString())
+        }
+
+        /** Exposed for tests and for any other endpoint speaking this protocol. */
+        fun parseUsageMetadata(usage: JSONObject): LLMUsage {
+            val promptTokens = usage.optInt("promptTokenCount", 0)
+            val candidatesTokens = usage.optInt("candidatesTokenCount", 0)
+            val thoughtsTokens = usage.optInt("thoughtsTokenCount", 0)
+            // Absent or 0 both mean "no cache to report" — keep null so a
+            // cache-less chunk stays distinguishable from a measured zero.
+            val cachedTokens = usage.optInt("cachedContentTokenCount", 0).takeIf { it > 0 }
+
+            // [T-gemini-usage-thoughts] 我们的审计修复，1.14 把这段搬进同伴对象后
+            // 原样保留：思考型模型（2.5/3.x，档位经 buildThinkingConfig 真的下发）
+            // 把思考 token 单独记在 thoughtsTokenCount 里，candidatesTokenCount
+            // 只是可见输出。旧写法漏读该项 → 输出用量被系统性低估，下游
+            // noteRunUsage / goalManager.recordUsage / SubAgentRunner 的共享预算
+            // （注释明确是硬停）都按 output 计账，少算会让硬停偏晚。
+            val totalOutput = candidatesTokens + thoughtsTokens
+            // [T-b15-usage-fresh-input] inputTokens 必须是 fresh-only：Gemini 的
+            // promptTokenCount 是**完整**输入（官方语义已含
+            // cachedContentTokenCount 那部分），直接写回会让下游按「fresh + cache
+            // 不相交」求和/求率时把缓存前缀重复计入——100% 命中显示成 ~50%，与
+            // OpenAIProviderUsage 的 [T-b15-usage-fresh-input] 口径不一致。钳到
+            // 非负：中继报出比 prompt 还大的缓存量时不能给出负的输入计数。
+            // latestContextTokens 仍是完整 prompt（那才是真实上下文占用，
+            // dynamicMaxTokens / ContextPolicy 依赖它）。
+            val freshInput = cachedTokens?.let { (promptTokens - it).coerceAtLeast(0) } ?: promptTokens
+
+            return LLMUsage(
+                inputTokens = freshInput,
+                outputTokens = totalOutput,
+                cacheCreationInputTokens = null,
+                cacheReadInputTokens = cachedTokens,
+                latestContextTokens = promptTokens,
+            )
+        }
     }
 
     private fun mapHttpError(statusCode: Int, body: String, retryAfterHeader: String? = null): LLMError {
@@ -572,8 +717,9 @@ class GeminiProvider(
                 return LLMError.ContentFiltered(message)
         }
         val transientCodes = setOf(500, 502, 503, 504, 529)
-        if (statusCode in transientCodes) return LLMError.TransientError(message)
-        return LLMError.ProviderError(message)
+        // [T-android-503-fallback] Status carried through for group fallback.
+        if (statusCode in transientCodes) return LLMError.TransientError(message, httpStatus = statusCode)
+        return LLMError.ProviderError(message, httpStatus = statusCode)
     }
 
     private fun mapError(error: Throwable): LLMError {

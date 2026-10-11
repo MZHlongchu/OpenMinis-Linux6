@@ -110,12 +110,25 @@ internal fun OpenAIProvider.mapHttpError(statusCode: Int, body: String, retryAft
     val transientCodes = setOf(500, 502, 503, 504, 529)
     if (statusCode in transientCodes) {
         // 503 with permanent failure indicators → ProviderError (trigger group fallback)
+        // [T-android-503-fallback] (上游 1.14) 把真实状态码结构化带出去。
+        // LLMError.ProviderError.httpStatus 与 isFallbackable/httpServerErrorStatus
+        // 都是按结构化状态判定的；不传的话这里只能靠 `[503] …` 前缀的散文回退，
+        // 而该回退正是"Cloudflare 522 + HTML body 丢失 group fallback"的成因。
+        // 判定本身保留我们的 HttpRetryAfter.isPermanentCapacityBody（比上游的
+        // 两个 contains 覆盖更全），只补 httpStatus。
         if (statusCode == 503 && HttpRetryAfter.isPermanentCapacityBody(body)) {
-            return LLMError.ProviderError(message)
+            return LLMError.ProviderError(message, httpStatus = statusCode)
         }
-        return LLMError.TransientError(message)
+        // [T-android-503-fallback] Carry the real status so group fallback
+        // can tell a provider-side 5xx apart from a local failure that also
+        // maps to TransientError (TTFB timeout, empty stream).
+        return LLMError.TransientError(message, httpStatus = statusCode)
     }
-    return LLMError.ProviderError(message)
+    // [T-fallback-5xx-status] Every other status (4xx, and 5xx outside the
+    // transient set such as Cloudflare 520-528) keeps its code so group
+    // fallback can see a server error regardless of how the body was
+    // formatted above.
+    return LLMError.ProviderError(message, httpStatus = statusCode)
 }
 
 internal fun OpenAIProvider.mapError(error: Throwable): LLMError = mapThrowableToLLMError(error)

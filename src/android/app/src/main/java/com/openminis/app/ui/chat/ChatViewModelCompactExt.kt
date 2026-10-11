@@ -405,6 +405,13 @@ private inline fun ChatViewModel.compactAllImpl(
                 "[Compact] finished: success=$compactSucceeded timedOut=$timedOut " +
                     "calls=${compactCallsIssued.get()}",
             )
+            // [T-ctx-measure-outbound] + [T-ctx-usage-after-compact] 压缩成功后的收尾：
+            // 先按压缩后的历史重新测量（写 _lastTurnContextTokens，光晕/用量环跟上下一次
+            // 请求的真实大小），再发一条新 generation 的占位提示行——否则输入框一直挂着
+            // 压缩前的 80%+，看起来压缩没生效。上游 ChatViewModel.kt:3990-3998 原文；
+            // 具体两步在 ChatViewModel.onCompactionFinished（本文件是扩展函数，读不到
+            // 那边的 private 成员——可见性降级只是拆文件的后果，顺序语义不变）。
+            onCompactionFinished(compactSucceeded)
             // [T-android-auto-compact-inloop] Signal the awaiting in-loop
             // caller. In `finally` so a thrown/cancelled compaction can
             // never strand the agent loop waiting on a callback.

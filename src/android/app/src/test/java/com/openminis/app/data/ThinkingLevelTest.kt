@@ -47,10 +47,12 @@ class ThinkingLevelTest {
     }
 
     /**
-     * The repository's Json instance uses coerceInputValues so an unknown enum
-     * value in a persisted blob falls back to the property default instead of
-     * throwing SerializationException. This is what stops a newer-build config
-     * from wiping the UI when read by an older build.
+     * The repository's Json instance uses coerceInputValues. ThinkingLevel no
+     * longer relies on it: [ThinkingLevelSerializer] reads the value as a plain
+     * string, so an unknown level (one a NEWER build wrote) clamps to XHIGH —
+     * the same rule as [ThinkingLevel.decoded] and iOS — instead of being
+     * coerced to null. It still never throws, so the config is never wiped.
+     * [T-android-restore-thinking-level]
      */
     private val json = Json {
         ignoreUnknownKeys = true
@@ -59,21 +61,18 @@ class ThinkingLevelTest {
     }
 
     @Test
-    fun modelGroup_unknownThinkingLevel_coercesToNull_notThrow() {
-        // Simulate JSON a NEWER build wrote: defaultThinkingLevel="ULTRA" is a
-        // value this test's enum DOES know, so also throw in a truly-unknown one.
+    fun modelGroup_unknownThinkingLevel_clampsToXHigh_notThrow() {
         val wire = """{"id":"g1","name":"G","memberEntryIds":[],"defaultThinkingLevel":"SUPREME"}"""
         val group = json.decodeFromString(ModelGroup.serializer(), wire)
-        // Unknown enum value on a nullable-with-default field coerces to null.
-        assertNull(group.defaultThinkingLevel)
+        assertEquals(ThinkingLevel.XHIGH, group.defaultThinkingLevel)
         assertEquals("G", group.name) // other fields intact — config NOT wiped
     }
 
     @Test
-    fun modelOverrides_unknownMaxThinkingLevel_coercesToNull() {
+    fun modelOverrides_unknownMaxThinkingLevel_clampsToXHigh() {
         val wire = """{"maxThinkingLevel":"SUPREME","displayName":"X"}"""
         val ov = json.decodeFromString(ModelOverrides.serializer(), wire)
-        assertNull(ov.maxThinkingLevel)
+        assertEquals(ThinkingLevel.XHIGH, ov.maxThinkingLevel)
         assertEquals("X", ov.displayName)
     }
 
@@ -93,6 +92,24 @@ class ThinkingLevelTest {
         assertNull(ov.autoCompactEnabled)
         assertNull(ov.compactThresholdPercent)
         assertEquals("old", ov.displayName)
+    }
+
+    /**
+     * [U14-merge] Both sides added a test to this class and both are kept:
+     * ours covers the Android-only auto-compact override knobs
+     * (ModelOverrides.autoCompactEnabled / compactThresholdPercent, whose
+     * defaults must stay "inherit" and whose isEmpty must stay false for an
+     * explicit value so the overrides blob is not dropped on export), upstream
+     * 1.14 covers the iOS-spelling read path of the shared
+     * ThinkingLevelSerializer. Neither test can fail because of the other —
+     * they exercise different fields of the same merged ModelOverrides.
+     */
+    @Test
+    fun decoded_acceptsIosRawValues() {
+        assertEquals(ThinkingLevel.HIGH, ThinkingLevel.decoded("high"))
+        assertEquals(ThinkingLevel.MAX, ThinkingLevel.decoded("max"))
+        assertEquals(ThinkingLevel.OFF, ThinkingLevel.decoded("off"))
+        assertEquals(null, ThinkingLevel.parseOrNull("SUPREME"))
     }
 
     @Test

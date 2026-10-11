@@ -1,6 +1,7 @@
 package com.openminis.app.ui.settings.backup
 
 import android.content.Intent
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -51,6 +52,8 @@ import com.openminis.app.ui.components.MinisTextButton
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.openminis.app.backup.PhoneBackupFolderStore
 import com.openminis.app.backup.remote.RcloneBackendCatalog
+import com.openminis.app.backup.remote.RcloneRemoteStore
+import com.openminis.app.data.SafMountHelper
 import com.openminis.app.ui.settings.SettingsScaffold
 import com.openminis.app.ui.settings.SettingsSection
 import com.openminis.app.ui.settings.SettingsSwitchRow
@@ -88,6 +91,37 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
     // Name of the destination saved by the last completed save, so the list
     // can confirm it. Cleared once acknowledged.
     var justSaved by remember { mutableStateOf<String?>(null) }
+
+    // [T-android-backup-local-folder] Pick a folder on this device as a
+    // destination. Unlike the mount picker in MountedFoldersScreen, ANY
+    // document provider is accepted here — a backup is written with
+    // ContentResolver, so it never needs a POSIX path, and rejecting
+    // Drive/Dropbox would remove the case where a local destination is most
+    // useful (an off-device copy with no server to configure). (upstream 1.14)
+    //
+    // 与上面的 pickPhoneFolder 并存，不是重复：这条走 RcloneRemoteStore 的
+    // BACKEND_LOCAL 远端（BackupRunController 的本地路由消费），上面那条走
+    // PhoneBackupFolderStore（BackupViewModel 的 copyPackage / 手机存储还原
+    // 消费）。两条管线都已接线，各自都需要自己的入口，删掉任一个都会让对应
+    // 的写入路径无法从 UI 触达。
+    val folderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        // Without a PERSISTED grant the URI dies with this process, and the
+        // next backup would fail on a destination the user believes is saved.
+        // Refuse to save one we cannot hold on to.
+        if (!SafMountHelper.handlePickerResult(context, uri)) {
+            Toast.makeText(
+                context,
+                context.getString(R.string.backup_dest_local_folder_no_permission),
+                Toast.LENGTH_LONG,
+            ).show()
+            return@rememberLauncherForActivityResult
+        }
+        val display = runCatching { SafMountHelper.treeDisplayPath(uri) }.getOrNull().orEmpty()
+        justSaved = vm.addLocalFolder(uri.toString(), display)
+    }
 
     SettingsScaffold(title = stringResource(R.string.backup_dest_title), onBack = onBack) {
         if (browse != null) {
@@ -160,7 +194,15 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
                         title = r.name,
                         subtitle = stringResource(
                             R.string.backup_dest_row_subtitle,
-                            r.backend.uppercase(), r.path.trimStart('/'),
+                            // A local folder has no protocol to name, and
+                            // "LOCAL-FOLDER" as a pseudo-protocol reads like a
+                            // bug. Use the localized label instead.
+                            if (RcloneRemoteStore.isLocalFolder(r.backend)) {
+                                stringResource(R.string.backup_dest_kind_local_folder)
+                            } else {
+                                r.backend.uppercase()
+                            },
+                            r.path.trimStart('/'),
                         ),
                         checked = r.enabled,
                         onCheckedChange = { vm.setEnabled(r.name, it) },
@@ -194,6 +236,16 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
                     ) { Text(stringResource(R.string.backup_dest_remove, f.name)) }
                 }
             }
+
+            // [T-android-backup-local-folder] Second, equal-weight entry point:
+            // a destination can be a folder on this device, not only a server.
+            // Outlined rather than filled so "Add Server…" stays the primary
+            // action for the remote-backup case the screen was built for.
+            Spacer(Modifier.height(8.dp))
+            MinisOutlinedButton(
+                onClick = { folderPicker.launch(null) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.backup_dest_add_local_folder)) }
 
             if (remotes.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))

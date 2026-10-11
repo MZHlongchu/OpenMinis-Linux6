@@ -83,7 +83,9 @@ object OpenRouterOAuthManager {
                     .appendQueryParameter("state", state)
                     .appendQueryParameter("_nc", System.currentTimeMillis().toString()) // cache-bust
                     .build()
-                Log.d(TAG, "OpenRouter authorization URL prepared")
+                // [T-android-oauth-log-redact, upstream 1.14] code_challenge /
+                // state are masked; the rest of the URL stays readable.
+                Log.d(TAG, "Auth URL: ${OAuthLogRedaction.url(authUrl.toString())}")
 
                 // Open in Chrome Custom Tab (in-app browser, like iOS SFSafariViewController)
                 val customTabsIntent = CustomTabsIntent.Builder()
@@ -102,6 +104,11 @@ object OpenRouterOAuthManager {
             }
 
             // Exchange code for permanent API key
+            // [T-android-oauth-foreground-exchange] The callback lands while the
+            // user is still in the Custom Tab, i.e. with Minis in the background,
+            // where the OS blocks this app's network (DNS answers "no address").
+            // Exchange only once the user is back.
+            OAuthForegroundGate.awaitForeground(TAG)
             exchangeCode(code, verifier)
         }
 
@@ -131,7 +138,11 @@ object OpenRouterOAuthManager {
         val hash = MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray(Charsets.UTF_8))
         val challenge = standardBase64ToUrlSafe(hash)
 
-        Log.d(TAG, "PKCE verifier and challenge generated")
+        // [T-android-oauth-log-redact, upstream 1.14] Length + first 4 chars only.
+        // (Both are single-use secrets: the verifier authorizes the exchange and
+        // the challenge is derived from it.)
+        Log.d(TAG, "PKCE verifier ${OAuthLogRedaction.secret(verifier)}")
+        Log.d(TAG, "PKCE challenge ${OAuthLogRedaction.secret(challenge)}")
 
         return verifier to challenge
     }
@@ -161,7 +172,10 @@ object OpenRouterOAuthManager {
         body.put("code_verifier", verifier)
         body.put("code_challenge_method", "S256")
 
-        Log.d(TAG, "OpenRouter token exchange request prepared")
+        // [T-android-oauth-log-redact, upstream 1.14] The request body holds the
+        // authorization code and the PKCE verifier — log only redacted forms of
+        // each (the raw-body log this replaced leaked both).
+        Log.d(TAG, "Exchange request: code=${OAuthLogRedaction.secret(code)} verifier=${OAuthLogRedaction.secret(verifier)}")
 
         val request = Request.Builder()
             .url(KEYS_URL)

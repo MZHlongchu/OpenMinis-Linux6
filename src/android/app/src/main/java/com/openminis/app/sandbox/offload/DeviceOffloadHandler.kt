@@ -142,15 +142,40 @@ class DeviceOffloadHandler(private val context: Context) : NativeOffloadHandler 
         return json
     }
 
-    private fun dirSize(dir: File): Long {
-        var n = 0L
-        dir.walkTopDown()
-            .onEnter { child -> child.name != "ubuntu-rootfs" && child.name != "alpine-rootfs" }
-            .forEach { if (it.isFile) n += it.length() }
-        return n
-    }
+    /**
+     * [T-android-storage-symlink-inflation] Fourth copy of the sizing walk,
+     * found by the sweep that followed 754e65eac. Same following-walk defect:
+     * `walkTopDown()`, `isFile` and `length()` all resolve symlinks, so a
+     * directory link had its subtree counted again.
+     *
+     * Worth fixing even though this is "only" a diagnostic: the number goes to
+     * the MODEL as `app_data_mb`, and an agent reasoning about whether to free
+     * space from a figure several times the truth is worse than one with no
+     * figure at all.
+     *
+     * [T-android-offload-rootfs-deadline] Linux port increment kept on top of
+     * that fix: `filesDir` also holds the PRoot guest trees
+     * ([GUEST_ROOTFS_DIR_NAMES]), and walking a full Ubuntu rootfs made `all`
+     * exceed the 20s offload deadline. They are skipped here — `app_data_note`
+     * says so, and the Storage screen sizes them on their own — while every
+     * other entry still goes through the shared, symlink-safe implementation
+     * (which for a plain file walks just that file).
+     */
+    private fun dirSize(dir: File): Long =
+        dir.listFiles()
+            ?.filterNot { it.isDirectory && it.name in GUEST_ROOTFS_DIR_NAMES }
+            ?.sumOf { com.openminis.app.data.session.SessionStorage.directorySize(it) }
+            ?: 0L
 
     companion object {
+        /**
+         * [T-android-offload-rootfs-deadline] The PRoot guest trees under
+         * `filesDir` (see [com.openminis.app.sandbox.RootfsManager.rootfsDir]).
+         * Same names the Storage screen and the backup walker use; `app_data_mb`
+         * deliberately leaves their bytes to those, and to `du` on the guest.
+         */
+        private val GUEST_ROOTFS_DIR_NAMES = setOf("ubuntu-rootfs", "alpine-rootfs")
+
         private const val HELP = """android-device — device model, OS, battery, storage (JSON)
 
 Usage:

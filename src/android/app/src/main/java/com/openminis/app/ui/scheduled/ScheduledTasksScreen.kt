@@ -277,6 +277,28 @@ private fun ScheduledTaskRow(
 }
 
 internal fun formatScheduleSummary(task: ScheduledTask): String {
+    // [T-android-scheduled-triggers] 上游 1.14 新增的这条相对触发器摘要用
+    // SimpleDateFormat 拼 "next …"；本移植的审计修复已把本文件的时间格式化
+    // 换成线程安全的 [IsoTime]（见下面 CALENDAR 分支的 `next`，同一 pattern、
+    // 同样 Locale.getDefault()），这里沿用同一实现，而不是把
+    // java.text/java.util 三个 import 加回来。
+    val nextSuffix = task.nextTriggerMs()?.let {
+        " · next ${IsoTime.formatPattern(it, "MMM d HH:mm")}"
+    } ?: ""
+    // [T-android-scheduled-triggers] Tasks the assistant created with
+    // minis-scheduled's relative triggers, described in the CLI's own terms.
+    when (task.triggerKind) {
+        com.openminis.app.scheduled.ScheduledTriggerKind.AFTER ->
+            return "Once after ${com.openminis.app.scheduled.ScheduledTaskDetailModel.formatDuration(task.delaySec ?: 0L)}$nextSuffix"
+        com.openminis.app.scheduled.ScheduledTriggerKind.INTERVAL -> {
+            val every = com.openminis.app.scheduled.ScheduledTaskDetailModel.formatDuration(task.intervalSec ?: 0L)
+            val count = task.maxFires?.let { " ×$it (${task.remainingFires} left)" } ?: ""
+            return "Every $every$count$nextSuffix"
+        }
+        com.openminis.app.scheduled.ScheduledTriggerKind.ON_COMPLETION ->
+            return "After ${task.onCompletionOf.orEmpty().take(8)} finishes"
+        com.openminis.app.scheduled.ScheduledTriggerKind.CALENDAR -> Unit
+    }
     val time = "%02d:%02d".format(task.timeOfDayHour, task.timeOfDayMinute)
     val repeat = when (task.repeatMode) {
         ScheduledRepeatMode.ONCE -> "Once"

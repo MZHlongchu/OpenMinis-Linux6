@@ -19,6 +19,25 @@ sealed class AgentContentPart {
         // functionCall part (required by gemini-3.x or the request 400s). Null
         // for non-Gemini providers and for pre-fix / migrated history.
         val thoughtSignature: String? = null,
+        /**
+         * [T-offload-stub-system-reminder] (GH#374) True when the context
+         * offloader replaced this call's `content` argument with a
+         * pruned-argument notice because the real payload was moved to
+         * `/var/minis/offloads/…`.
+         *
+         * Provenance, not presentation: the notice text is also detectable with
+         * [com.openminis.app.data.ContextOffload.isOffloadPlaceholder], but that
+         * is a string test on a payload the model can imitate, whereas this flag
+         * is set only by the offloader. Defaults to false so every existing
+         * construction site and all history persisted before this change decode
+         * unchanged. Mirrors iOS `isOffloadedArgument`.
+         *
+         * [U14-merge] Upstream 1.14 addition, kept as a CONSTRUCTOR parameter
+         * (not a body property) because the offloader rewrites the call through
+         * `copy(input = newInput, isOffloadedArgument = true)`
+         * (ChatViewModel ~11679) — `copy` only carries constructor parameters.
+         */
+        val isOffloadedArgument: Boolean = false,
     ) : AgentContentPart() {
         /**
          * [T-b1-tooluse-json-length] Length of `input.toString()`, computed once
@@ -36,6 +55,10 @@ sealed class AgentContentPart {
          * part afterwards (see `ChatViewModel.resealToolInputInHistory`, used by
          * the `ToolJsonRepair` path). Declared in the body, not the parameter
          * list, so data-class equality/`toString` are unchanged.
+         *
+         * [U14-merge] Kept alongside upstream's new `isOffloadedArgument`
+         * parameter: the two are orthogonal (a byte-length snapshot vs. an
+         * offload provenance flag) and both have live consumers.
          */
         val inputJsonLength: Int = input.toString().length
     }

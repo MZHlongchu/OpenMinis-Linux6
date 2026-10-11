@@ -466,6 +466,42 @@ class ChatViewModel(
         }
 
         /**
+         * [OpenMinis#377] 这个 provider 错误说的是「我不接受这个请求参数」，还是
+         * 「这份载荷太大」？
+         *
+         * 只会被用来 **阻止** 重试，所以刻意保守：任何一点「超长」的味道都让它
+         * 放弃判断（继续拆分），认不出来的措辞也照旧拆分。
+         *
+         * [T-merge-1.14-377] 上游 1.14 的实现（upstream-1.14
+         * `ui/chat/ChatViewModel.kt:245-268`）在合并时整个丢了，本移植只剩
+         * `[429]` / [isPermanentCapacityBody] 两条判据。于是
+         * `reasoning.effort:"none" is not supported` 这类「端点不接受这个参数」的
+         * 400 又回到「减半重试」，一条没变的参数把 963→481→240→120 条消息连试四次、
+         * 烧完整轮预算才报错（OpenMinis#377 的原始报告）。
+         *
+         * 这里把上游判据原样搬回来，并与本移植已有的两条并列成 **并集**：任何一条
+         * 命中都表示「变小也救不了」，不再拆分。
+         */
+        internal fun looksLikeParameterRejection(error: LLMError.ProviderError): Boolean {
+            val msg = error.message?.lowercase() ?: return false
+            // Any whiff of a size problem → not ours, keep splitting.
+            val sizeMarkers = listOf(
+                "context_length", "context length", "too long", "too large",
+                "maximum context", "max_tokens", "token limit", "exceeds",
+                "reduce the length", "payload",
+            )
+            if (sizeMarkers.any { msg.contains(it) }) return false
+            // A named request parameter the endpoint will not accept. The reported
+            // case: "reasoning.effort: 'none' is not supported".
+            val paramMarkers = listOf(
+                "is not supported", "unsupported parameter", "unsupported value",
+                "invalid_request_error", "invalid parameter", "unrecognized request argument",
+                "does not support parameter", "extra_forbidden",
+            )
+            return paramMarkers.any { msg.contains(it) }
+        }
+
+        /**
          * Should a failed summary attempt be retried by splitting the input in
          * half? Pure predicate, in the companion so it is testable without an
          * Android-bound ViewModel; [isSegmentRetryableError] delegates here.
@@ -480,6 +516,10 @@ class ChatViewModel(
          */
         internal fun shouldSplitOnError(error: Throwable): Boolean {
             if (error is CancellationException) return false
+            // [T-compact-idle-timeout] 上游 1.14 ChatViewModel.kt:10756-10760，合并时丢了：
+            // 一条静下来的流证明不了任何关于载荷体积的事——请求早被接受并且一直在流，
+            // 直到连接死掉。切半只会往同一根断管里再发两次、把调用预算浪费两遍。
+            if (error is CompactIdleTimeoutException) return false
             if (error is LLMError) {
                 return when (error) {
                     // Never worth a smaller payload:
@@ -498,7 +538,11 @@ class ChatViewModel(
                     is LLMError.TransientError -> isFirstByteTimeout(error)
                     is LLMError.ProviderError ->
                         !error.detail.contains("[429]") &&
-                            !com.openminis.app.harness.agent.HttpRetryAfter.isPermanentCapacityBody(error.detail)
+                            !com.openminis.app.harness.agent.HttpRetryAfter.isPermanentCapacityBody(error.detail) &&
+                            // [T-merge-1.14-377] 请求形状被拒 ≠ 载荷太大：再小也还是
+                            // 那个不被接受的参数（#377）。与本移植的 [429]/容量体判据
+                            // 是并集，任一条命中即不拆。
+                            !looksLikeParameterRejection(error)
                     // DecodingError / Unknown stay retryable: an over-length
                     // refusal arrives untyped, and that is the case splitting exists for.
                     else -> true
@@ -528,18 +572,37 @@ class ChatViewModel(
          * leading blank run), but that trimmed value drives the DECISION
          * only — it is never assigned back. Mirrors iOS `e6c0ace6a`.
          *
+         * [T-android-append-to-input-fence] A fenced block is the one snippet
+         * whose own shape decides the separator, on both ends. It must START
+         * on a line of its own: a separator space would leave the opening
+         * fence mid-line, where Markdown renders it as inline text instead of
+         * a block. And it must be FOLLOWED by a newline, so the next keystroke
+         * lands on a fresh line instead of on the closing fence. Mirrors iOS
+         * `44b465e11`.
+         *
+         * Restored from upstream 1.14 (`upstream-1.14:src/android/app/
+         * src/main/java/com/openminis/app/ui/chat/ChatViewModel.kt:388-403`):
+         * the merge kept this file's older fence-blind body and dropped it,
+         * which `AppendToInputTest` pins.
+         *
          * Pure and side-effect free so it can be unit-tested without an
          * Android runtime; see `AppendToInputTest`.
          */
         internal fun joinDraftWithSnippet(draft: String, snippet: String): String? {
             val cleaned = snippet.trim()
             if (cleaned.isEmpty()) return null
-            if (draft.isBlank()) return "$cleaned "
+            val startsWithFence = cleaned.startsWith("```") || cleaned.startsWith("~~~")
+            val tail = if (cleaned.endsWith("```") || cleaned.endsWith("~~~")) "\n" else " "
+            if (draft.isBlank()) return cleaned + tail
             // Preserve the draft verbatim; only add a separator when it does
             // not already end in whitespace. A trailing newline is already a
             // separator, and adding a space after it would indent the new line.
-            val separator = if (draft.last().isWhitespace()) "" else " "
-            return draft + separator + cleaned + " "
+            val separator = if (startsWithFence) {
+                if (draft.endsWith("\n")) "" else "\n"
+            } else {
+                if (draft.last().isWhitespace()) "" else " "
+            }
+            return draft + separator + cleaned + tail
         }
 
         /**
@@ -824,6 +887,75 @@ class ChatViewModel(
                 ).also { ChatViewModelStore.register(sessionId, it) } as T
             }
         }
+
+        // ─── [T-u6-vm-port] Companion members adopted from upstream 1.14 ──────
+        // Referenced by CompactBudgetTest / OverlayMultiTaskIndicatorTest.
+
+
+
+        /**
+         * [T-compact-idle-timeout] How long compaction may go WITHOUT receiving
+         * any new stream data before it is declared stuck.
+         *
+         * This replaced a total-elapsed budget, which was measuring the wrong
+         * thing. A healthy stream that is merely long looks identical to a hung
+         * one under a wall-clock cap: the reported run was cancelled at 150s
+         * having received 7,488 SSE events and 19,459 characters at ~40 tok/s —
+         * data was flowing the entire time, and the only thing "wrong" was that
+         * the transcript was big. Under an idle timer that run completes,
+         * because the gap between consecutive deltas never approached this
+         * value.
+         *
+         * Sized to sit under the providers' 10-minute socket readTimeout, so a
+         * genuinely dead connection is reported by us — with the lock released
+         * and a message the user can act on — rather than surfacing as a raw
+         * socket error minutes later.
+         */
+        internal const val COMPACT_IDLE_TIMEOUT_MS = 120_000L
+
+
+        /**
+         * Absolute ceiling on one compaction run, idle timer notwithstanding.
+         *
+         * This is a backstop for the pathological cases an idle timer cannot
+         * see — a model looping forever, or an unbounded response — where data
+         * keeps arriving and so the idle timer keeps resetting, legitimately,
+         * forever. It is deliberately generous: it must never be the limit that
+         * decides a normal slow compaction's fate, or we are back to the bug
+         * this change fixes. [COMPACT_IDLE_TIMEOUT_MS] is the working limit;
+         * this one should effectively never fire.
+         */
+        internal const val COMPACT_MAX_TOTAL_MS = 900_000L
+
+
+        /**
+         * [T-compact-idle-timeout] Raised when a compaction stream goes quiet
+         * for longer than [COMPACT_IDLE_TIMEOUT_MS].
+         *
+         * Deliberately NOT a TimeoutCancellationException. That type extends
+         * CancellationException, which coroutines read as "this scope is
+         * shutting down normally" — thrown from inside a flow it is
+         * indistinguishable from the user pressing Cancel, and the splitter's
+         * `catch (e: CancellationException) { throw e }` arm would re-throw it
+         * before any retry logic saw it, while the outer handler would report a
+         * silent cancel instead of a timeout. As a plain Exception it travels
+         * the normal error path and can be classified like any other failure.
+         */
+        internal class CompactIdleTimeoutException(message: String) : Exception(message)
+
+
+        /**
+         * Placeholder title a session carries until LLM title generation names
+         * it. A SENTINEL, not a display string: `generateTitle`'s skip guard
+         * tests for this exact value to decide whether a session still needs a
+         * title, so it must not be localized and must not drift.
+         *
+         * Named because it was previously written out at five sites, and the
+         * overlay now needs to recognise it to avoid showing "New Chat" as if
+         * it were a task name.
+         */
+        const val UNTITLED_SESSION_TITLE = "New Chat"
+
     }
 
     internal val mediaStore = com.openminis.app.data.storage.MediaStore(context)
@@ -1412,6 +1544,11 @@ class ChatViewModel(
      * with a single trailing space:
      *   - composer empty → `"<snippet> "`
      *   - composer non-empty → `"<existing><separator><snippet> "`
+     *
+     * [T-android-append-to-input-fence] Exception: a snippet that ends in a
+     * code fence gets a trailing NEWLINE instead of the space, and one that
+     * starts with a fence is pushed onto its own line. See
+     * [joinDraftWithSnippet].
      *
      * [T-android-append-to-input-eats-draft] Trim the incoming SNIPPET only.
      * The old code called `current.trimEnd()` and assigned that trimmed copy
@@ -3064,8 +3201,21 @@ class ChatViewModel(
      * preference on the persisted id rather than the `__new__…` draft key.
      */
     private fun persistThinkingOverride(level: ThinkingLevel) {
+        // [T-android-draft-no-row-on-open] Same rule as
+        // `applyGroupSessionDefaults`: write only when a row exists, never
+        // create one. Merely opening the thinking picker on a fresh chat and
+        // choosing a level is not "start a conversation", and `ensureSession()`
+        // here turned it into one.
+        //
+        // Mirrors iOS `setThinkingLevel`, whose doc comment states the rule
+        // outright — "persists if session exists, otherwise holds in memory" —
+        // and whose else-branch parks the value in `pendingThinkingLevel`.
+        // Android's in-memory hold is `_thinkingLevel` itself, which the caller
+        // has already set; `ensureSession()` flushes it on first send.
+        // （上游 1.14 ChatViewModel.kt:3335-3352 原文。）
+        val sid = realSessionId
+        if (sid.isEmpty()) return
         viewModelScope.launch {
-            val sid = ensureSession()
             chatRepository.dao.updateThinkingOverride(sid, level.name)
         }
     }
@@ -3571,6 +3721,149 @@ class ChatViewModel(
             desc.contains("context window")
     }
 
+    // ── [T-ctx-overflow-attribute-dispatch] Which model did we actually ask? ──
+    //
+    // 上游实现：upstream-1.14 `ui/chat/ChatViewModel.kt:1447-1448`（状态）、
+    // :1451-1459（recordContextDispatch）、:1490-1509（noteContextOverflow）、
+    // :1525（seedContextCalibration），调用点 :11292 / :11662 / :11948 / :6504。
+    // 合并时这一整套都丢了，本移植的评价口径只剩「当前选中模型的窗口 + 全局 EMA」，
+    // 于是归因错位：group fallback / 中途换模型之后，真正收到请求的模型永远得不到
+    // 校正，评分却落到了错的模型上。这里把上游那套「记录本次派发的模型与窗口、
+    // 溢出时按它们归因、新会话清空记录」补回来。
+
+    /** System prompt + tool schemas, the part a history-only estimate omits. */
+    private var contextFixedTokens = 0
+
+    /** Estimate of the request the last dispatch sent; 0 = nothing dispatched. */
+    private var lastDispatchEstimate = 0
+
+    /** The model the last request was SENT TO — not the current selection. */
+    private var lastDispatchModel: com.openminis.app.data.model.LLMModel? = null
+
+    /** That model's window at dispatch time; 0 when it could not be resolved. */
+    private var lastDispatchWindow = 0
+
+    /**
+     * The window a GIVEN model's request is judged against: its own
+     * `contextWindowTokens`, capped by the selected group's `contextLimitTokens`.
+     * Sibling of [effectiveContextWindowTokens] — that one always reads the
+     * CURRENT selection, while overflow attribution needs the window of the
+     * model that actually received the request.
+     */
+    private fun resolvedContextWindow(model: com.openminis.app.data.model.LLMModel?): Pair<Int, String>? {
+        val liveModel = model ?: return null
+        val window = liveModel.contextWindowTokens ?: return null
+        val config = providerRepository.config.value
+        val groupLimit = _selectedGroupId.value
+            ?.let { gid -> config.modelGroups.find { it.id == gid }?.contextLimitTokens }
+            ?.takeIf { it > 0 }
+        return if (groupLimit != null) minOf(window, groupLimit) to "group" else window to "model"
+    }
+
+    /**
+     * Record what this attempt is about to send: our estimate of the outbound
+     * history, plus the model (and its window) that will receive it.
+     */
+    private fun recordContextDispatch(
+        history: List<com.openminis.app.data.model.LLMMessage>,
+        model: com.openminis.app.data.model.LLMModel? = currentModel,
+    ): Int {
+        lastDispatchModel = model
+        lastDispatchWindow = resolvedContextWindow(model)?.first ?: 0
+        lastDispatchEstimate =
+            com.openminis.app.data.ContextSizeMeter.estimateTokens(history) + contextFixedTokens
+        return lastDispatchEstimate
+    }
+
+    /**
+     * Fold the provider's own count for the request we just sent into this
+     * model's ratio. Only meaningful against the SAME request the dispatch
+     * recorded — otherwise the sample describes another payload.
+     */
+    private fun calibrateContextSize(reportedTokens: Int): Boolean {
+        if (lastDispatchEstimate <= 0 || reportedTokens <= 0) return false
+        val model = lastDispatchModel?.id ?: currentModel?.id ?: return false
+        com.openminis.app.data.TokenUsageCalibration.observe(model, lastDispatchEstimate, reportedTokens)
+        return true
+    }
+
+    /**
+     * A provider rejected the request as too long — ground truth that we
+     * under-read it (a borrowed ratio after a model switch, a legacy session,
+     * content the estimator under-reads). Raise THIS model's ratio so the retry
+     * or the next send compacts instead of being rejected again. Never lowers.
+     */
+    private fun noteContextOverflow(detail: String) {
+        val model = lastDispatchModel?.id ?: currentModel?.id
+        val window = lastDispatchWindow.takeIf { lastDispatchModel != null && it > 0 }
+            ?: effectiveContextWindowTokens() ?: 0
+        val current = model?.let { com.openminis.app.data.TokenUsageCalibration.scale(it) } ?: 1.0
+        val requested = com.openminis.app.data.ContextSizeMeter.requestedTokens(detail)
+        val raised = com.openminis.app.data.ContextSizeMeter.ratioAfterOverflow(
+            current, lastDispatchEstimate, requested, window,
+        )
+        if (model != null) com.openminis.app.data.TokenUsageCalibration.raise(model, raised)
+        com.openminis.app.logging.AppLogger.warning(
+            TAG,
+            "[CtxMeter] provider rejected the request as too long — calibration " +
+                "model=${model ?: "?"} ${"%.2f".format(current)} -> ${"%.2f".format(raised)} " +
+                "(estimated=$lastDispatchEstimate statedTokens=${requested ?: "none"} window=$window); " +
+                "the next attempt will compact",
+        )
+    }
+
+    /**
+     * Re-derive the ratio from this session's persisted usage rows (the ones
+     * carrying BOTH the provider's report and our estimate of the same request),
+     * then forget the previous dispatch: a new session must never attribute its
+     * first rejection to the model the PREVIOUS chat was talking to.
+     */
+    private fun seedContextCalibration(usageJsons: List<String>): Boolean {
+        var found = false
+        for (json in usageJsons) {
+            val sample = com.openminis.app.data.ContextSizeMeter.calibrationSample(json) ?: continue
+            val ratio = com.openminis.app.data.ContextSizeMeter
+                .calibrationRatio(sample.reported, sample.estimated) ?: continue
+            sample.modelId?.let { com.openminis.app.data.TokenUsageCalibration.raise(it, ratio) }
+            if (sample.fixedTokens > 0) contextFixedTokens = sample.fixedTokens
+            found = true
+        }
+        lastDispatchEstimate = 0
+        lastDispatchModel = null
+        lastDispatchWindow = 0
+        return found
+    }
+
+    /**
+     * Entry point for the agent loop ([ChatViewModelAgentLoopExt]): record the
+     * request it is about to dispatch, against the model that serves it. The
+     * loop lives in its own file (the merge split upstream's monolith) while the
+     * recorder above is private to this class — the same call upstream makes
+     * inline at `ChatViewModel.kt:11292`.
+     */
+    internal fun recordOutboundDispatch(outboundHistory: List<com.openminis.app.data.model.LLMMessage>) {
+        recordContextDispatch(outboundHistory, currentProvider.model)
+    }
+
+    /**
+     * Entry point for the agent loop: a provider rejected this request as too
+     * long. Over-length refusals arrive both typed
+     * ([com.openminis.app.data.model.LLMError.ContextLengthExceeded]) and as
+     * untyped prose, so both are accepted — the burden of proof is on ignoring
+     * one.
+     */
+    internal fun noteProviderContextRejection(error: Throwable) {
+        val typed = error as? com.openminis.app.data.model.LLMError.ContextLengthExceeded
+        if (typed != null || isContextTooLargeError(error)) {
+            noteContextOverflow(typed?.detail ?: error.message ?: "")
+        }
+    }
+
+    /** Entry point for `loadSession` (an Ext file) — re-seed from persisted rows. */
+    internal fun seedContextCalibrationFromUsageRows(usageJsons: List<String>) {
+        seedContextCalibration(usageJsons)
+    }
+
 
     /** What the pre-send context check decided. Mirrors iOS's send() branch. */
     internal enum class PreSendContextAction {
@@ -3590,6 +3883,23 @@ class ChatViewModel(
      */
     internal var pendingSendText: String? = null
 
+    /**
+     * [T-scheduled-tool-prefill] Prefilled tool calls travelling with
+     * [pendingSendText] while a pre-send compaction runs, so the prompt that
+     * finally goes out still declares them. Set and cleared together with the
+     * text. （上游 1.14 ChatViewModel.kt:5465-5470。）
+     */
+    internal var pendingSendPrefill: List<com.openminis.app.scheduled.PrefilledToolCall> = emptyList()
+
+    /**
+     * [T-android-programmatic-prompt-keeps-draft] Whether [pendingSendText]
+     * came from a headless prompt rather than the composer. It keeps the send
+     * after compaction headless, and stops [cancelCompactBeforeSend] from ever
+     * dropping a background prompt's text into the user's input box.
+     * （上游 1.14 ChatViewModel.kt:5472-5478。）
+     */
+    internal var pendingSendHeadless: Boolean = false
+
     internal val _showCompactBeforeSendPrompt = MutableStateFlow(false)
     val showCompactBeforeSendPrompt: StateFlow<Boolean> = _showCompactBeforeSendPrompt.asStateFlow()
 
@@ -3603,12 +3913,16 @@ class ChatViewModel(
         _showCompactBeforeSendPrompt.value = false
         val text = pendingSendText ?: return
         pendingSendText = null
+        val prefill = pendingSendPrefill
+        pendingSendPrefill = emptyList()
+        val headless = pendingSendHeadless
+        pendingSendHeadless = false
         viewModelScope.launch {
             val ok = awaitCompaction()
             if (!ok) {
                 AppLogger.warning(TAG, "[Context] pre-send compaction failed — sending anyway")
             }
-            sendMessage(text, skipContextCheck = true)
+            sendMessage(text, skipContextCheck = true, headless = headless, prefill = prefill)
         }
     }
 
@@ -3617,14 +3931,22 @@ class ChatViewModel(
         _showCompactBeforeSendPrompt.value = false
         val text = pendingSendText ?: return
         pendingSendText = null
-        sendMessage(text, skipContextCheck = true)
+        val prefill = pendingSendPrefill
+        pendingSendPrefill = emptyList()
+        val headless = pendingSendHeadless
+        pendingSendHeadless = false
+        sendMessage(text, skipContextCheck = true, headless = headless, prefill = prefill)
     }
 
     /** Dialog dismissed — restore the text to the composer so it isn't lost. */
     fun cancelCompactBeforeSend() {
         _showCompactBeforeSendPrompt.value = false
-        pendingSendText?.let { _inputText.value = it }
+        // [T-android-programmatic-prompt-keeps-draft] Only the user's own text
+        // goes back into the composer.
+        if (!pendingSendHeadless) pendingSendText?.let { _inputText.value = it }
         pendingSendText = null
+        pendingSendPrefill = emptyList()
+        pendingSendHeadless = false
     }
 
     /**
@@ -4100,8 +4422,26 @@ class ChatViewModel(
         val level = group.defaultThinkingLevel ?: return
         if (_thinkingLevel.value == level) return
         _thinkingLevel.value = level
+        // [T-android-draft-no-row-on-open] Persist ONLY when a row already
+        // exists. This used to call `ensureSession()`, which CREATES the row —
+        // and because `loadSession()`'s draft branch calls this the moment a
+        // new chat is opened, every tap on "New Chat" minted a session the user
+        // never wrote in. The list filled up with "New Chat / No messages yet".
+        //
+        // iOS never had this: its `applyGroupSessionDefaults` takes an existing
+        // sessionId as a PARAMETER and writes to ProviderConfigStore, so it has
+        // no way to create a chat row, and it runs from inside
+        // `ensureSessionReturningId()` — i.e. after the first send has already
+        // materialised the row. The draft-time level lives in memory until then
+        // (`pendingThinkingLevel` / `flushPendingThinkingLevel`, guarded by
+        // `guard let sid = sessionId`).
+        //
+        // The in-memory `_thinkingLevel` above is the whole effect for a draft;
+        // `ensureSession()` flushes it on first send, so nothing is lost.
+        // （上游 1.14 ChatViewModel.kt:7274-7300 原文。）
+        val sid = realSessionId
+        if (sid.isEmpty()) return
         viewModelScope.launch {
-            val sid = ensureSession()
             chatRepository.dao.updateThinkingOverride(sid, level.name)
         }
     }
@@ -4154,6 +4494,13 @@ class ChatViewModel(
         val apiKey = providerRepository.usableApiKey(instance) ?: ""
 
         currentModel = entry.model
+        // [T-merge-upstream-1-14] An explicit user pick is a statement that this
+        // model should be tried again — clear any failure mark so the group pick
+        // stops avoiding it (`upstream-1.14:.../ChatViewModel.kt:7374-7376`).
+        // Without it the RoutingStrategy.fallback skip in
+        // ChatViewModelGroupResolve.kt would be permanent: after one failure the
+        // member could never be re-picked by hand.
+        recentlyFailedEntryIds.remove(entry.id)
         _modelName.value = entry.model.displayName
         _providerName.value = instance.label.ifEmpty { entry.model.provider }
         _selectedGroupId.value = null
@@ -4884,7 +5231,11 @@ class ChatViewModel(
 
 
 
-    override fun sendMessage(text: String) = sendMessage(text, skipContextCheck = false)
+    // [T-android-submit-outcome] 漏斗现在回一个 SubmitOutcome；端口接口这一格仍旧
+    // 是「发出去就行」，所以值在这里丢掉（上游同一处也是 Unit 语义的调用方）。
+    override fun sendMessage(text: String) {
+        sendMessage(text, skipContextCheck = false)
+    }
 
 
 
@@ -5162,6 +5513,40 @@ class ChatViewModel(
         return com.openminis.app.tools.VisionGroupResolver.noVisionImagePlaceholder(path)
     }
 
+    /**
+     * [T-ctx-warmup-fit] The estimator ratio in force for the current model —
+     * our analogue of upstream's `contextCalibrationRatio()`
+     * ([com.openminis.app.data.TokenUsageCalibration] keeps the per-model
+     * scale; 1.0 when the model is uncalibrated or unknown).
+     *
+     * [T-android-offload-scan-range] internal 而非 private：offload 的排序与计账
+     * （ChatViewModelOffloadExt.offloadContextIfNeeded，本移植把它拆进了 ext 文件）
+     * 必须用同一条校准比，否则 freed-tokens 与被扣减的 usage 不在一个尺度上。
+     */
+    internal fun contextCalibrationRatio(): Double =
+        com.openminis.app.data.TokenUsageCalibration.scale(currentModel?.id ?: "")
+
+    /**
+     * [T-android-image-downscale-parity] The model-facing shape of one attached
+     * image, shared by every send path: the "[attached image: <path>]" caption,
+     * the pixels, then — only when the pixels were downscaled — the note giving
+     * the original size, so the model knows it is looking at a reduced copy.
+     * 上游 1.14 ChatViewModel.kt:15413-15421；合并时整个 helper 与它的三个调用点
+     * 一起丢了，于是每条发送路径各写各的、谁也没带 note。
+     *
+     * 成员扩展（internal 而非上游的 private）：本移植的发送路径分散在
+     * ChatViewModelXxxExt.kt 里，那些顶层扩展函数访问不到类内 private 成员。
+     */
+    internal fun MutableList<AgentContentPart>.addModelImage(
+        part: LLMMessage.ImagePart,
+        path: String?,
+        note: String?,
+    ) {
+        if (path != null) add(AgentContentPart.Text("[attached image: $path]"))
+        add(AgentContentPart.ImageData(part.data, part.mimeType, linuxPath = path, noVisionPlaceholder = visionPlaceholderFor(path)))
+        if (note != null) add(AgentContentPart.Text(note))
+    }
+
 
 
     // ─── UI Helpers ──────────────────────────────────────────────────────
@@ -5280,7 +5665,12 @@ class ChatViewModel(
         uiMessageId: String? = run.assistantMessageId,
     ): String? = run.withPersistencePermit {
         kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-            persistAssistantTurn(parts, usage, reasoningContent, toolBlockMeta).also { id ->
+            persistAssistantTurn(
+                parts, usage, reasoningContent, toolBlockMeta,
+                // [T-android-usage-capsule-live] 同一个气泡 id 也交给持久化步骤：它
+                // 负责把 usage / completedAt 打在活气泡上（见 persistAssistantTurn）。
+                uiAssistantId = uiMessageId,
+            ).also { id ->
                 if (id != null) {
                     withContext(Dispatchers.Main.immediate) { notePersistedUiRow(uiMessageId, id) }
                     if (assistantText != null) run.markAssistantTurnPersisted(assistantText)
@@ -5312,6 +5702,10 @@ class ChatViewModel(
         usage: LLMUsage?,
         reasoningContent: String? = null,
         toolBlockMeta: Map<String, AssistantBlock> = emptyMap(),
+        // [T-android-usage-capsule-live] The UI bubble this turn belongs to,
+        // so the persisted usage can be stamped onto it right away. Null keeps
+        // the DB-only behaviour for callers that have no bubble.
+        uiAssistantId: String? = null,
     ): String? {
         if (parts.isEmpty()) return null
         val partsJson = buildAssistantPartsJson(parts, toolBlockMeta)
@@ -5325,6 +5719,45 @@ class ChatViewModel(
             // the session row — see currentModelSnapshot().
             modelSnapshot = currentModelSnapshot(),
         )
+
+        // [T-android-usage-capsule-live] （上游 1.14 移植）把 usage capsule 的数据
+        // 打在**活的**气泡上，而不只是 DB 行上。
+        //
+        // `ChatMessage.tokenUsage` / `completedAt` 在本移植里只有 DB 载入路径
+        // （`toChatMessages()`）会填，于是刚流完的那条回复 `tokenUsage == null`，
+        // `buildFlatChatItems` 不为它产出 AssistantUsage 行，点回复的空白处什么也
+        // 不显示；退出会话再进来跑一次 loadSession() 从 DB 解析出来，capsule 才
+        // 「又有了」——正是被报告的症状。
+        //
+        // 取值全部来自刚落库的 entity：`ChatTokenUsage.parse(entity.tokenUsage)`
+        // 与 `entity.createdAt`，和载入路径（toChatMessages）逐字一致，所以活气泡与
+        // 重载后的气泡不可能对同一轮给出不同数字。每个 tool 轮都会覆盖上一轮的戳记，
+        // 与载入路径合并步骤的「合并后的气泡报告最后一轮 usage」规则相同。
+        //
+        // 气泡还在流式时（tool 轮那条路径）就打上也是安全的：平铺构建同时以
+        // `!isStreaming` 为门，该行在末轮把 streaming 关掉前不会出现，那时最后一轮
+        // 的数字已经就位。
+        if (uiAssistantId != null) {
+            val stampedUsage = ChatTokenUsage.parse(entity.tokenUsage)
+            withContext(Dispatchers.Main) {
+                var hit = false
+                // [T-android-usage-capsule-live-reload] 一轮没有 usage（provider
+                // 没给）时不能把同一气泡里早先 tool 轮已打上的 capsule 抹掉：载入路径
+                // 的合并保持 `msg.tokenUsage ?: prev.tokenUsage`，活路径原先直接赋值
+                // （可能为 null），于是 capsule 活着时消失、重载后又回来。两条路现在
+                // 同一条规则。
+                _messages.value = _messages.value.map { m ->
+                    if (m.id == uiAssistantId) { hit = true; m.copy(tokenUsage = stampedUsage ?: m.tokenUsage, completedAt = entity.createdAt) } else m
+                }
+                // One line per turn. `hit=false` means the bubble id was not in
+                // the list — the exact silent failure this fix exists to end.
+                AppLogger.info(
+                    TAG_STREAM,
+                    "[UsageCapsule] live stamp ui=${uiAssistantId.take(20)} hit=$hit " +
+                        "ctx=${stampedUsage?.latestContextTokens ?: -1} db=${entity.id.take(8)}",
+                )
+            }
+        }
         return entity.id
     }
 
@@ -5466,6 +5899,15 @@ class ChatViewModel(
         noteRunSuspended("user cancel") // [T-operation-wiring]
         val job = streamJob
         if (job == null || stoppedStreamJob === job) return
+        // [T-android-stop-sibling-subagent] 上游 1.14（ChatViewModel.kt:16392-16394）
+        // 的 Stop 语义在合并中丢了：停止一轮时必须带走它派生的整个 fan-out，否则
+        // 用户以为停了、子 agent 还在烧 token。三条调用缺一不可，顺序也不能换：
+        //   1. mute —— 已完成的同伴仍持有待投递回调，投递会把这轮重新唤醒；
+        //   2. drop —— 每个 cancel 都会 drain 队列并空出名额，所以必须先清队列；
+        //   3. cancelAll —— 最后才取消仍在跑的子树。
+        com.openminis.app.agent.jobs.AgentJobRegistry.muteDelegationResults(activeSessionId)
+        com.openminis.app.agent.jobs.AgentJobRegistry.dropQueuedDelegations(activeSessionId, "user-stopped")
+        com.openminis.app.agent.jobs.AgentJobRegistry.cancelAll(activeSessionId, "user-stopped")
         // A coroutine may already be completing while its provider stream is
         // still producing callbacks. `isActive` is not a reliable stop guard:
         // cancellation can be observed before the provider unwinds. Use the
@@ -5926,7 +6368,16 @@ class ChatViewModel(
             // Skip assistant messages that became empty after stripping system-reminders
             // and have no tool / thinking blocks to fall back on — would otherwise
             // render as a phantom blank assistant bubble.
-            if (entity.role == "assistant" && text.isBlank() && blocks.isEmpty()) return@mapNotNull null
+            //
+            // [T-android-error-persist-current-turn] ...unless the row carries an
+            // error: that is the carrier persistTurnError inserts for a turn that
+            // failed before any output, and the banner + Retry are its whole
+            // point. Once retry clears the error the carrier is skipped again,
+            // so a recovered turn leaves no empty bubble.
+            // （上游 1.14 ChatViewModel.kt:17216-17218；合并时这一条丢了。）
+            if (entity.role == "assistant" && text.isBlank() && blocks.isEmpty() &&
+                entity.errorInfo.isNullOrBlank()
+            ) return@mapNotNull null
             ChatMessage(
                 id = entity.id,
                 role = entity.role,
@@ -5940,6 +6391,15 @@ class ChatViewModel(
                 sourceDbIds = listOf(entity.id),
                 speakerName = speakerName,
                 speakerVendor = speakerVendor,
+                // [T-android-usage-capsule-time] （上游 1.14 移植）只有 assistant 行
+                // 带 usage；created_at 在这条路径上就是完成时刻（该行是这一轮产出
+                // usage 之后才写下的）。此前这一段在本移植里整段缺位，于是每次重载
+                // 会话后 usage capsule 永远不出现——capsule 的另一半（活气泡打戳）见
+                // persistAssistantTurn。
+                tokenUsage = if (entity.role == "assistant") {
+                    ChatTokenUsage.parse(entity.tokenUsage)
+                } else null,
+                completedAt = if (entity.role == "assistant") entity.createdAt else null,
                 // [T-error-persist-android] Restore the persisted terminal error
                 // so the inline error banner + Retry button survive a reload.
                 // Coalesce a blank value to null: the UI gate is `error?.let`, so
@@ -5991,6 +6451,13 @@ class ChatViewModel(
                         // to the LAST assistant row of the turn, so the later row
                         // (`msg`) wins; fall back to `prev` if only it carried one.
                         error = msg.error ?: prev.error,
+                        // [T-android-usage-capsule-time] （上游 1.14 移植）与上面的
+                        // `id` / `error` 同一条规则：合并后的气泡代表整轮 run，所以
+                        // 报告**最后一轮**的 usage 与完成时刻。逐轮相加会重复计数 ——
+                        // 每轮的 latestContextTokens 本就包含前面几轮，相加会报出一个
+                        // 比任何单次请求都大的上下文。
+                        tokenUsage = msg.tokenUsage ?: prev.tokenUsage,
+                        completedAt = msg.completedAt ?: prev.completedAt,
                     )
                 } else {
                     merged.add(msg)
@@ -6069,7 +6536,15 @@ class ChatViewModel(
      */
     internal suspend fun rebuildAgentHistoryFromDatabase(sid: String) {
         val tail = chatRepository.loadRequestHistory(sid, MAX_AGENT_HISTORY_MESSAGES)
-        val parsed = tail.map { it.toLLMMessage() }
+        // [T-android-error-persist-current-turn] 错误载体（空 assistant 行 + errorInfo）
+        // 是纯 UI 行：它必须留在库里给横幅/Retry 用，但绝不能进模型请求——空 assistant
+        // 消息会让部分供应商 400。上游 1.14 在 5 个重建点各加了一条同样的守卫
+        // （ChatViewModel.kt:6376/7976/8084/8173/8553）；本移植把这 5 个点收敛成这一个
+        // 共享重建入口（rerun/retry/delete/truncate 都走它），所以守卫在这里加一次即可
+        // 覆盖全部路径。
+        val parsed = tail
+            .filterNot { ChatRepository.isEmptyAssistantCarrier(it.role, it.partsJson) }
+            .map { it.toLLMMessage() }
         agentHistory.clear()
         toolLoopDetector.reset()
         appendBoundedHistoryAll(parsed)
@@ -6251,16 +6726,28 @@ class ChatViewModel(
                         if (!mime.startsWith("image/")) continue
                         val file = java.io.File(mediaStore.mediaBaseDir, rel)
                         if (!file.exists()) continue
-                        val bytes = try { file.readBytes() } catch (_: Exception) { continue }
+                        val original = try { file.readBytes() } catch (_: Exception) { continue }
                         val restoredPath = v.optString("linuxPath", "").ifEmpty { null }
+                        // [T-android-image-downscale-parity] The saved file is the
+                        // user's full-size original (T209 keeps it for the bubble and
+                        // the shell). The model must get the same ≤2000 px copy the
+                        // first send used — replaying the original made DeepSeek 400
+                        // "unsupported image" on every turn after a restart for a
+                        // 1264×23545 long screenshot. The note is rebuilt here, never
+                        // persisted, so it cannot double up and old sessions get it.
+                        // 上游 1.14 ChatViewModel.kt:17422-17440；合并时整段丢了。
+                        val downscaled = ImageBudget.downscaleForModel(file, original)
+                        val bytes = downscaled?.bytes ?: original
+                        val sendMime = downscaled?.mimeType ?: mime
                         // [T-android-vision-group / GH#182] Seed the read_image
                         // hint on restored images too, so a non-vision main model
                         // with a Vision Group configured gets steered to read_image
                         // on subsequent turns after a session reload (not the bare
                         // "can't see it" literal).
                         val restoredPlaceholder = visionPlaceholderFor(restoredPath)
-                        imageParts.add(LLMMessage.ImagePart(bytes, mime, linuxPath = restoredPath, noVisionPlaceholder = restoredPlaceholder))
-                        contentParts.add(AgentContentPart.ImageData(bytes, mime, linuxPath = restoredPath, noVisionPlaceholder = restoredPlaceholder))
+                        imageParts.add(LLMMessage.ImagePart(bytes, sendMime, linuxPath = restoredPath, noVisionPlaceholder = restoredPlaceholder))
+                        contentParts.add(AgentContentPart.ImageData(bytes, sendMime, linuxPath = restoredPath, noVisionPlaceholder = restoredPlaceholder))
+                        downscaled?.let { contentParts.add(AgentContentPart.Text(ImageBudget.downscaleNote(it, restoredPath))) }
                     }
                 }
             }
@@ -6323,5 +6810,669 @@ class ChatViewModel(
             .replace("\\/", "/")
             .replace("\\\\", "\\")
 
+
+
+    // ─── [T-u6-vm-port] Members adopted from upstream 1.14 ─────────────────
+    //
+    // These are absent from the port's own tree entirely (no member and no
+    // extension defines them), and other files in the tree reference them:
+    // upstream's own tests (PersonaReminderPlacementTest,
+    // FallbackTriggerClassificationTest, OverlayMultiTaskIndicatorTest,
+    // OfflineWriteIntegrityTest …), the store's busy check (hasWorkInFlight)
+    // and HelperUi's usage capsule. Ported verbatim so the behaviour their
+    // assertions pin is the behaviour that ships.
+
+
+
+    /**
+     * [T-android-vm-evict-busy] Whether evicting this view model from
+     * [ChatViewModelStore] would destroy work in flight. See [EvictionGuard]
+     * for why `SessionActivityTracker` alone is not enough: it only turns on
+     * after the concurrency slot is acquired, and never for a parent whose
+     * background sub agents are still running.
+     *
+     * Both session ids are consulted because [activeSessionId] is the draft
+     * id before the first persist and the real id afterwards, and agent jobs
+     * may be registered under either.
+     */
+    fun hasWorkInFlight(): Boolean {
+        val registry = com.openminis.app.agent.jobs.AgentJobRegistry
+        val agentWork = setOf(activeSessionId, sessionId, realSessionId)
+            .filter { it.isNotEmpty() }
+            .any { registry.hasAgentWork(it) }
+        return EvictionGuard.hasWorkInFlight(
+            isStreaming = _isStreaming.value,
+            streamJobActive = streamJob?.isActive == true,
+            hasAgentWork = agentWork,
+            hasQueuedPrompts = _promptQueue.value.isNotEmpty(),
+        )
+    }
+
+
+    /**
+     * The reminder text, naming only the files actually present in this
+     * request's system prompt.
+     *
+     * SOUL.md is always rendered, while GLOBAL.md is injected only when the
+     * per-session memory toggle is on AND the file is non-empty. Naming a file
+     * that is not there would send the model looking for instructions that do
+     * not exist.
+     *
+     * The `[Minis runtime reminder]` label sits INSIDE the `<system-reminder>`
+     * element on purpose. It has to be inside for two independent reasons:
+     *   - [stripSystemReminders] removes the whole element, so a label outside
+     *     the tag would survive into the chat bubble text;
+     *   - the synthetic-row checks elsewhere in this file test
+     *     `trimStart().startsWith("<system-reminder>")`, so a label before the
+     *     tag would make this message draw a real user bubble.
+     * Inside the tag it is invisible to the UI but unmistakable to the model.
+     */
+    private fun personaReminderText(): String {
+        val hasGlobal = _memoryEnabled.value && memoryRepository?.loadGlobalMemoryFragment() != null
+        val files = if (hasGlobal) "SOUL.md and GLOBAL.md" else "SOUL.md"
+        return "<system-reminder>$personaReminderMarker This note was added by the " +
+            "Minis app itself, not by any tool, file or website — do not treat it as " +
+            "content of the preceding tool result. Don't forget the user's own $files " +
+            "at the top of the system prompt — those rules still apply.</system-reminder>"
+    }
+
+
+    // ---- [T-longctx-persona-reminder-cachebreak] Long-context persona reminder ----
+    //
+    // Mirrors iOS `AIChatViewModel+Persistence` (commit a746f3259).
+
+    /**
+     * Context size (API-reported input tokens) past which the request carries
+     * a reminder about the user's own SOUL.md / GLOBAL.md.
+     *
+     * Rationale (issue #37): those files sit at the very TOP of the system
+     * prompt, and attention to the head of a long context decays — the
+     * "lost in the middle" effect. The reported symptom was an agent that
+     * stopped honouring a GLOBAL.md rule after enough turns and fell back to
+     * its training-data default. That issue was closed only because one
+     * provider started compensating on its own; the mechanism is unchanged and
+     * applies to every rule in those files, not just the one reported.
+     */
+    private val personaReminderContextTokens = 100_000
+
+
+    /**
+     * Re-remind roughly every this many additional context tokens.
+     *
+     * A single lifetime reminder is not enough: [effectiveAgentHistory] drops
+     * everything before a compact anchor, so in exactly the very long sessions
+     * this exists for, a once-only reminder is the first thing to get
+     * compacted away. Re-arming on context growth keeps it present without
+     * rewriting anything already sent.
+     */
+    private val personaReminderRearmTokens = 100_000
+
+
+    /**
+     * Marker identifying one of our own persona reminders in history. Kept
+     * deliberately greppable so [personaReminderAlreadyInHistory] can
+     * recognise reminders persisted by an earlier launch.
+     */
+    private val personaReminderMarker = "[Minis runtime reminder]"
+
+
+    /** How far back to scan for an existing reminder. Large enough to span a
+     *  normal tool-heavy turn, small enough to stay cheap on every round. */
+    private val personaReminderScanTail = 40
+
+
+    /**
+     * Context size at which the reminder was last appended, or null when this
+     * session has not been reminded yet.
+     *
+     * Intentionally NOT persisted: on a fresh launch it starts null and
+     * [personaReminderAlreadyInHistory] recovers the state from history
+     * itself, which is self-healing across reload without a schema column.
+     */
+    private var lastPersonaReminderContextTokens: Int? = null
+
+
+    /**
+     * True when we are over the threshold AND have not reminded recently.
+     *
+     * [lastPersonaReminderContextTokens] is the context size at which we last
+     * injected; re-arming only after another [personaReminderRearmTokens] of
+     * growth is what stops this from firing every single round.
+     */
+    private fun personaReminderIsDue(contextTokens: Int): Boolean {
+        if (contextTokens < personaReminderContextTokens) return false
+        val last = lastPersonaReminderContextTokens
+        if (last != null) {
+            if (contextTokens < last + personaReminderRearmTokens) return false
+        } else if (personaReminderAlreadyInHistory()) {
+            // Fresh launch on a session that was already reminded before the
+            // process restarted: adopt the existing reminder instead of adding
+            // a duplicate, and re-arm from here.
+            lastPersonaReminderContextTokens = contextTokens
+            return false
+        }
+        return true
+    }
+
+
+    /**
+     * True when a persona reminder is already near the end of history.
+     *
+     * Scans the tail rather than the whole history: only the most recent
+     * reminder matters for "do we need another one", and a full scan would run
+     * on every round of every long session.
+     */
+    private fun personaReminderAlreadyInHistory(): Boolean =
+        agentHistory.takeLast(personaReminderScanTail).any { msg ->
+            msg.contentParts.any {
+                it is AgentContentPart.Text && it.text.contains(personaReminderMarker)
+            } || msg.content.contains(personaReminderMarker)
+        }
+
+
+    /**
+     * Append the persona reminder to [agentHistory] as its own persisted
+     * message.
+     *
+     * [T-longctx-persona-reminder-cachebreak] This replaces the previous
+     * `historyWithPersonaReminder(history, contextTokens)`, which appended the
+     * reminder to the LAST message of a throwaway outbound copy on EVERY round
+     * past the threshold. That was wrong twice over:
+     *
+     *  1. **It broke the prompt cache.** "The last message" is a different
+     *     message each round, so a given history entry went out WITH the
+     *     reminder on one round and WITHOUT it on the next. Anthropic's cache
+     *     matches on an exact byte prefix, so mutating a message the model has
+     *     already seen invalidates that message and everything after it —
+     *     every round paid `cache_creation` again (observed on iOS: 2802 /
+     *     7228 / 7422 / 519 across four consecutive rounds of one session)
+     *     even with the caching beta headers on.
+     *  2. **It was indistinguishable from tool output.** The text was
+     *     concatenated onto a ToolResult's content string, so when the last
+     *     tool was a file read the reminder looked exactly like the tail of
+     *     the fetched file. A model reading a file from GitHub concluded —
+     *     reasonably, given the evidence — that the repository was carrying a
+     *     prompt-injection payload, and said so for three consecutive turns.
+     *
+     * The fix is to APPEND rather than REWRITE. A new message at the end of
+     * history leaves every earlier byte untouched, so the cache prefix up to
+     * that point still hits; only content after the insertion point is
+     * re-created, which is the normal, unavoidable cost of any new message.
+     * Being its own message also means it is never fused with tool output.
+     */
+    private fun appendPersonaReminderToHistory(contextTokens: Int) {
+        val reminder = personaReminderText()
+        val idx = agentHistory.size
+        agentHistory.add(
+            LLMMessage(
+                role = LLMMessage.Role.USER,
+                content = reminder,
+                contentParts = listOf(AgentContentPart.Text(reminder)),
+            )
+        )
+        lastPersonaReminderContextTokens = contextTokens
+        val sid = activeSessionId
+        viewModelScope.launch(Dispatchers.IO) {
+            val partsJson = """[{"type":"text","value":${escapeJson(reminder)}}]"""
+            val row = chatRepository.appendMessage(sid, "user", partsJson)
+            // Carry the row id back so compact anchoring can resolve this
+            // message like any other persisted turn.
+            if (idx < agentHistory.size) {
+                agentHistory[idx] = agentHistory[idx].copy(dbMessageId = row.id)
+            }
+        }
+        Log.i(TAG, "[PersonaReminder] appended at ~$contextTokens ctx tokens (agentHistory.size=${agentHistory.size})")
+    }
+
+
+    // ─── UI Helpers ──────────────────────────────────────────────────────
+
+    private fun mergeDelegateOverrides(blocks: List<AssistantBlock>): List<AssistantBlock> {
+        if (delegateBlockOverrides.isEmpty()) return blocks
+        return blocks.map { b ->
+            delegateBlockOverrides[b.id]?.let { o ->
+                // [T-android-orphaned-running-tool-spin] An override is a live
+                // claim, and this map is never cleared on session load — so a
+                // delegate whose completion never landed would re-stamp
+                // RUNNING over the DB-derived status on EVERY reload, forever.
+                // A RUNNING block draws an infinite shimmer, which invalidates
+                // every frame: measured at 91 fps and 85-130% of a core on an
+                // idle Pixel 6 until the session was closed. Drop a spinner
+                // override whose job is gone and keep what the DB derived.
+                val status = if (OrphanedRunningToolGate.overrideMayApply(
+                        o.toolStatus, isLiveRun = _isStreaming.value, jobIsAlive = delegateJobIsAlive(o.content),
+                    )
+                ) {
+                    o.toolStatus ?: b.toolStatus
+                } else {
+                    b.toolStatus
+                }
+                b.copy(content = o.content, toolStatus = status)
+            } ?: b
+        }
+    }
+
+
+    /**
+     * [T-android-orphaned-running-tool-spin] Whether the sub-agent job named by
+     * a delegate block's JSON payload is still live.
+     *
+     * The payload carries `job_id` (see HelperRunner.progressJson); an id that
+     * the registry no longer holds as active means the run is over, however the
+     * block was last stamped. Unparseable payload → treat as NOT alive: the
+     * cost of being wrong is a spinner that stops, versus one that never does.
+     */
+    private fun delegateJobIsAlive(content: String): Boolean {
+        val jobId = runCatching { org.json.JSONObject(content).optString("job_id", "") }.getOrNull()
+        if (jobId.isNullOrEmpty()) return false
+        return com.openminis.app.agent.jobs.AgentJobRegistry.job(jobId)?.isActive == true
+    }
+
+
+    /**
+     * [T-android-compact-fallback] Adopt [candidate] as the session's live
+     * model, exactly as the agent-loop fallback does.
+     *
+     * Compact previously called the provider directly and never touched session
+     * state, so even a SUCCESSFUL recovery left the top bar, the active entry
+     * and the persisted binding pointing at the dead model — and the next turn
+     * went straight back to it. Mirrors the block in `runAgentLoop`
+     * (`_modelName` / `_activeEntryId` / `currentModel` / `_providerName` /
+     * `persistBinding`) so both paths leave the session in the same shape.
+     */
+    internal fun noteEntryFailed(entryId: String?) {
+        if (!entryId.isNullOrEmpty()) recentlyFailedEntryIds.add(entryId)
+    }
+
+
+    private fun adoptFallbackCandidate(candidate: FallbackCandidate) {
+        noteEntryFailed(_activeEntryId.value)
+        recentlyFailedEntryIds.remove(candidate.entryId)
+        currentProvider = candidate.provider
+        _modelName.value = candidate.provider.model.displayName
+        val newEntry = providerRepository.config.value.modelEntries
+            .find { it.id == candidate.entryId }
+        if (newEntry != null) {
+            _activeEntryId.value = newEntry.id
+            currentModel = newEntry.model
+            providerRepository.instance(newEntry.providerInstanceId)?.let { inst ->
+                _providerName.value = inst.label.ifEmpty { newEntry.model.provider }
+            }
+            val gid = _selectedGroupId.value
+            if (gid != null) {
+                persistBinding("""{"type":"group","groupId":"$gid","lastEntryId":"${newEntry.id}"}""")
+            } else {
+                persistBinding("""{"type":"entry","entryId":"${newEntry.id}"}""")
+            }
+        }
+        _fallbackTrigger.value++
+    }
+
+
+    /**
+     * [T-android-compact-fallback] Entries that failed in this session recently.
+     *
+     * `resolveProviderFromGroup` picks `available.first()`, with no memory of
+     * what just refused. So after model A in a group ran out of quota,
+     * re-selecting that same group handed A straight back — the user taps the
+     * picker, sees no change, and reasonably concludes switching does nothing.
+     * Recording the failure lets the pick skip A while a healthy member exists,
+     * and fall back to today's behaviour when every member has failed.
+     *
+     * [T-android-recentlyfailed-init-order] Declared HERE, above `init`, and
+     * not beside the fallback code it belongs to — same rule as `isDraft`
+     * above, for the same reason. `init { loadSession() }` launches on
+     * `Dispatchers.Main.immediate`, which runs synchronously up to the first
+     * suspend point, and that stretch reaches `resolveProviderFromGroup`. A
+     * declaration further down the class has not been initialised by then, so
+     * the read returns the JVM default `null` and `it.id !in
+     * recentlyFailedEntryIds` throws NullPointerException inside the
+     * constructor — the ViewModel never finishes building and the app crashes
+     * on launch, every launch, for any user whose session opens on a model
+     * group (crash reports 2026-09-13, HUAWEI MNA-AL00 / Android 12, 1.14(26)).
+     */
+    internal val recentlyFailedEntryIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+
+    /**
+     * [T-android-overlay-multitask] The session title for surfaces OUTSIDE the
+     * chat, or null while the session has no real title yet.
+     *
+     * `_sessionTitle` holds the literal "New Chat" until LLM title generation
+     * names the session — the same literal the generator's own skip guard
+     * tests, so it is a sentinel rather than a display string. In the chat
+     * that placeholder is fine: there is exactly one, and its position says
+     * what it is. On the floating capsule it is not, because several tasks can
+     * be on screen at once and "New Chat" tells the user nothing about which
+     * is which.
+     *
+     * Returning null here lets the capsule fall back to the Soul name, which
+     * at least identifies the assistant. The sentinel is deliberately not
+     * matched in the view: it is an English literal that a localization pass
+     * could change, and the check belongs next to the field that defines it.
+     *
+     * [T-a15-overlay-task-title] `internal` 而非 `private`：合并上游 1.14 后这个
+     * 类按职责拆成 `ChatViewModel*Ext.kt` 若干分片，五处
+     * `SessionActivityTracker.setActive(...)` 都在分片的扩展函数里，**类私有成员
+     * 对它们不可见**。合并时那五处的 `sessionTitle` 实参因此被删掉了，悬浮胶囊
+     * 再也拿不到任务标题（只剩 Soul 名）——上游 1.14
+     * ChatViewModel.kt:8307/9402/9766/16541/16830 五处都传了它。放开到 internal
+     * 让分片能调，可见性仍止于模块内。
+     */
+    internal fun overlaySessionTitle(): String? =
+        _sessionTitle.value.takeIf { it.isNotBlank() && it != UNTITLED_SESSION_TITLE }
+
+    /** [T-p2-shared-workspace] The session whose `/var/minis` bucket this vm's
+     *  shell and file tools operate in. A helper works in its PARENT's
+     *  workspace — it shares the
+     *  parent's files — so what it writes is what the parent (and the user)
+     *  can read. Its transcript, media rows and job identity stay its own. */
+    internal val fsSessionId: String get() = helperConfig?.parentSessionId ?: activeSessionId
+
+    internal val isHelper: Boolean get() = helperConfig != null
+
+
+    internal fun clearDelegateOverride(toolId: String) { delegateBlockOverrides.remove(toolId) }
+
+
+    /**
+     * [T-p2-background-helper] Write a delegate block by tool_use id — the
+     * block index is not stable across the parent's later turns and reloads.
+     * Records a live override for the running loop and patches the canonical
+     * list (and the streaming overlay) directly. Main thread.
+     */
+    internal fun writeDelegateBlock(toolId: String, content: String, status: ToolBlockStatus?) {
+        val prev = delegateBlockOverrides[toolId]
+        delegateBlockOverrides[toolId] = AssistantBlock(
+            id = toolId, kind = "tool_use", content = content,
+            toolStatus = status ?: prev?.toolStatus, toolName = com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME,
+        )
+        fun patch(blocks: List<AssistantBlock>): List<AssistantBlock>? {
+            if (blocks.none { it.id == toolId }) return null
+            return blocks.map { if (it.id == toolId) it.copy(content = content, toolStatus = status ?: it.toolStatus) else it }
+        }
+        _messages.value = _messages.value.map { m ->
+            if (m.role != "assistant") m else patch(m.toolBlocks)?.let { m.copy(toolBlocks = it) } ?: m
+        }
+        val overlay = _streamingById.value
+        if (overlay.isNotEmpty()) {
+            var changed = false
+            val next = overlay.mapValues { (_, d) -> patch(d.toolBlocks)?.let { changed = true; d.copy(toolBlocks = it) } ?: d }
+            if (changed) _streamingById.value = next
+        }
+    }
+
+
+    /**
+     * [T-tools-granular-switches] Result for a tool the user has switched off.
+     *
+     * Phrased for the model, not the user: it states the fact and tells it not
+     * to retry, so a refusal ends the attempt instead of provoking a loop. The
+     * user is not shown an error — they turned the tool off on purpose.
+     */
+    private fun toolDisabledResult(name: String): ToolExecutionResult =
+        ToolExecutionResult(
+            "The $name tool is disabled in this app's settings and cannot be used. " +
+                "Do not try it again in this conversation; continue without it, " +
+                "or tell the user it is turned off if the task requires it.",
+            false,
+        )
+
+
+    fun toggleUsageCapsule(messageId: String) {
+        val cur = _revealedUsageIds.value
+        _revealedUsageIds.value = if (messageId in cur) cur - messageId else cur + messageId
+    }
+
+
+    /**
+     * The discrete placeholder line. A new [ContextUsageHint.generation] is
+     * what makes the composer show a line; the composer retires it on typing
+     * or a second focus and never resurrects it.
+     */
+    private val _contextUsageHint = MutableStateFlow<ContextUsageHint?>(null)
+
+    internal val contextUsageHint: StateFlow<ContextUsageHint?> = _contextUsageHint.asStateFlow()
+
+
+    // ---- [T-android-context-usage-hint] Context-window pressure surface ----
+    //
+    // [T-merge-upstream-1-14-ctx-usage] 上游 1.14 的 ChatViewModel.kt:1612-1781 有这
+    // 一族（contextHintGeneration / contextTierTracker / publishMeasuredContextUsage
+    // / announceContextUsageAfterCompaction）。合并时它整段没跟过来（ChatScreen.kt
+    // 6071 行那条注释自认了这一点），结果是本移植里 `_contextUsageHint` **没有任何
+    // 一处赋值**：输入框的占位提示行永远不会出现，压缩成功后仍挂着压缩前的 80%+。
+    // 上游测试 ContextUsageAfterCompactTest 守的正是「压缩成功 → 先重测 → 再发一条新
+    // generation」。这里按上游原文把这条路恢复。
+
+    /** Monotonic generation counter for [_contextUsageHint]. */
+    private var contextHintGeneration = 0
+
+    /**
+     * Shared upward-crossing / rate-limit state, so a threshold cannot be
+     * announced twice for the same climb (see [ContextTierCrossingTracker]).
+     */
+    private val contextTierTracker = ContextTierCrossingTracker()
+
+    /**
+     * [T-ctx-measure-outbound] Point the composer glow/ring at the measurement.
+     * After a compaction [_lastTurnContextTokens] otherwise keeps showing the
+     * context that was just replaced, until some later response overwrites it.
+     *
+     * Port of upstream ChatViewModel.kt:1557-1566. Upstream's
+     * `measureOutboundContextTokens()` is the same formula written here —
+     * `ContextSizeMeter.calibrated(estimateTokens(effectiveAgentHistoryUncounted())
+     * + contextFixedTokens, contextCalibrationRatio())` (upstream:1396-1418);
+     * [contextFixedTokens] is this port's share and is seeded from the first
+     * calibrated sample (see the [T-ctx-overflow-attribute-dispatch] block),
+     * so upstream's `ensureContextFixedTokens()` pre-estimate has no separate
+     * role here.
+     */
+    private fun publishMeasuredContextUsage() {
+        // 全限定名与本文件既有用法一致（ChatViewModel.kt:3774/3824）——这个文件没有
+        // import ContextSizeMeter，裸名解析不到。
+        val measured = com.openminis.app.data.ContextSizeMeter.calibrated(
+            com.openminis.app.data.ContextSizeMeter.estimateTokens(effectiveAgentHistoryUncounted()) +
+                contextFixedTokens,
+            contextCalibrationRatio(),
+        )
+        if (measured > 0) _lastTurnContextTokens.value = measured
+    }
+
+    /**
+     * [T-ctx-usage-after-compact] Replace the placeholder line after a
+     * successful compaction (manual, long-press or automatic in-loop — all
+     * finish in [ChatViewModelCompactExt]'s `finally`) with the
+     * post-compaction estimate. Mirrors iOS
+     * `announceContextUsageAfterCompaction` (upstream ChatViewModel.kt:1740-1781).
+     *
+     * The composer keeps showing the last presented line until the user types,
+     * and ignores a null hint, so without a NEW generation the pre-compaction
+     * figure (often 80%+) stayed on screen and compaction looked like it had
+     * done nothing. Unlike the turn-end path (upstream's `publishContextUsage`)
+     * this is shown at any tier: the point is to report the drop. The glow
+     * already follows via [publishMeasuredContextUsage] →
+     * [_lastTurnContextTokens].
+     *
+     * Records the (usually lower) tier so a later climb back over 70% / 80%
+     * counts as a fresh crossing, but deliberately does not `markFired`: the
+     * next loop-end line carries the real reported size and must not be
+     * deduplicated against this estimate.
+     */
+    private fun announceContextUsageAfterCompaction() {
+        if (isHelper) return
+        val usage = ContextUsage.from(
+            usedTokens = _lastTurnContextTokens.value,
+            windowTokens = effectiveContextWindowTokens(),
+        ) ?: return
+        contextTierTracker.observe(usage.tier, System.currentTimeMillis())
+        contextHintGeneration += 1
+        _contextUsageHint.value = ContextUsageHint(
+            generation = contextHintGeneration,
+            text = "",  // resolved at render time — see contextUsageAnnotatedText
+            highlights = listOf(
+                "${usage.percent}%",
+                TokenCountFormatter.sizePair(usage),
+            ),
+            tier = usage.tier,
+        )
+        AppLogger.info(
+            TAG,
+            "[ContextUsage] post-compact hint gen=$contextHintGeneration tier=${usage.tier} " +
+                "${usage.percent}% (${usage.usedTokens}/${usage.windowTokens})",
+        )
+    }
+
+    /**
+     * [T-ctx-usage-after-compact] 压缩成功后的收尾：先重测、再播报（顺序就是被守住
+     * 的那条语义——先写 [_lastTurnContextTokens]，播报才拿到压缩后的真实大小）。
+     *
+     * 上游把「成功则 runCatching { 重测 + 播报 }」这两行直接写在压缩函数的
+     * `finally` 里（上游 ChatViewModel.kt:3990-3998）。本移植的压缩流程在
+     * [ChatViewModelCompactExt] 的扩展函数里，而 Kotlin 的扩展函数读不到 `private`
+     * 成员，所以这里留一个 `internal` 收尾入口：那两行与上游逐字一致，可见性降级只
+     * 是拆文件的后果，不是行为变化。
+     */
+    internal fun onCompactionFinished(compactSucceeded: Boolean) {
+        if (compactSucceeded) runCatching {
+            publishMeasuredContextUsage()
+            announceContextUsageAfterCompaction()
+        }
+    }
+
+
+    /**
+     * [T-android-usage-capsule-style] Message ids whose token-usage capsule is
+     * revealed. Default empty: the capsule is an easter egg, not a permanent
+     * footer — iOS keeps it hidden until the user taps the blank area at the
+     * bottom of the reply, and taps again to put it away.
+     *
+     * Held here rather than in a composable because the flat renderer emits
+     * the capsule as its own list item, with no shared parent to remember it
+     * in. Keying by message id also means a row scrolled out and back keeps
+     * whatever the user chose. Session-scoped, so it resets with the ViewModel.
+     */
+    internal val _revealedUsageIds = MutableStateFlow<Set<String>>(emptySet())
+
+    val revealedUsageIds: StateFlow<Set<String>> = _revealedUsageIds.asStateFlow()
+
+
+    // [T-p1-delegate-task] Set by the parent's executeDelegateTask on a CHILD
+    // vm before its first turn. Its presence is what every helper-specific
+    // branch keys off: tool set (no delegate_task / memory_write), identity
+    // preamble, turn cap, and the SessionConcurrencyManager bypass.
+    internal var helperConfig: com.openminis.app.agent.jobs.HelperConfig? = null
+
+    /**
+     * [T-sub-agents-steer] 父模型发给这个正在跑的孩子的纠偏指令，在它的下一个回合
+     * 边界上读取。
+     *
+     * 上游 1.14 ChatViewModel.kt:1279-1290，合并时整段丢了。回合之间递送而不是流中
+     * 插入：已经跑起来的工具调用不被打断，已完成的工作保住——这正是「纠偏」与
+     * 「取消再重新委派」的全部区别，而且不额外花一个回合。
+     *
+     * [T-architecture-modularization] 上游是 private（循环就在同一个类体里）。本移植
+     * 的回合循环拆到了 ChatViewModelAgentLoopExt.kt，跨文件的扩展函数看不到 private
+     * 成员，所以这里降到 internal：写入仍然只经 [enqueueSteer]、读取仍然只经循环开头
+     * 的排空 / [drainMissedSteers]。
+     */
+    internal val pendingSteerMessages = java.util.Collections.synchronizedList(mutableListOf<String>())
+
+    /** 排入一条纠偏；不是 helper（孩子不在跑）时返回 false，不假装成功。 */
+    internal fun enqueueSteer(message: String): Boolean {
+        val text = message.trim()
+        if (helperConfig == null || text.isEmpty()) return false
+        val wasIdle = !_isStreaming.value
+        pendingSteerMessages.add(text)
+        // [T-subagent-steer-continues-loop] 上游 1.14 ChatViewModel.kt:1292-1316
+        // （iOS HelperRunner.swift:641）。回合之间的孩子仍然是活着的 job —— 纠偏
+        // hook 只在 job 活着时存在 —— 但没有东西在跑，没人会来读这条排队中的纠偏。
+        // 上游的修法是把循环重新叫起来，让它走上那个会递送纠偏的回合；叫醒用的提示词
+        // 本身刻意不带任何指令（真正的纠偏由循环在该回合开头拼上）。
+        if (wasIdle) {
+            AppLogger.info(TAG, "[subagent_task] steer arrived while the child was idle — nudging its loop")
+            viewModelScope.launch {
+                runCatching {
+                    submitPrompt(com.openminis.app.agent.jobs.HelperRunner.STEER_NUDGE_PROMPT)
+                }.onFailure {
+                    AppLogger.warning(TAG, "[subagent_task] steer nudge failed: ${it.message}")
+                }
+            }
+        }
+        return true
+    }
+
+    /** [T-sub-agents-steer] 到得太晚、孩子没读到的纠偏。 */
+    internal fun drainMissedSteers(): List<String> = synchronized(pendingSteerMessages) {
+        val out = pendingSteerMessages.toList()
+        pendingSteerMessages.clear()
+        out
+    }
+
+    /** [T-p2-background-helper] Delegate blocks written from OUTSIDE the agent
+     *  loop (the background mirror / completion hook), keyed by tool_use id.
+     *  Merged into every updateAssistantMessage so the loop's own republishes
+     *  of its private block list do not clobber them; cleared once the final
+     *  payload is persisted. */
+    private val delegateBlockOverrides = java.util.concurrent.ConcurrentHashMap<String, AssistantBlock>()
+    // ─── [T-u6-vm-adapter] submitPrompt: the 1.14 funnel shape, on our send path ──
+    //
+    // Upstream 1.14 refactored sendMessage into a funnel that also reports WHAT
+    // it did, because non-UI callers need to know: HeadlessChatRunner (scheduled
+    // tasks, agent callbacks, RPC) keys its "Queued"/"Running"/"Rejected" reply
+    // and its post-wait dance off this value, and MinisApp's follow-up
+    // dispatcher tolerates a Rejected parent.
+    //
+    // The port's own send path is the audited one (T-android-* fixes: draft
+    // handling, queue races, context consistency), so this ADAPTS rather than
+    // replacing it: same entry point upstream's callers expect, routed through
+    // [sendMessage] / [enqueuePrompt] as they exist here. NOT ported: upstream's
+    // tool-prefill (`prefill`) and headless-send flags, which need the loop-side
+    // support from that refactor — a caller that needs a scheduled tool prefill
+    // currently gets a plain queued prompt (see the U6 leftover note).
+    sealed interface SubmitOutcome {
+        /** The turn is streaming now. */
+        data object Running : SubmitOutcome
+        /** The session was busy; the prompt runs when its loop ends. */
+        data object Queued : SubmitOutcome
+        /** A compaction is in flight; the prompt follows it. */
+        data object Compacting : SubmitOutcome
+        /** Refused outright; [reason] is the snake_case cause. */
+        data class Rejected(val reason: String) : SubmitOutcome
+    }
+
+    /**
+     * [T-android-submit-outcome] Headless entry point for CLI / RPC / scheduled
+     * jobs — the same funnel as the composer's send, one code path and one set
+     * of guards, but with `headless = true` so the pre-send context check can
+     * REFUSE instead of parking the text behind a dialog nobody will answer
+     * (`context_near_capacity`), and so it can never touch the composer draft
+     * ([T-android-programmatic-prompt-keeps-draft]).
+     *
+     * 此前这里是另写一套判断（busy → enqueue、否则 sendMessage + 假定 "Running"），
+     * 于是上游 funnel 里那些真实结果到不了调用方：排队靠猜、ASK_USER 分支对 headless
+     * 也没有拒绝语义。改为委托（上游 1.14 ChatViewModel.kt:9071-9077 同一形状），
+     * 仍然 never-throws。
+     *
+     * 保留 [SubmitOutcome.Compacting] 这一格：本移植的 HeadlessChatRunner 靠它
+     * 「等压缩结束再跟进一次发送」；上游把这一格并进 sendMessage 的
+     * session_compacting 拒绝里，那条路会丢掉「稍后自己会发」这层信息。
+     */
+    fun submitPrompt(
+        text: String,
+        prefill: List<com.openminis.app.scheduled.PrefilledToolCall> = emptyList(),
+    ): SubmitOutcome {
+        if (_isCompacting.value) {
+            // Upstream runs the prompt right after the compaction it is waiting
+            // on; here the caller can watch isCompacting fall and re-submit.
+            return SubmitOutcome.Compacting
+        }
+        return try {
+            sendMessage(text, skipContextCheck = false, headless = true, prefill = prefill)
+        } catch (t: Throwable) {
+            AppLogger.warning(TAG, "submitPrompt failed: ${t.message}")
+            SubmitOutcome.Rejected("submit_failed")
+        }
+    }
 
 }

@@ -14,11 +14,19 @@ internal fun dropOrphanedToolParts(history: List<LLMMessage>): List<LLMMessage> 
     // [T-loop-context-cut] 有序配对修复的纯半边进 harness
     // （ToolRoundPairing）；占位文案仍走宿主策略源（stubNotesFor：
     // 进程中断 vs 用户停止 vs 不可重放说明），日志接 AppLogger。
+    //
+    // [T-android-responses-tool-id-normalize] 配对身份也由宿主注入：harness
+    // 模块依赖不到 app 模块的 provider.ToolPairing，而"哪两个 id 是同一次调用"
+    // 只允许有一份实现（Responses 的合成 id `call|fc` 与裸 call id 必须配对，
+    // 见 ToolPairing 的 KDoc）。上游 1.14 在本函数体内直接写
+    // `ToolPairing.key(it.id)`（upstream ChatViewModel.kt:4934/4956/4983），
+    // 本移植把函数体搬进 harness，于是这一份身份跟着变成参数。
     val stubNotes = stubNotesFor(history)
     return com.openminis.app.harness.agent.ToolRoundPairing.dropOrphanedToolParts(
         history = history,
         stubNotes = { id -> stubNotes[id] },
         log = { message -> AppLogger.warning(ChatViewModel.TAG, message) },
+        keyOf = { id -> com.openminis.app.provider.ToolPairing.key(id) },
     )
 }
 

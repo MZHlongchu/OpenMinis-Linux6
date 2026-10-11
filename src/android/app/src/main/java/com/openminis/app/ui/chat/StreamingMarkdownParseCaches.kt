@@ -268,6 +268,22 @@ internal object MarkdownParseCaches {
         synchronized(blocksLru) { blocksLru[raw] = blocks }
     }
 
+    /**
+     * [T-android-freeze-edge-flash] 上游 1.14 的 `MarkdownParseCaches.removeBlocks`
+     * （StreamingMarkdownText.kt:3968-3974）：live 分支每 tick 先退掉上一 tick 的
+     * 条目再存新的，一个流式 fragment 只占一个槽位，而不是每 tick 留一份中间文本。
+     * 合并把 live 分支的这套替换逻辑整段丢了（本移植的 putBlocks 还在、removeBlocks
+     * 没了），于是活尾巴每 tick 都在 LRU 里堆一份，直到被挤出为止。
+     *
+     * 与 [putBlocks] / [cachedBlocks] **同一把锁**：live 解析在 Default 线程上调用它，
+     * 主线程同时可能在读同一张表（这正是 StreamingFadeSeedTest 里
+     * `removeBlocks takes the same lock as putBlocks` 守的东西）。
+     * 不加长度门槛——删除永远安全，越界条目本来就没进去。
+     */
+    fun removeBlocks(raw: String) {
+        synchronized(blocksLru) { blocksLru.remove(raw) }
+    }
+
     /** Block-level parse for a FROZEN fragment. First parse may run on the
      *  caller's thread (once per distinct fragment text process-wide); scroll
      *  away/return and session re-entry are hits. */

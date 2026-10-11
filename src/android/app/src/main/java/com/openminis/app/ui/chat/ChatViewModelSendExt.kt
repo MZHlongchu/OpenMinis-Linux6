@@ -14,9 +14,13 @@ import com.openminis.app.service.SessionConcurrencyManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.openminis.app.R
+// [T-android-submit-outcome] 与上游同一写法：漏斗的返回值写成裸的 `SubmitOutcome`
+// （上游它在 ChatViewModel.kt 里，是同一个类的嵌套 sealed class），所以按名字导入。
+import com.openminis.app.ui.chat.ChatViewModel.SubmitOutcome
 
 /**
  * @param skipContextCheck set by the pre-send context dialog's own actions,
@@ -24,12 +28,29 @@ import com.openminis.app.R
  *   send would re-evaluate the same (still stale until the next usage
  *   chunk) token count and pop the dialog again — iOS guards the identical
  *   re-entry with `skipCompactCheck`.
+ * @param headless [T-android-programmatic-prompt-keeps-draft] True when this
+ *   send came from a caller with no user behind it (a scheduled fire, a
+ *   sub-agent callback, the sessions CLI — see ChatViewModel.submitPrompt).
+ *   A prompt nobody typed must never touch the composer DRAFT: the
+ *   auto-compact branch below used to clear `_inputText` unconditionally, so a
+ *   background prompt that tripped the compact threshold erased what the user
+ *   was typing (iOS 2a06de66a), and the ask-user dialog has nobody to answer.
+ * @param prefill [T-scheduled-tool-prefill] Prefilled tool calls travelling
+ *   with the prompt. Upstream hands them to `runAgentLoop`'s scripted first
+ *   turn; this port's loop has no such entry point yet (see submitPrompt's
+ *   [T-u6-vm-adapter] note), so they are carried through the pre-send
+ *   compaction and then recorded as dropped — never silently.
+ * @return [SubmitOutcome] — what actually happened, so a headless caller can
+ *   report Queued/Compacting/Rejected instead of "Running" (upstream
+ *   [T-android-submit-outcome], ChatViewModel.kt:9038-9059).
  */
 internal fun ChatViewModel.sendMessage(
     text: String,
     skipContextCheck: Boolean,
     internalGoalRun: Boolean = false,
-) {
+    headless: Boolean = false,
+    prefill: List<com.openminis.app.scheduled.PrefilledToolCall> = emptyList(),
+): SubmitOutcome {
     // [T-android-paste-mediaref] `[Pasted#N]` markers are NOT expanded here
     // any more.
     //
@@ -50,18 +71,20 @@ internal fun ChatViewModel.sendMessage(
     // While streaming, enqueue instead of silently dropping (iOS: send vs enqueuePrompt).
     if (_isStreaming.value) {
         enqueuePrompt(text)
-        return
+        return SubmitOutcome.Queued
     }
     // T180: allow attachments-only sends (no caption). Mirrors iOS, where
     // an empty text + non-empty attachments still produces a valid user
     // message. Without this an image-only "look at this" send dropped.
-    if (!internalGoalRun && trimmed.isBlank() && _attachments.value.isEmpty()) return
+    if (!internalGoalRun && trimmed.isBlank() && _attachments.value.isEmpty()) {
+        return SubmitOutcome.Rejected("empty_prompt")
+    }
     if (_isCompacting.value) {
         appendSystemInfo(
             text = context.getString(R.string.vm_wait_compact_before_send),
             iconKind = "compact",
         )
-        return
+        return SubmitOutcome.Rejected("session_compacting")
     }
     // Context pressure check. Unlike before, needsCompact now HOLDS the
     // send: either compact silently (auto-compact on) or ask first. The
@@ -72,17 +95,31 @@ internal fun ChatViewModel.sendMessage(
             ChatViewModel.PreSendContextAction.PROCEED -> {}
             ChatViewModel.PreSendContextAction.COMPACT_THEN_SEND -> {
                 pendingSendText = text
-                _inputText.value = ""
+                pendingSendPrefill = prefill
+                pendingSendHeadless = headless
+                // [T-android-programmatic-prompt-keeps-draft] Only the
+                // user's own send owns the composer. A headless prompt (a
+                // scheduled fire, a sub-agent callback, the sessions CLI)
+                // carries its text in `text`; clearing here erased whatever
+                // the user was typing whenever such a prompt tripped the
+                // auto-compact threshold (iOS 2a06de66a).
+                if (!headless) _inputText.value = ""
                 compactAndSendPending()
-                return
+                return SubmitOutcome.Compacting
             }
             ChatViewModel.PreSendContextAction.ASK_USER -> {
+                // [T-android-submit-outcome] No user behind a headless
+                // prompt → nobody to answer the dialog. Refuse loudly
+                // rather than park the text and report it as running.
+                if (headless) return SubmitOutcome.Rejected("context_near_capacity")
                 // Park the text on the VM (not the composer) so the dialog
                 // owns it; cancelCompactBeforeSend puts it back.
                 pendingSendText = text
+                pendingSendPrefill = prefill
+                pendingSendHeadless = false
                 _inputText.value = ""
                 _showCompactBeforeSendPrompt.value = true
-                return
+                return SubmitOutcome.Rejected("awaiting_user_compact_decision")
             }
         }
     }
@@ -102,7 +139,7 @@ internal fun ChatViewModel.sendMessage(
     val initialProvider = currentProvider
     if (initialProvider == null) {
         _error.value = "No provider configured"
-        return
+        return SubmitOutcome.Rejected("no_provider")
     }
     var provider: LLMProvider = initialProvider
 
@@ -125,7 +162,7 @@ internal fun ChatViewModel.sendMessage(
     }
     if (internalGoalRun && provider.model.isPureVideoGenerator) {
         appendSystemInfo("Goal execution needs a text-capable model. Select one and resume the Goal.", "info")
-        return
+        return SubmitOutcome.Rejected("needs_text_model")
     }
     if (!internalGoalRun) clearAttachments()
 
@@ -169,10 +206,42 @@ internal fun ChatViewModel.sendMessage(
     val editingId = if (internalGoalRun) null else _editingMessageId.value
     if (editingId != null) _editingMessageId.value = null
 
+    // [T-scheduled-tool-prefill] Upstream hands these to `runAgentLoop`'s
+    // scripted first turn. This port's loop has no such entry point yet — same
+    // documented gap as submitPrompt's [T-u6-vm-adapter] note — so the request
+    // is recorded here rather than dropped in silence: a scheduled task whose
+    // prefilled command never ran must be visible in the log.
+    if (prefill.isNotEmpty()) {
+        AppLogger.info(
+            ChatViewModel.TAG_STREAM,
+            "send: ${prefill.size} prefilled tool call(s) requested; tool prefill is not ported, sending a plain prompt",
+        )
+    }
+
     viewModelScope.launch {
         var streamLaunched = false
         try {
-        // [T-delete-from-here-inflight] 「从此处删除」的 DB 截断是异步的，而它
+        // [T-android-send-before-load] Never write this turn into the transcript
+        // while loadSession is still reading it. loadSession snapshots the DB,
+        // then REPLACES agentHistory and _messages with that snapshot; a send
+        // landing in between (a session opened and prompted at once: debug
+        // prompts, scheduled fires, sub agents, a quick tap on a long chat) had
+        // its user message wiped from the screen — the chat showed replies with
+        // no question — or from agentHistory, so the model never saw it. Title
+        // generation then found no user message and the chat stayed "New Chat".
+        // Safe mode skips the load entirely, so there is nothing to wait for.
+        //
+        // [T-merge-1.14-send-before-load] 上游实现：upstream-1.14
+        // `ui/chat/ChatViewModel.kt:9232-9245`（`sendMessage` 的
+        // `viewModelScope.launch` 体首）。合并时整段丢了，本移植的 send 路径
+        // （本文件）一处都没有，于是回归到「发送落进 loadSession 的读窗口、
+        // 用户消息被旧快照覆盖」的竞态。这里照上游原样补回：门控必须在
+        // `ensureSession()`（会话行）、`chatRepository.appendMessage`（落库）
+        // 和 `_messages.value`（上屏）之前。
+        if (!sessionLoaded.value && !com.openminis.app.crash.CrashFrequencyDetector.isSafeMode()) {
+            AppLogger.info(ChatViewModel.TAG_STREAM, "send waiting for session load (sid=${this@ChatViewModel.activeSessionId})")
+            sessionLoaded.first { it }
+        }        // [T-delete-from-here-inflight] 「从此处删除」的 DB 截断是异步的，而它
         // 的 deleteMessagesAfter 按 `sort_order >= cutoff` 删行：本函数此前会在这
         // 段窗口里把新 user 行落库，落库的 sort_order 大于锚点 → 刚发出的消息连
         // 同气泡一起被删掉，且不进 agentHistory（模型对着不在上下文里的问题作答）。
@@ -262,9 +331,10 @@ internal fun ChatViewModel.sendMessage(
         val userContentParts = mutableListOf<AgentContentPart>()
         if (modelBody.isNotEmpty()) userContentParts.add(AgentContentPart.Text(modelBody))
         imageParts.forEachIndexed { idx, part ->
-            val path = prepared.imageUploadPaths.getOrNull(idx)
-            if (path != null) userContentParts.add(AgentContentPart.Text("[attached image: $path]"))
-            userContentParts.add(AgentContentPart.ImageData(part.data, part.mimeType, linuxPath = path, noVisionPlaceholder = visionPlaceholderFor(path)))
+            // [T-android-image-downscale-parity] 三条发送路径共用同一个成形函数
+            // （上游 1.14 ChatViewModel.kt:9321-9323）：说明文字 + 像素 + 被缩过时的
+            // 原始尺寸提示。以前这里内联拼 ImageData，note 整条信息没有出口。
+            userContentParts.addModelImage(part, prepared.imageUploadPaths.getOrNull(idx), prepared.imageModelNotes.getOrNull(idx))
         }
         prepared.attachedFilesXml?.let { userContentParts.add(AgentContentPart.Text(it)) }
 
@@ -316,7 +386,14 @@ internal fun ChatViewModel.sendMessage(
                 // Acquire concurrency slot (suspends if at max)
                 SessionConcurrencyManager.acquireSlot(activeSessionId)
                 AppLogger.debug(ChatViewModel.TAG_STREAM, "send streamJob slot acquired")
-                SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
+                // [T-a15-overlay-task-title] 上游 1.14 的五处 setActive 都带 sessionTitle：
+                // 悬浮胶囊按**任务名**而不是助手名标识这一条。合并拆文件时该实参丢了，
+                // tracker 的 upsertTask 收到 null，胶囊第一行只剩 Soul 名。
+                SessionActivityTracker.setActive(
+                    activeSessionId,
+                    onStop = { cancelStream() },
+                    sessionTitle = overlaySessionTitle(),
+                )
 
 
                 // Resolve the active group's fallback strategy
@@ -427,4 +504,7 @@ internal fun ChatViewModel.sendMessage(
             }
         }
     }
+    // [T-android-submit-outcome] Upstream's `Sent` (ChatViewModel.kt:9481): the
+    // turn is streaming now, and the caller is told so instead of assuming it.
+    return SubmitOutcome.Running
 }

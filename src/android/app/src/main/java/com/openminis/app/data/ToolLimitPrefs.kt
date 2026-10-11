@@ -15,7 +15,16 @@ object ToolLimitPrefs {
 
     const val DEFAULT_SHELL_TIMEOUT_SEC = 600
     const val MIN_SHELL_TIMEOUT_SEC = 30
-    const val MAX_SHELL_TIMEOUT_SEC = 1_800
+    /**
+     * [T-android-parity-fixes] One hour, the same ceiling upstream 1.14 states
+     * in the `shell_execute` schema and the same one iOS allows a scheduled
+     * task's prefilled command — see [com.openminis.app.scheduled.PrefilledToolCall]
+     * `TIMEOUT_RANGE_SEC` (1..3600), which validates a timeout this setting must
+     * be able to honour. Was 1800, which made the scheduler's own advertised
+     * range unreachable ("shell timeout must be between 1s and 3600s" for a
+     * value the tool would then silently clamp to 30 minutes).
+     */
+    const val MAX_SHELL_TIMEOUT_SEC = 3_600
     const val SHELL_STEP_SEC = 30
 
     const val DEFAULT_FILE_READ_MAX_CHARS = 15_000

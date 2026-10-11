@@ -46,6 +46,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -97,6 +98,9 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Surface
 import com.openminis.app.ui.components.MinisAlertDialog
@@ -123,7 +127,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import com.openminis.app.ui.components.MinisCenterTopBar
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -147,6 +150,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import com.openminis.app.agent.jobs.AgentJobRegistry
 import com.openminis.app.service.SessionActivityTracker
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -193,6 +197,13 @@ import kotlinx.coroutines.withContext
 import java.util.Calendar
 import java.util.Date
 import java.util.concurrent.TimeUnit
+// [merge-note:multi-select] Only the three imports upstream 1.14 added alongside
+// its selection toolbar / decorative-tick work are taken here; MinisTextButton is
+// already imported above and is used by the selection-mode top bar. All three are
+// required by code already in this file, so dropping them would not compile.
+import com.openminis.app.ui.components.rememberDecorativeTick
+import com.openminis.app.ui.components.decorativePhase
+import androidx.compose.ui.graphics.graphicsLayer
 
 // FAB color — use shared theme values
 
@@ -334,15 +345,54 @@ data class FolderGroupBlock(
  *    the group and keep their pin glyph.
  *  - A `folder_id` pointing at a group we don't have renders as UNGROUPED
  *    rather than vanishing. There is no FK, so this is a normal state.
- *  - Empty groups still render — a group that disappears when its last session
- *    moves out reads as data loss.
+ *  - Empty groups render only while they are still plausibly WANTED: pinned
+ *    (an explicit "keep this in front of me"), or created recently enough that
+ *    the user is still filing into them. See [emptyGroupIsStillRelevant].
  */
+/**
+ * [T-android-empty-group-visibility] Whether a group with no members is still
+ * worth a row.
+ *
+ * Two failure modes pull in opposite directions, and both are real:
+ *
+ *  - Show every empty group and deleting the last chat in one leaves a "ghost"
+ *    the user cannot get rid of by the obvious means.
+ *  - Hide every empty group and a group VANISHES the moment its last session
+ *    moves out — which reads as data loss, and makes a group the user just
+ *    created invisible before they can file anything into it.
+ *
+ * `isPinned` alone (the previous rule) is the wrong axis: it answers "does the
+ * user want this at the top", not "is this group still live". A user who never
+ * pins anything loses a group they created five seconds ago.
+ *
+ * The honest distinction is INTENT, approximated by age. A group created
+ * recently is one the user is still setting up, so it stays visible and
+ * droppable. A long-standing group that has drained to empty is the ghost case.
+ * Pinning remains an explicit override in both directions.
+ */
+internal fun emptyGroupIsStillRelevant(
+    folder: FolderEntity,
+    nowMs: Long,
+): Boolean = folder.isPinned || (nowMs - folder.createdAt) < EMPTY_GROUP_GRACE_MS
+
+/**
+ * How long a freshly created, still-empty group keeps its row. Long enough to
+ * create a group and file chats into it across a couple of sittings; short
+ * enough that a drained group does not linger for a whole day.
+ */
+internal const val EMPTY_GROUP_GRACE_MS: Long = 60L * 60L * 1000L
+
 // `internal` so the accordion invariant can be tested for real rather than by
 // matching source text — see SessionGroupAccordionTest.
 internal fun partitionByFolder(
     sessions: List<ChatSessionEntity>,
     folders: List<FolderEntity>,
-    collapsedIds: Set<String>,
+    /**
+     * [T-android-groups-collapsed-on-launch] The one open group, or null for
+     * all collapsed (the state on every cold start). An id naming a group
+     * that is not in this render opens nothing.
+     */
+    expandedFolderId: String?,
     /**
      * Session ids carrying a corner badge entered within the last 24h,
      * snapshotted ONCE by the caller (iOS computes `freshCornerIds` the same
@@ -351,6 +401,8 @@ internal fun partitionByFolder(
     freshBadgedIds: Set<String> = emptySet(),
     /** Ids whose agent loop is running — see [FolderGroupBlock.anyActive]. */
     activeSessionIds: Set<String> = emptySet(),
+    /** Injected so the empty-group recency rule is testable without a clock. */
+    nowMs: Long = System.currentTimeMillis(),
 ): Pair<List<FolderGroupBlock>, List<ChatSessionEntity>> {
     if (folders.isEmpty()) return emptyList<FolderGroupBlock>() to sessions
 
@@ -368,23 +420,18 @@ internal fun partitionByFolder(
         }
     }
 
-    // First-encounter order = activity order. Groups with no members are
-    // appended afterwards so they still render.
+    // First-encounter order = activity order. Empty groups are appended only
+    // when they are still plausibly wanted — see [emptyGroupIsStillRelevant].
     val ordered = members.keys.toMutableList()
-    for (f in folders) if (f.id !in members) ordered.add(f.id)
+    for (f in folders) if (f.id !in members && emptyGroupIsStillRelevant(f, nowMs)) ordered.add(f.id)
 
-    // [T-android-group-accordion] At most ONE group is open at a time.
-    //
-    // `collapsedIds` stores the inverse (which groups are shut), so an empty
-    // set — a fresh install, or a device whose folders all arrived from a
-    // restore — means "nothing is collapsed", i.e. everything unfolds at once.
-    // That is the state the user reported. The toggle already enforces the
-    // accordion; this makes the invariant hold on the way IN as well, so it
-    // cannot be violated by a set that no interaction has touched yet.
-    //
-    // The survivor is the first in `ordered`, which is activity order — the
-    // most recently used group is the one worth having open.
-    val openId = ordered.firstOrNull { it !in collapsedIds }
+    // [T-android-group-accordion] At most ONE group is open at a time, and
+    // [T-android-groups-collapsed-on-launch] only one the user opened: there
+    // is no fallback that picks a group on their behalf. The old rules (an
+    // inverse "collapsed" set whose empty state unfolded everything, then a
+    // restored preference with an activity-order fallback) all ended with the
+    // app choosing a group to open at launch; the user wants none open.
+    val openId = expandedFolderId?.takeIf { it in ordered }
 
     val blocks = ordered.mapNotNull { fid ->
         val folder = byId[fid] ?: return@mapNotNull null
@@ -469,6 +516,7 @@ fun SessionListScreen(
     onSettingsClick: () -> Unit,
     onAddProviderClick: () -> Unit = {},
     onSelectModelsClick: () -> Unit = {},
+    onRestoreBackupClick: () -> Unit = {},
     onTerminalClick: () -> Unit = {},
     onRootfsClick: () -> Unit = {},
     // [T-android-scheduled-tasks-design] Entry to the scheduled-tasks list.
@@ -513,14 +561,21 @@ fun SessionListScreen(
         factory = SessionListViewModel.factory(chatRepository, providerRepository, context),
     )
     val persistedSessions by viewModel.displayedSessions.collectAsState()
+    // [T-android-sessionlist-longpress-select] Multi-select state, read by the
+    // selection-mode top bar, the bottom toolbar and the ticked rows below.
+    // Collected above `sessions` because that memo keys on isSelecting: the
+    // synthetic draft row has no DB row, so it must not be tickable (a phantom
+    // id would reach bulk delete/export/move) and drops out while selecting.
+    val isSelecting by viewModel.isSelecting.collectAsState()
+    val selectedIds by viewModel.selectedIds.collectAsState()
     // [T-android-draft-placeholder-row] Prepend the synthetic draft row. Built
     // here rather than in the ViewModel precisely because it must never reach
     // the database or the repository's flows — it exists for exactly as long
     // as the detail pane holds an unsaved draft, and vanishes on its own when
     // the user switches away without sending. Mirrors iOS displaySessions.
-    val sessions = remember(persistedSessions, draftPlaceholderId) {
+    val sessions = remember(persistedSessions, draftPlaceholderId, isSelecting) {
         val draftId = draftPlaceholderId
-        if (draftId == null || persistedSessions.any { it.id == draftId }) {
+        if (isSelecting || draftId == null || persistedSessions.any { it.id == draftId }) {
             persistedSessions
         } else {
             val now = System.currentTimeMillis()
@@ -548,6 +603,8 @@ fun SessionListScreen(
     // the click handler below can read the CURRENT map without a second
     // subscription (the guarded lambda is rebuilt per recomposition anyway).
     val searchAnchors by viewModel.searchAnchors.collectAsState()
+    // [merge-note:multi-select] isSelecting / selectedIds moved up next to
+    // persistedSessions (see the note there); upstream collects them here.
     val regeneratingIds by viewModel.regeneratingIds.collectAsState()
     val providerConfig by providerRepository.config.collectAsState()
     val hasProviders = providerConfig.instances.isNotEmpty()
@@ -622,6 +679,17 @@ fun SessionListScreen(
     // iOS "Delete Group & N Sessions" — pair carries the member count so the
     // confirmation can restate the consequence.
     var folderToDelete by remember { mutableStateOf<Pair<FolderEntity, Int>?>(null) }
+    // [T-android-session-multi-export] Upstream 1.14's multi-select state, kept
+    // with its bottom SelectionToolbar, bulk-delete confirmation and export
+    // progress/summary dialogs. `showOverflowMenu` from the same upstream hunk
+    // is deliberately not taken: it drives upstream's top-bar overflow menu,
+    // while this port's bar is MinisCenterTopBar + the scheduled-tasks action
+    // (a region this merge resolved in our favour), so the flag could never be
+    // set to true here. The equivalent entry point is the row context menu's
+    // "Select" item + the selection-mode top bar.
+    var showBulkDeleteDialog by remember { mutableStateOf(false) }
+    var multiExportProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var multiExportResult by remember { mutableStateOf<com.openminis.app.share.SessionExporter.Result?>(null) }
     var editSession by remember { mutableStateOf<ChatSessionEntity?>(null) }
     var showBrowserSheet by remember { mutableStateOf(false) }
     var showBrowserSettings by remember { mutableStateOf(false) }
@@ -631,7 +699,9 @@ fun SessionListScreen(
     // leftovers go through date bucketing. Assembly order below is
     // Pinned → group block → date buckets, matching iOS.
     val folders by viewModel.folders.collectAsState()
-    val collapsedFolderIds by viewModel.collapsedFolderIds.collectAsState()
+    // [T-android-groups-collapsed-on-launch] In memory only: null (all
+    // collapsed) on every cold start.
+    val expandedFolderId by viewModel.expandedFolderId.collectAsState()
     val folderMemberCounts by viewModel.folderMemberCounts.collectAsState()
     val groupPickerRequest by viewModel.groupPickerRequest.collectAsState()
     // While searching, group cards are suppressed: padding a result set with
@@ -658,13 +728,23 @@ fun SessionListScreen(
     // can show that one of its members is still working. Keyed into the
     // partition memo — without it the blocks would keep a stale snapshot and
     // the ring would never appear or never clear.
-    val activeSessionIds by SessionActivityTracker.activeSessions.collectAsState()
+    // [T-android-sidebar-subagent-running] A session is working if it is
+    // streaming OR it has sub agents running on its behalf. The second half is
+    // invisible to the streaming tracker: a sub agent registers activity under
+    // its own hidden child session id, which no row here carries, so a
+    // conversation that had delegated everything out went dark while its work
+    // continued.
+    val streamingSessionIds by SessionActivityTracker.activeSessions.collectAsState()
+    val agentWorkParents by AgentJobRegistry.parentsWithAgentWork.collectAsState()
+    val activeSessionIds = remember(streamingSessionIds, agentWorkParents) {
+        if (agentWorkParents.isEmpty()) streamingSessionIds else streamingSessionIds + agentWorkParents
+    }
     val folderPartition = remember(
-        sessions, folders, collapsedFolderIds, showFolderBlock, freshBadgedIds, activeSessionIds,
+        sessions, folders, expandedFolderId, showFolderBlock, freshBadgedIds, activeSessionIds,
     ) {
         if (showFolderBlock) {
             partitionByFolder(
-                sessions, folders, collapsedFolderIds, freshBadgedIds, activeSessionIds,
+                sessions, folders, expandedFolderId, freshBadgedIds, activeSessionIds,
             )
         } else emptyList<FolderGroupBlock>() to sessions
     }
@@ -709,7 +789,9 @@ fun SessionListScreen(
     val listState = rememberLazyListState()
     LaunchedEffect(Unit) {
         viewModel.newTopSessionEvent.collect {
-            if (!viewModel.isSearchActive.value) {
+            // Upstream/1.13 guard, second half: no autoscroll while selecting —
+            // the list must not move under a finger that is ticking rows.
+            if (!viewModel.isSearchActive.value && !viewModel.isSelecting.value) {
                 listState.animateScrollToItem(0)
             }
         }
@@ -751,8 +833,11 @@ fun SessionListScreen(
     // → collapse). Derived straight from LazyListState — no visibility probes
     // needed: header offscreen-above ⇔ the first visible item's index is past
     // the header's reconstructed index. Suppressed in select mode (iOS guard).
-    val miniBarBlock by remember(folderBlocks, folderHeaderIndices) {
+    val miniBarBlock by remember(folderBlocks, folderHeaderIndices, isSelecting) {
         derivedStateOf {
+            // The suppression the comment above promises (upstream/1.13 guard):
+            // the capsule would otherwise sit on the selection toolbar.
+            if (isSelecting) return@derivedStateOf null
             val block = folderBlocks.firstOrNull { !it.isCollapsed && it.ids.isNotEmpty() }
                 ?: return@derivedStateOf null
             val headerIdx = folderHeaderIndices[block.folder.id] ?: return@derivedStateOf null
@@ -777,22 +862,68 @@ fun SessionListScreen(
             .map { list -> list.count { it.enabled } }
     }.collectAsState(initial = 0)
 
+    // [T-android-sessionlist-longpress-select] Second exit from selection mode,
+    // next to the top bar's Cancel; enabled only while selecting.
+    androidx.activity.compose.BackHandler(enabled = isSelecting) {
+        viewModel.clearSelection()
+    }
+
     Scaffold(
         topBar = {
             MinisCenterTopBar(
                 title = {
-                    Text(
+                    if (isSelecting) {
+                        // Upstream's selection title: ticked count, or the prompt.
+                        Text(
+                            if (selectedIds.isEmpty())
+                                stringResource(R.string.sessionlist_select_title)
+                            else
+                                stringResource(R.string.sessionlist_n_selected, selectedIds.size),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 20.sp,
+                        )
+                    } else {
+                        Text(
                             stringResource(R.string.app_name),
                             fontWeight = FontWeight.Bold,
                             fontSize = 20.sp,
                         )
+                    }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onSettingsClick) {
-                        Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.sessionlist_settings))
+                    if (isSelecting) {
+                        // Cancel replaces the settings gear, as upstream/base have it.
+                        MinisTextButton(onClick = { viewModel.clearSelection() }) {
+                            Text(stringResource(R.string.cancel))
+                        }
+                    } else {
+                        IconButton(onClick = onSettingsClick) {
+                            Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.sessionlist_settings))
+                        }
                     }
                 },
                 actions = {
+                    if (isSelecting) {
+                        // [T-android-sessionlist-select-all-label] Upstream/base
+                        // label this Deselect All when all are ticked but wired it
+                        // to selectAll() — the opposite of the label. Clear the set
+                        // instead (same screen-side flow write as isSearchActive).
+                        val allSelected =
+                            sessions.isNotEmpty() && selectedIds.size == sessions.size
+                        MinisTextButton(
+                            onClick = {
+                                if (allSelected) viewModel.selectedIds.value = emptySet()
+                                else viewModel.selectAll()
+                            },
+                        ) {
+                            Text(
+                                stringResource(
+                                    if (allSelected) R.string.sessionlist_deselect_all
+                                    else R.string.sessionlist_select_all,
+                                ),
+                            )
+                        }
+                    } else {
                         IconButton(onClick = onScheduledTasksClick) {
                             androidx.compose.material3.BadgedBox(
                                 badge = {
@@ -808,6 +939,7 @@ fun SessionListScreen(
                                 )
                             }
                         }
+                    }
                 },
             )
         },
@@ -885,6 +1017,7 @@ fun SessionListScreen(
                             hasGroups = hasGroups,
                             onAddProvider = onAddProviderClick,
                             onSelectModels = onSelectModelsClick,
+                            onRestoreBackup = onRestoreBackupClick,
                             onStartConversation = {
                                 scope.launch {
                                     val sessionId = viewModel.createNewWorkspaceSession()
@@ -975,6 +1108,13 @@ fun SessionListScreen(
                                 ) {
                                 SessionItemContent(
                                     session = session,
+                                    // [T-android-sessionlist-longpress-select] The
+                                    // wiring the merge left dangling; same VM calls
+                                    // upstream makes at this call site.
+                                    isSelecting = isSelecting,
+                                    selectedIds = selectedIds,
+                                    onToggleSelect = { viewModel.toggleSelect(it) },
+                                    onEnterSelect = { viewModel.enterSelection(it) },
                                     onSessionClick = onSessionClickGuarded,
                                     onPinToggle = { viewModel.togglePin(it) },
                                     onEditRequest = { editSession = it },
@@ -1008,6 +1148,13 @@ fun SessionListScreen(
                                     // selected row, or a selected row inside a
                                     // group would show no highlight at all.
                                     rowBackground = when {
+                                        // [T-android-sessionlist-select-highlight]
+                                        // Ticked row: the same 12% primary wash the
+                                        // two-pane detail row uses, through the
+                                        // existing rowBackground channel so the
+                                        // no-reflow tint paths are reused untouched.
+                                        isSelecting && session.id in selectedIds ->
+                                            MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
                                         session.id == selectedSessionId ->
                                             MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
                                         inFolder -> Color.Transparent
@@ -1175,7 +1322,50 @@ fun SessionListScreen(
                 }
             }
 
-            if (hasProviders && (sessions.isNotEmpty() || isSearchActive)) {
+            // Bottom area: dual FABs or selection toolbar (matching iOS fabRow / selectionToolbar)
+            // [merge-note:multi-select] Upstream 1.14 kept over ours: our side
+            // had only the FAB row condition. Reachable since the row context
+            // menu's "Select" and the 1.13 top bar wiring were restored — see
+            // [T-android-sessionlist-longpress-select] on SessionItemContent.
+            if (isSelecting) {
+                // Selection toolbar at bottom (matching iOS: Export + Delete)
+                SelectionToolbar(
+                    selectedCount = selectedIds.size,
+                    onExport = { format ->
+                        // Displayed order, persisted rows only: the synthetic
+                        // draft row was never written, so it has nothing to export.
+                        val targets = persistedSessions.filter { it.id in selectedIds }
+                        if (targets.isNotEmpty() && multiExportProgress == null) {
+                            multiExportProgress = 0 to 0
+                            scope.launch {
+                                try {
+                                    val result = com.openminis.app.share.SessionExporter.exportToZip(
+                                        context, targets, chatRepository, format,
+                                    ) { done, total ->
+                                        scope.launch { multiExportProgress = done to total }
+                                    }
+                                    // iOS shows the summary only for several sessions.
+                                    if (result.sessionCount > 1) multiExportResult = result
+                                    else shareSessionExport(context, result)
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    throw e
+                                } catch (t: Throwable) {
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        context.getString(R.string.export_progress_failed),
+                                        android.widget.Toast.LENGTH_LONG,
+                                    ).show()
+                                } finally {
+                                    multiExportProgress = null
+                                }
+                            }
+                        }
+                    },
+                    onMove = { viewModel.requestGroupPickerForSelection() },
+                    onDelete = { showBulkDeleteDialog = true },
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                )
+            } else if (hasProviders && (sessions.isNotEmpty() || isSearchActive)) {
                 // Dual FAB row (matching iOS: New Chat left + Search right, or vice versa).
                 // Hidden while the onboarding landing is showing — Step 3 provides the CTA.
                 // T46: stay visible while search is active even when the result
@@ -1237,6 +1427,55 @@ fun SessionListScreen(
         )
     }
 
+    // [merge-note:multi-select] Upstream 1.14's bulk dialogs, kept with the
+    // selection toolbar above: export progress (with a determinate bar once the
+    // total is known), the multi-session export summary, and the bulk-delete
+    // confirmation that states the count.
+    // Bulk delete confirmation
+    multiExportProgress?.let { (done, total) ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text(stringResource(R.string.sessionlist_export)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(stringResource(R.string.export_progress_running, done, total))
+                    if (total > 0) {
+                        LinearProgressIndicator(
+                            progress = { (done.toFloat() / total).coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            },
+            confirmButton = {},
+        )
+    }
+    multiExportResult?.let { result ->
+        SessionExportSummaryDialog(
+            result = result,
+            onShare = {
+                multiExportResult = null
+                shareSessionExport(context, result)
+            },
+            onDismiss = { multiExportResult = null },
+        )
+    }
+
+    if (showBulkDeleteDialog) {
+        MinisAlertDialog(
+            onDismissRequest = { showBulkDeleteDialog = false },
+            title = stringResource(R.string.sessionlist_delete_n_title, selectedIds.size),
+            confirmText = stringResource(R.string.delete),
+            isDestructive = true,
+            onConfirm = {
+                viewModel.deleteSelected()
+                showBulkDeleteDialog = false
+            },
+        )
+    }
+
     // ─── Session groups ────────────────────────────────────────────────────
     // [T-android-session-grouping]
 
@@ -1247,8 +1486,12 @@ fun SessionListScreen(
         val suggesting by viewModel.groupSuggesting.collectAsState()
         val suggestFailed by viewModel.groupSuggestFailed.collectAsState()
         val suggestion by viewModel.groupSuggestion.collectAsState()
+        // [T-android-group-picker-recent] Most recently active group first, in
+        // the picker only; the list above keeps its own group order.
+        val lastActivity by viewModel.folderLastActivity.collectAsState()
+        val pickerFolders = remember(folders, lastActivity) { groupPickerOrder(folders, lastActivity) }
         GroupPickerSheet(
-            folders = folders,
+            folders = pickerFolders,
             memberCounts = folderMemberCounts,
             sessionCount = request.sessionIds.size,
             anyFiled = request.anyFiled,
@@ -1656,6 +1899,101 @@ private fun DualFabRow(
     }
 }
 
+// ─── Selection Toolbar (matching iOS selectionToolbar) ──────────────────────
+// [merge-note:multi-select] Upstream 1.14's composable, kept over our side's
+// deletion: it is what the bottom-bar branch and the bulk dialogs above drive.
+
+@Composable
+private fun SelectionToolbar(
+    selectedCount: Int,
+    /** [T-android-session-multi-export] JSON or plain text, picked from a menu as on iOS. */
+    onExport: (com.openminis.app.share.SessionExporter.Format) -> Unit,
+    /** [T-android-session-grouping] Bulk-file the selection into a group. */
+    onMove: () -> Unit,
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.95f))
+            .padding(vertical = 10.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+    ) {
+        // Export button (matching iOS: a menu of JSON / Plain Text)
+        var showExportMenu by remember { mutableStateOf(false) }
+        Box {
+            MinisTextButton(
+                onClick = { showExportMenu = true },
+                enabled = selectedCount > 0,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Default.Share,
+                        contentDescription = stringResource(R.string.sessionlist_export),
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(stringResource(R.string.sessionlist_export), fontSize = 11.sp)
+                }
+            }
+            DropdownMenu(expanded = showExportMenu, onDismissRequest = { showExportMenu = false }) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.sessionlist_export_json)) },
+                    onClick = {
+                        showExportMenu = false
+                        onExport(com.openminis.app.share.SessionExporter.Format.JSON)
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.sessionlist_export_plain)) },
+                    onClick = {
+                        showExportMenu = false
+                        onExport(com.openminis.app.share.SessionExporter.Format.PLAIN_TEXT)
+                    },
+                )
+            }
+        }
+
+        // Move to Group button
+        MinisTextButton(
+            onClick = onMove,
+            enabled = selectedCount > 0,
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    Icons.Default.Folder,
+                    contentDescription = stringResource(R.string.group_move_action),
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(stringResource(R.string.group_move_action), fontSize = 11.sp)
+            }
+        }
+
+        // Delete button (matching iOS)
+        MinisTextButton(
+            onClick = onDelete,
+            enabled = selectedCount > 0,
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = stringResource(R.string.delete),
+                    tint = if (selectedCount > 0) MaterialTheme.colorScheme.error else Color.Gray,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    stringResource(R.string.delete),
+                    fontSize = 11.sp,
+                    color = if (selectedCount > 0) MaterialTheme.colorScheme.error else Color.Gray,
+                )
+            }
+        }
+    }
+}
+
 // ─── Section Header (matching iOS .subheadline.weight(.semibold)) ───────────
 
 @Composable
@@ -1696,7 +2034,13 @@ private fun SectionHeader(title: String) {
 @Composable
 private fun SessionItemContent(
     session: ChatSessionEntity,
+    isSelecting: Boolean,
+    selectedIds: Set<String>,
     onSessionClick: (String) -> Unit,
+    onToggleSelect: (String) -> Unit,
+    /** [T-android-sessionlist-longpress-select] Context-menu entry: enter the mode
+     *  WITH this row ticked (not toggleSelect, which flips set membership only). */
+    onEnterSelect: (String) -> Unit,
     onPinToggle: (String) -> Unit,
     onEditRequest: (ChatSessionEntity) -> Unit,
     onExportRequest: (ChatSessionEntity, String) -> Unit,
@@ -1731,6 +2075,33 @@ private fun SessionItemContent(
      */
     isFolderMember: Boolean = false,
 ) {
+    if (isSelecting) {
+        // [T-android-sessionlist-longpress-select] Selection-mode row, upstream's
+        // branch: a tap ticks instead of opening the chat, the context menu is off,
+        // and the leading slot carries the tick. Early return (not an if/else
+        // wrapper) so the ~200-line context-menu branch below keeps its indentation
+        // — same two branches, same slot table.
+        val isSelected = session.id in selectedIds
+        SessionRow(
+            session = session,
+            onClick = { onToggleSelect(session.id) },
+            onLongClick = null,
+            searchQuery = searchQuery,
+            searchSnippet = searchSnippet,
+            rowBackground = rowBackground,
+            isFolderMember = isFolderMember,
+            leadingIcon = {
+                Icon(
+                    imageVector = if (isSelected) Icons.Filled.CheckCircle else Icons.Outlined.Circle,
+                    contentDescription = null,
+                    tint = if (isSelected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(24.dp),
+                )
+            },
+        )
+        return
+    }
     var showContextMenu by remember { mutableStateOf(false) }
     var pressOffset by remember { mutableStateOf(DpOffset.Zero) }
     // [T-android-menu-press-side] Which HALF of the row the finger was on.
@@ -1906,6 +2277,19 @@ private fun SessionItemContent(
                         else Icons.Default.Folder,
                         contentDescription = null,
                     )
+                },
+            )
+            // Select
+            // [T-android-sessionlist-longpress-select] The entry point the merge
+            // dropped — without it the toolbar / bulk dialogs were unreachable.
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.sessionlist_select_action)) },
+                onClick = {
+                    showContextMenu = false
+                    onEnterSelect(session.id)
+                },
+                leadingIcon = {
+                    Icon(Icons.Outlined.ChecklistRtl, contentDescription = null)
                 },
             )
             MinisMenuDivider()
@@ -2607,8 +2991,11 @@ private fun SessionRow(
         }
 
         // Category icon in colored circle (18% opacity matching iOS)
+        // [T-android-sidebar-subagent-running] See the folder aggregate above:
+        // running sub agents count as this session working.
         val activeSessions by SessionActivityTracker.activeSessions.collectAsState()
-        val isActive = session.id in activeSessions
+        val agentWorkParents by AgentJobRegistry.parentsWithAgentWork.collectAsState()
+        val isActive = session.id in activeSessions || session.id in agentWorkParents
         // [T-android-session-paused-badge] Head of this session's badge queue
         // — null for the common case. Renders as an overlay in the icon's
         // bottom-right corner, mirroring where iOS's iCloud badge sits so
@@ -2758,25 +3145,31 @@ private fun SpinningRing(
     color: Color,
     modifier: Modifier = Modifier,
 ) {
-    var angle by remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(Unit) {
-        val startNanos = withFrameNanos { it }
-        while (true) {
-            withFrameNanos { now ->
-                val elapsedSec = (now - startNanos) / 1_000_000_000f
-                angle = (elapsedSec * 360f) % 360f
-            }
-        }
-    }
-    Canvas(modifier = modifier.rotate(angle)) {
-        val stroke = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round)
+    // [T-android-decorative-anim-perf] This is the home list's per-row
+    // running indicator, so N active sessions used to mean N private
+    // 90 fps frame loops, each writing `angle` into a state that
+    // `Modifier.rotate(angle)` read in COMPOSITION — recomposing the ring
+    // every frame, inside a LazyColumn row full of title/preview text.
+    //
+    // Now: one shared 30 fps tick, read inside the graphicsLayer lambda (a
+    // layer-phase read: no recomposition, no re-layout, and the lambda form
+    // is itself the layer boundary), and the arc is recorded once — only the
+    // layer's rotationZ changes per tick. Colour hoisted so the draw
+    // allocates nothing.
+    val tick = rememberDecorativeTick()
+    val arcColor = remember(color) { color.copy(alpha = 0.8f) }
+    Canvas(
+        modifier = modifier.graphicsLayer {
+            rotationZ = decorativePhase(tick.value, 1000) * 360f
+        },
+    ) {
         drawArc(
-            color = color.copy(alpha = 0.8f),
+            color = arcColor,
             startAngle = 0f,
             sweepAngle = 360f * 0.3f,
             useCenter = false,
             size = Size(size.width, size.height),
-            style = stroke,
+            style = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round),
         )
     }
 }
@@ -2843,6 +3236,7 @@ private fun OnboardingLanding(
     onAddProvider: () -> Unit,
     onSelectModels: () -> Unit,
     onStartConversation: () -> Unit,
+    onRestoreBackup: () -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -2919,6 +3313,36 @@ private fun OnboardingLanding(
                 isLocked = !hasGroups,
                 onClick = { if (hasGroups) onStartConversation() },
             )
+        }
+
+        // [T-onboarding-restore-link] A side route for someone moving from
+        // another device (iOS parity: ContentView.emptyState). A footnote link,
+        // not a fourth card, so it does not compete with the three steps.
+        // Shown only until models are selected — after that this landing also
+        // greets returning users with no chats, whose path is Settings →
+        // Backup & Restore. Restore merges, so it is safe after step 1 too.
+        if (!hasGroups) {
+            Spacer(Modifier.height(12.dp))
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onRestoreBackup)
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.History,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = stringResource(R.string.sessionlist_welcome_restore_backup),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
@@ -3161,6 +3585,86 @@ internal fun SessionEditSheet(
 }
 
 // ─── Export Session ────────────────────────────────────────────────────────
+
+/** [T-android-session-multi-export] Hand a finished export to the share sheet. */
+private fun shareSessionExport(context: Context, result: com.openminis.app.share.SessionExporter.Result) {
+    val mime = when {
+        result.fileName.endsWith(".zip") -> "application/zip"
+        result.format == com.openminis.app.share.SessionExporter.Format.JSON -> "application/json"
+        else -> "text/plain"
+    }
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = mime
+        putExtra(Intent.EXTRA_SUBJECT, result.fileName.substringBeforeLast('.'))
+        putExtra(Intent.EXTRA_STREAM, result.uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(
+        Intent.createChooser(intent, context.getString(R.string.sessionlist_export))
+            .apply { addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) },
+    )
+}
+
+/**
+ * [T-android-session-multi-export] What a multi-session export contains, before
+ * it is shared — iOS shows the same summary (format, sessions, messages, time
+ * range, attachments, size) for an export of several sessions.
+ */
+@Composable
+private fun SessionExportSummaryDialog(
+    result: com.openminis.app.share.SessionExporter.Result,
+    onShare: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val s = result.summary
+    val dateFmt = remember { java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT) }
+    val rows = buildList {
+        add(
+            stringResource(R.string.export_summary_format) to stringResource(
+                if (result.format == com.openminis.app.share.SessionExporter.Format.JSON) R.string.export_summary_format_value_json
+                else R.string.export_summary_format_value_txt,
+            ),
+        )
+        add(stringResource(R.string.export_summary_sessions) to result.sessionCount.toString())
+        add(stringResource(R.string.export_summary_messages) to stringResource(R.string.export_summary_messages_value, s.totalMessages))
+        if (s.earliest != null && s.latest != null) {
+            add(
+                stringResource(R.string.export_summary_timerange) to stringResource(
+                    R.string.export_summary_timerange_value,
+                    dateFmt.format(java.util.Date(s.earliest)),
+                    dateFmt.format(java.util.Date(s.latest)),
+                ),
+            )
+        }
+        if (s.attachmentCount > 0) {
+            add(stringResource(R.string.export_summary_attachments) to stringResource(R.string.export_summary_attachments_value, s.images, s.videos))
+        }
+        add(
+            stringResource(R.string.export_summary_size) to stringResource(
+                R.string.export_summary_size_value,
+                android.text.format.Formatter.formatShortFileSize(context, result.fileSizeBytes),
+            ),
+        )
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.export_progress_done)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                for ((label, value) in rows) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+                        Spacer(Modifier.width(12.dp))
+                        Text(value, fontSize = 14.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onShare) { Text(stringResource(R.string.common_share)) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
+    )
+}
 
 /**
  * Long-chat export (T-export-optimize b443b54d, iOS sister c9d1087d).

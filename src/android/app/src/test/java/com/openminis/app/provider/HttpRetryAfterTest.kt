@@ -114,9 +114,25 @@ class HttpRetryAfterTest {
         assertTrue(LLMError.InvalidApiKey().isFallbackable)
         assertTrue(LLMError.ProviderError("[429] 无可用渠道").isFallbackable)
         assertTrue(LLMError.ProviderError("[503] no_available_providers").isFallbackable)
-        assertFalse(LLMError.ProviderError("The model does not exist").isFallbackable)
-        assertFalse(LLMError.ProviderError("context window 512 tokens").isFallbackable)
-        assertFalse(LLMError.TransientError("connection dropped").isFallbackable)
+        // [T-android-503-fallback-union] Corrected while resolving the 1.14
+        // merge. These two used to assert `false`, which was the MERGE's
+        // narrowed classifier and contradicted both sides it was merging:
+        // upstream 1.14 and this port before the merge
+        // (4ef29002) both define `isFallbackable` as
+        // `RateLimited || InvalidApiKey || ProviderError`. The narrowing cost
+        // real behaviour — a mid-stream 4xx that names no [code] never moved the
+        // turn to the next group member (upstream's T-android-fallback-providererror
+        // rationale: every candidate is a DIFFERENT ProviderInstance with its own
+        // credential) — and also broke this port's own expectation that
+        // `ProviderError("insufficient balance")` switches models
+        // (CompactFallbackDecisionTest). A status-less ProviderError is still not
+        // *retryable* on the same provider, which is the part that must not
+        // change: see the TransientError case below.
+        assertTrue(LLMError.ProviderError("The model does not exist").isFallbackable)
+        assertTrue(LLMError.ProviderError("context window 512 tokens").isFallbackable)
+        assertFalse("no status, no 5xx/429 marker: NOT the same provider's retry budget", LLMError.TransientError("connection dropped").isFallbackable)
+        assertFalse(LLMError.ProviderError("The model does not exist").isRetryable)
+        assertFalse(LLMError.ProviderError("context window 512 tokens").isRetryable)
     }
 
     @Test

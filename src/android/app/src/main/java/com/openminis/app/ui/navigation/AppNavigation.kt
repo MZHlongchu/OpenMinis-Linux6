@@ -115,6 +115,14 @@ object Routes {
     const val ADD_CUSTOM_MODEL = "add_custom_model/{instanceId}"
     const val STORAGE = "storage"
     const val BACKUP = "backup"
+    /**
+     * [T-onboarding-restore-link] One-shot key the caller sets on its own
+     * savedStateHandle before navigating to [BACKUP] to open on a given tab.
+     * A handle value rather than a route argument: the BACKUP route string is
+     * matched verbatim by getBackStackEntry / pop-to-BACKUP in the restore
+     * browse flow, and an optional argument would change its pattern.
+     */
+    const val BACKUP_INITIAL_TAB_KEY = "backup_initial_tab"
     const val BACKUP_DESTINATIONS = "backup_destinations"
     const val BACKUP_HISTORY_DETAIL = "backup_history_detail"
     const val BACKUP_DESTINATION_BROWSE = "backup_destination_browse"
@@ -163,12 +171,30 @@ object Routes {
         return if (params.isEmpty()) "terminal" else "terminal?${params.joinToString("&")}"
     }
     /** Chat-files browser: opens FileBrowser rooted at /var/minis for the session. */
-    const val CHAT_FILES = "chat_files/{sessionId}"
-    fun chatFiles(sessionId: String) = "chat_files/$sessionId"
+    // [merge-note:routes-1.14] Both sides added routes here and both are kept:
+    // upstream's optional `path` argument on Chat Files (a tapped minis://
+    // folder link — ChatSplitScaffold already navigates with it) plus the
+    // agent-transcript page, and our git panel. The `chat_files` destination
+    // declares `path` as a nullable argument with a null default, so the
+    // one-argument form below still matches the pattern.
+    const val CHAT_FILES = "chat_files/{sessionId}?path={path}"
+    /** [path]: optional Linux folder to open at (a tapped minis:// folder link). */
+    fun chatFiles(sessionId: String, path: String? = null) =
+        if (path == null) "chat_files/$sessionId" else "chat_files/$sessionId?path=${android.net.Uri.encode(path)}"
     /** [P2-git-panel] Git panel over the session workspace (status / commit / history / diff). */
     const val GIT_PANEL = "git_panel/{sessionId}"
     fun gitPanel(sessionId: String) = "git_panel/${android.net.Uri.encode(sessionId)}"
+    /** [T-agent-transcript-page] Full-screen read-only agent (child) transcript. */
+    const val AGENT_TRANSCRIPT = "agent_transcript/{sessionId}"
+    fun agentTranscript(sessionId: String) = "agent_transcript/$sessionId"
     const val MEMORY = "memory"
+    /** [T-p2-agent-settings] Settings › Agents. */
+    const val AGENTS = "agents"
+    // [T-sub-agents-v1] The roster the main model delegates to by name.
+    const val SUB_AGENTS = "sub_agents"
+    const val SUB_AGENT_DETAIL = "sub_agent/{agentId}"
+    /** [T-tools-granular-switches] Settings > Agent Runtime > Tools. */
+    const val AGENT_TOOLS = "agent_tools"
     /** [T-mcp-integration-android] MCP Integrations management screen. */
     const val MCP = "mcp"
     const val MCP_TOOLS = "mcp_tools/{serverId}"
@@ -373,7 +399,6 @@ fun AppNavigation(
         // [T-android-first-launch-lands-home] Read once, before the mode
         // branches: "is this device set up at all?" is the question that
         // outranks the launch preference.
-        //
         // [T-android-startup-splash-hang] `hasAnySession` was
         // `listSessions().isNotEmpty()` — a full hydration of the widest table
         // in the schema, including every session's `last_message` preview, to
@@ -381,6 +406,12 @@ fun AppNavigation(
         // three times per cold start (emptiness, then `firstOrNull()` for the
         // target session), all on the main-dispatcher LaunchedEffect.
         val hasAnySession = chatRepository.dao.hasAnySession()
+        // [T-android-hang-false-positive] (upstream) Wait for the provider config
+        // to load by SUSPENDING, bounded, instead of blocking the main thread:
+        // the getter used to take configLock and waited up to 21 s behind a
+        // saveConfig. If the load never completes (unreadable store), fall
+        // through after the bound and read what is published, as before.
+        kotlinx.coroutines.withTimeoutOrNull(2_000) { providerRepository.awaitConfigLoaded() }
         val hasAnyProvider = providerRepository.instances.isNotEmpty()
         // [XSessionDiag] Hypothesis 1 context: which launch mode actually applied.
         // rawMode is the user's preference (0 = auto, the default); mode is what
@@ -407,7 +438,17 @@ fun AppNavigation(
             // steps that explain why. Once the user has either a session or a
             // provider, their preference is honoured again.
             !hasAnySession && !hasAnyProvider -> null
-            mode == 1 -> chatRepository.dao.newestSession()?.let { Routes.chat(it.id) }
+            // [T-child-session-leak] (upstream) "Resume what I was doing" must
+            // never land in a hidden agent child session. [T-android-startup-splash-hang]
+            // (ours) forbids hydrating the whole sessions table to answer it, and
+            // `newestSession()` alone cannot filter children — so use the one
+            // bounded, SQL-side child-filtered query: at most one row, children
+            // excluded before the LIMIT. (`excludeId` is meaningful only to the
+            // Move-to picker this method was written for; no session has an empty
+            // id.)
+            mode == 1 -> chatRepository.dao
+                .listRecentMovableSessions(excludeId = "", limit = 1)
+                .firstOrNull()?.let { Routes.chat(it.id) }
             mode == 2 -> Routes.chat("__new__${java.util.UUID.randomUUID()}")
             mode == 3 -> null
             else -> {
@@ -417,7 +458,12 @@ fun AppNavigation(
                 // sessions yet opened straight into an empty composer instead
                 // of the list. "Resume what I was doing" has nothing to resume
                 // when nothing was ever done.
-                val latest = chatRepository.dao.newestSession()
+                // [T-child-session-leak] Same rule as `mode == 1` above: never
+                // resume into a hidden agent child, without pulling the whole
+                // table through the cursor at cold start.
+                val latest = chatRepository.dao
+                    .listRecentMovableSessions(excludeId = "", limit = 1)
+                    .firstOrNull()
                     ?: return@LaunchedEffect
                 val fresh = System.currentTimeMillis() - latest.updatedAt < autoThresholdMs
                 // [XSessionDiag] Hypothesis 1: auto mode silently RESUMES the most
@@ -628,6 +674,8 @@ fun AppNavigation(
                 onMultiAgentClick = { navController.safeNavigate(Routes.MULTI_AGENT) },
                 onTerminalClick = { navController.safeNavigate(Routes.terminal()) },
                 onMemoryClick = { navController.safeNavigate(Routes.MEMORY) },
+                onAgentsClick = { navController.safeNavigate(Routes.AGENTS) },
+                onAgentToolsClick = { navController.safeNavigate(Routes.AGENT_TOOLS) },
                 onMcpClick = { navController.safeNavigate(Routes.MCP) },
                 onPluginMarketClick = { navController.safeNavigate(Routes.PLUGIN_MARKET) },
                 onSoulClick = { navController.safeNavigate(Routes.SOUL) },
@@ -649,8 +697,15 @@ fun AppNavigation(
             )
         }
 
-        composable(Routes.BACKUP) {
+        composable(Routes.BACKUP) { entry ->
+            // Read once per entry and consumed, so a later visit from Settings
+            // opens on Backup again.
+            val initialTab = remember(entry) {
+                navController.previousBackStackEntry?.savedStateHandle
+                    ?.remove<Int>(Routes.BACKUP_INITIAL_TAB_KEY) ?: 0
+            }
             com.openminis.app.ui.settings.backup.BackupAndRestoreScreen(
+                initialTab = initialTab,
                 onBack = { navController.safePopBackStack() },
                 onManageDestinations = { navController.safeNavigate(Routes.BACKUP_DESTINATIONS) },
                 onChooseRestoreServer = { navController.safeNavigate(Routes.RESTORE_SERVERS) },
@@ -691,10 +746,16 @@ fun AppNavigation(
                         history.remove(id)
                         navController.safePopBackStack()
                     },
-                    onRemoveWithFiles = {
-                        vm.removeHistoryRecordWithFiles(id)
-                        navController.safePopBackStack()
-                    },
+                    // [T-android-backup-delete-files-feedback] Await the
+                    // delete and hand the screen its outcome. This used to pop
+                    // on the same frame it called the ViewModel — and since the
+                    // ViewModel is scoped to THIS nav entry, popping cleared it
+                    // and cancelled `viewModelScope` before the IO block ran.
+                    // Nothing was deleted and nothing was said, which is the
+                    // "button does nothing" the user reported. The screen now
+                    // pops itself via onRemoved, once the record is really gone.
+                    onRemoveWithFiles = { vm.removeHistoryRecordWithFiles(id) },
+                    onRemoved = { navController.safePopBackStack() },
                     onOpenDestination = { name ->
                         navController.safeNavigate(
                             "${Routes.BACKUP_DESTINATION_BROWSE}/" +
@@ -1048,8 +1109,16 @@ fun AppNavigation(
         }
 
         composable(Routes.STORAGE) {
+            // [T-android-storage-usage-cache] Scoped to this entry: it survives a
+            // trip to a session's detail page and back (no re-measure), and is
+            // dropped when the user leaves Storage.
+            val storageContext = androidx.compose.ui.platform.LocalContext.current
+            val storageVm: com.openminis.app.ui.settings.StorageUsageViewModel =
+                androidx.lifecycle.viewmodel.compose.viewModel(
+                    factory = com.openminis.app.ui.settings.StorageUsageViewModel.factory(storageContext, chatRepository),
+                )
             StorageManagementScreen(
-                chatDao = chatRepository.dao,
+                vm = storageVm,
                 onBack = { navController.safePopBackStack() },
                 onRootfsClick = { navController.safeNavigate(Routes.ROOTFS_MANAGEMENT) },
                 onSessionClick = { sessionId ->
@@ -1064,6 +1133,20 @@ fun AppNavigation(
         ) { backStackEntry ->
             val sessionId = backStackEntry.arguments?.getString("sessionId") ?: return@composable
             val context = androidx.compose.ui.platform.LocalContext.current
+            // [T-android-storage-usage-cache] (upstream) The list's ViewModel, when
+            // Storage is below us on the stack: the measurements this page makes
+            // update its row, so a clear or a browser delete is reflected there
+            // without a second scan.
+            val storageVm = remember(backStackEntry) {
+                runCatching { navController.getBackStackEntry(Routes.STORAGE) }.getOrNull()
+            }?.let { parent ->
+                androidx.lifecycle.viewmodel.compose.viewModel<com.openminis.app.ui.settings.StorageUsageViewModel>(
+                    viewModelStoreOwner = parent,
+                    factory = com.openminis.app.ui.settings.StorageUsageViewModel.factory(
+                        context, chatRepository,
+                    ),
+                )
+            }
             SessionStorageDetailScreen(
                 sessionId = sessionId,
                 chatDao = chatRepository.dao,
@@ -1071,10 +1154,16 @@ fun AppNavigation(
                 // [T-bodies-gc] 清存储时顺便回收 files/bodies/ 里已无人引用的正文
                 // （删会话/重新生成留下的死正文此前永久留在盘上并被备份打包）。
                 onReclaimOrphanBodies = { chatRepository.collectOrphanBodies() },
+                // [T-android-storage-usage-cache] (upstream) Hand every measurement
+                // back so the Storage list's row stays current.
+                onMeasured = { id, minis, media -> storageVm?.onSessionMeasured(id, minis, media) },
                 onBrowseFiles = { _ ->
                     // Same resolver as Chat Files. A filed session's workspace
                     // lives in minis-workspaces/<folder>, not the private tree
-                    // this screen used to open directly.
+                    // this screen used to open directly. (Upstream's variant here
+                    // roots the browser at the per-session host dir plus a
+                    // displayLinuxPrefix; with this port's PRoot layout the
+                    // rootfs-rooted listing below is the correct one.)
                     val rootfs = RootfsManager.getInstance(context.applicationContext)
                     val varMinis = java.io.File(rootfs.rootfsDir, "var/minis")
                     FilePreviewHolder.fileBrowserViewModel = FileBrowserViewModel(
@@ -1148,16 +1237,30 @@ fun AppNavigation(
         // so the user can navigate up out of /var/minis into the broader rootfs.
         composable(
             route = Routes.CHAT_FILES,
-            arguments = listOf(navArgument("sessionId") { type = NavType.StringType }),
+            arguments = listOf(
+                navArgument("sessionId") { type = NavType.StringType },
+                navArgument("path") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
         ) { backStackEntry ->
             val context = androidx.compose.ui.platform.LocalContext.current
             val rootfs = RootfsManager.getInstance(context.applicationContext)
             val varMinis = java.io.File(rootfs.rootfsDir, "var/minis")
             val sessionId = backStackEntry.arguments?.getString("sessionId") ?: return@composable
-            val vm = remember(rootfs.rootfsDir.absolutePath, varMinis.absolutePath, sessionId) {
+            // [T-minis-folder-link] A tapped folder link opens at that folder.
+            // The browser is rooted at the rootfs and lists through the PRoot
+            // resolver, so the Linux path maps onto the rootfs layout directly;
+            // the folder need not exist inside the rootfs tarball itself.
+            val folderPath = backStackEntry.arguments?.getString("path")
+                ?.trim('/')?.takeIf { it.isNotEmpty() }
+            val vm = remember(rootfs.rootfsDir.absolutePath, varMinis.absolutePath, sessionId, folderPath) {
                 FileBrowserViewModel(
                     rootPath = rootfs.rootfsDir,
-                    initialPath = varMinis.takeIf { it.exists() },
+                    initialPath = folderPath?.let { java.io.File(rootfs.rootfsDir, it) }
+                        ?: varMinis.takeIf { it.exists() },
                     rootLabel = "/",
                     // T121: route directory listings through PRootKernel bind
                     // mounts so /var/minis/{skills,memory,shared} resolve to
@@ -1488,6 +1591,58 @@ fun AppNavigation(
             )
         }
 
+        // [T-android-subagent-page-parity] AGENTS resolves to the roster page
+        // itself, not to a wrapper around it.
+        //
+        // The old AgentSettingsScreen held a link to this page plus a READ-ONLY
+        // mirror of the sub-model group — a setting iOS configures under
+        // Providers > Model Groups, not here. Once the switch moved onto the
+        // roster page (e905140cb), the wrapper carried nothing of its own and
+        // was purely an extra tap between the user and the thing they picked.
+        //
+        // Kept as a route rather than deleted: `minis://settings/agents` is a
+        // published deep link, so it must keep resolving.
+        composable(Routes.AGENTS) {
+            com.openminis.app.ui.settings.SubAgentsScreen(
+                onBack = { navController.safePopBackStack() },
+                onOpen = { id -> navController.navigate("sub_agent/$id") },
+            )
+        }
+
+        composable(Routes.SUB_AGENTS) {
+            com.openminis.app.ui.settings.SubAgentsScreen(
+                onBack = { navController.safePopBackStack() },
+                onOpen = { id -> navController.navigate("sub_agent/$id") },
+            )
+        }
+
+        composable(
+            Routes.SUB_AGENT_DETAIL,
+            arguments = listOf(navArgument("agentId") { type = NavType.StringType }),
+        ) { entry ->
+            com.openminis.app.ui.settings.SubAgentDetailScreen(
+                agentId = entry.arguments?.getString("agentId").orEmpty(),
+                onBack = { navController.safePopBackStack() },
+            )
+        }
+
+        composable(Routes.AGENT_TOOLS) {
+            com.openminis.app.ui.settings.AgentToolsSettingsScreen(
+                onBack = { navController.safePopBackStack() },
+            )
+        }
+
+        composable(
+            route = Routes.AGENT_TRANSCRIPT,
+            arguments = listOf(navArgument("sessionId") { type = NavType.StringType }),
+        ) { backStackEntry ->
+            val sessionId = backStackEntry.arguments?.getString("sessionId") ?: return@composable
+            com.openminis.app.ui.chat.AgentTranscriptScreen(
+                sessionId = sessionId,
+                onBack = { navController.safePopBackStack() },
+            )
+        }
+
         composable(Routes.CHARACTER_EXTRAS) {
             com.openminis.app.ui.settings.CharacterExtrasScreen(
                 onBack = { navController.safePopBackStack() },
@@ -1547,6 +1702,9 @@ fun AppNavigation(
             OnboardingModelSelectionScreen(
                 providerRepository = providerRepository,
                 onBack = { navController.safePopBackStack() },
+                onAddCustomModel = { instanceId ->
+                    navController.safeNavigate(Routes.addCustomModel(instanceId))
+                },
             )
         }
 

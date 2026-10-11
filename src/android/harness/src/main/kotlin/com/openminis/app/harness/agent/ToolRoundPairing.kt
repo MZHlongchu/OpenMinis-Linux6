@@ -23,11 +23,23 @@ object ToolRoundPairing {
      * @param history 待修复的历史
      * @param stubNotes id → 占位文案（宿主策略源）
      * @param log 诊断日志回调（宿主接 AppLogger）
+     * @param keyOf id → 配对身份。默认恒等（老行为），宿主必须传
+     *   [com.openminis.app.provider.ToolPairing.key]。
+     *
+     *   [T-android-responses-tool-id-normalize] Responses 路径把 call id 与
+     *   function-call id 合成 `"<call_id>|<fc_id>"` 存进历史，wire 上按 `|` 前的
+     *   那一半配对；同一轮既有合成 id 又有裸 call id（换模型、回退到 Chat
+     *   Completions、从库里重载历史、中转改写 id）时，**按原始字符串比较会把一次
+     *   配对成功的调用判成孤儿**：真 result 被删、再补一条"interrupted"占位。
+     *   因此身份必须走宿主那一份共享实现，而不是在这里再写一遍 `|` 切分 ——
+     *   harness 模块依赖不到 app 模块的 `provider.ToolPairing`，所以按已在此处
+     *   注入 `stubNotes` / `log` 的同款方式把它做成参数。
      */
     fun dropOrphanedToolParts(
         history: List<LLMMessage>,
         stubNotes: (toolCallId: String) -> String? = { null },
         log: (String) -> Unit = {},
+        keyOf: (toolCallId: String) -> String = { it },
     ): List<LLMMessage> {
         data class Use(
             val id: String,
@@ -48,7 +60,10 @@ object ToolRoundPairing {
                         unmatchedUses += use
                     }
                     is AgentContentPart.ToolResult -> {
-                        val matchIndex = pending.indexOfFirst { it.id == part.id && it.name == part.name }
+                        // [T-android-responses-tool-id-normalize] 按共享身份配对，
+                        // 不按原始字符串 —— 合成 id（`call_a|fc_a`）与裸 call id
+                        // （`call_a`）是同一次调用的两种写法。
+                        val matchIndex = pending.indexOfFirst { keyOf(it.id) == keyOf(part.id) && it.name == part.name }
                         if (matchIndex >= 0) {
                             val use = pending.removeAt(matchIndex)
                             unmatchedUses.remove(use)
@@ -63,14 +78,16 @@ object ToolRoundPairing {
 
         // 尾部 assistant 可能正在等执行——只有**恰好是最后一条消息**上的
         // use 豁免；更早的未应答 use 补错误 result。
+        // [T-android-responses-tool-id-normalize] 豁免集同样按共享身份建键，
+        // 否则尾部那次调用会因为 id 拼写不同（合成 vs 裸）被当成未应答。
         val tailUses = if (history.lastOrNull()?.role == LLMMessage.Role.ASSISTANT) {
             history.last().contentParts.mapIndexedNotNull { partIndex, part ->
-                (part as? AgentContentPart.ToolUse)?.let { it.id to it.name to partIndex }
+                (part as? AgentContentPart.ToolUse)?.let { keyOf(it.id) to it.name to partIndex }
             }.toSet()
         } else emptySet()
         val repairUses = unmatchedUses.filterNot { use ->
             use.messageIndex == history.lastIndex &&
-                (use.id to use.name to use.partIndex) in tailUses
+                (keyOf(use.id) to use.name to use.partIndex) in tailUses
         }
         if (droppedResults.isEmpty() && repairUses.isEmpty()) return history
 

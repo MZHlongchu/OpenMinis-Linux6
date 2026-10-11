@@ -53,6 +53,20 @@ class ChatFlatItemsToolOnlyFoldTest {
             is FlatChatItem.AssistantTyping -> "typing"
             is FlatChatItem.AssistantError -> "error"
             is FlatChatItem.AssistantLegacyContent -> "legacy"
+            // [T-android-upstream-114-flat-item-variants] 上游 1.14 给密封类
+            // FlatChatItem 补了三种卡片：排程卡 / 子代理回调卡 / 用量胶囊。
+            // 本 when 是**表达式**（map 的返回类型是 List<String>），而密封类的
+            // 子类是在别处（ChatFlatItems.kt）新增的——合并上游后这里就不再穷尽：
+            // 缺失分支被推断成 Unit，于是同一条 when 先报 “must be exhaustive.
+            // Add the 'is AgentCallbackCard', 'is AssistantUsage', 'is
+            // ScheduledTaskCardItem' branches…”，紧接着报 “actual type is
+            // kotlin.Unit, but kotlin.String was expected”。逐个子类显式列全，
+            // 并各自用真实字段拼描述串（marker.taskId / callback.kind+jobId /
+            // usage 计数）；刻意不用 else 兜底——将来再加子类仍会在编译期暴露，
+            // 而不是被静默映射成一个永远匹配不上的占位串。
+            is FlatChatItem.ScheduledTaskCardItem -> "scheduled:${item.marker.taskId}"
+            is FlatChatItem.AgentCallbackCard -> "callback:${item.callback.kind.wire}:${item.callback.jobId}"
+            is FlatChatItem.AssistantUsage -> "usage:${item.usage.inputTokens}/${item.usage.outputTokens}"
         }
     }
 

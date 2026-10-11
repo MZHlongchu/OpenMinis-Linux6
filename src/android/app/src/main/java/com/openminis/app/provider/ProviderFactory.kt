@@ -24,6 +24,14 @@ object ProviderFactory {
      * resolved model state, and a fingerprint of the credential so a rotated
      * OAuth token yields a fresh provider. Config writes call [invalidateAll]
      * via ProviderRepository.
+     *
+     * [T-merge-1.14] The key also carries the two per-conversation knobs
+     * upstream 1.14 introduced: the persisted `sessionId` (OpenCode Go's
+     * `x-opencode-session`) and the per-model `ModelOverrides`. Both are read
+     * back off the provider when a request is built, so keying on them is what
+     * keeps the memo from handing conversation A the object wired for
+     * conversation B — the same sharing hazard [createEphemeral] removes for
+     * mutating callers — at the cost of one provider per (session, overrides).
      */
     private val cache = java.util.concurrent.ConcurrentHashMap<String, LLMProvider>()
 
@@ -37,12 +45,49 @@ object ProviderFactory {
 
     private const val CACHE_CAP = 64
 
-    fun create(instance: ProviderInstance, apiKey: String, model: LLMModel, context: Context? = null): LLMProvider {
+    /**
+     * Create a provider, optionally with OAuth support, memoized per
+     * (instance, model, credential, session, overrides).
+     *
+     * [context] is needed for OpenAI OAuth to access encrypted storage for
+     * token refresh.
+     *
+     * [sessionId] (upstream 1.14) is the PERSISTED id of the conversation this
+     * provider will serve, and exists only for the OpenCode Go
+     * `x-opencode-session` header — see the emitter for why a draft
+     * placeholder must never be passed. Null (the default) is correct for
+     * every caller with no single conversation behind it: quick tests, vision
+     * sub-model calls, model-use offload, voice correction.
+     *
+     * Providers are cached and reused across turns, so the id is stored on the
+     * provider here and re-read when each request is built — not baked into a
+     * header at construction. That is what lets a draft chat, whose real id
+     * does not exist yet, start sending the header as soon as
+     * `ensureSession()` mints one.
+     *
+     * [overrides] (upstream 1.14) is the user's per-model request tuning
+     * (temperature / top_p / custom headers / extra body params) for the entry
+     * being served. Optional and defaulted so every existing caller compiles
+     * unchanged; callers that have a ModelEntry in hand should pass
+     * `entry.overrides` so the settings actually reach the wire.
+     */
+    fun create(
+        instance: ProviderInstance,
+        apiKey: String,
+        model: LLMModel,
+        context: Context? = null,
+        sessionId: String? = null,
+        overrides: com.openminis.app.data.model.ModelOverrides? = null,
+    ): LLMProvider {
+        // Normalized once: an empty override set means "no overrides" for both
+        // the key and the wiring, so null and empty share a single memo entry.
+        val effectiveOverrides = overrides?.takeIf { !it.isEmpty }
         val key = instance.id + "|" + model.hashCode() + "|" +
-            ProviderKeyGate.fingerprint(apiKey) + "|" + instance.hashCode()
+            ProviderKeyGate.fingerprint(apiKey) + "|" + instance.hashCode() + "|" +
+            (sessionId ?: "") + "|" + (effectiveOverrides?.hashCode() ?: 0)
         cache[key]?.let { return it }
         val genAtEntry = generation.get()
-        val built = createUncached(instance, apiKey, model, context)
+        val built = createUncached(instance, apiKey, model, context, sessionId, effectiveOverrides)
         // Build runs OUTSIDE the lock (OkHttpClient construction is slow); the
         // generation re-check + cap + put run INSIDE it, and every invalidator
         // bumps the generation under the same lock. Without that, a check-then-put
@@ -122,10 +167,23 @@ object ProviderFactory {
     }
 
     /**
-     * Create a provider, optionally with OAuth support.
-     * [context] is needed for OpenAI OAuth to access encrypted storage for token refresh.
+     * The uncached builder behind [create] and [createEphemeral]: resolve the
+     * provider type, build the client, and wire the per-instance state the
+     * request builders read back ([thinkingRuleInstanceId], [SamplingIdentity],
+     * OpenCode's session id, per-model overrides).
+     *
+     * It performs no memoization of its own — that decision belongs to the
+     * caller, which is also what lets [createEphemeral] hand a mutating caller
+     * a private instance.
      */
-    private fun createUncached(instance: ProviderInstance, apiKey: String, model: LLMModel, context: Context? = null): LLMProvider {
+    private fun createUncached(
+        instance: ProviderInstance,
+        apiKey: String,
+        model: LLMModel,
+        context: Context? = null,
+        sessionId: String? = null,
+        overrides: com.openminis.app.data.model.ModelOverrides? = null,
+    ): LLMProvider {
         // T174: route through ProviderInstance.effectiveBaseURL instead of
         // re-implementing the trim-+-endsWith dance inline. The previous
         // version did `url.endsWith("/v1")` on the raw, untrimmed string,
@@ -298,6 +356,43 @@ object ProviderFactory {
                     )
                 }
             }
+            ProviderType.githubCopilot -> {
+                // [T-copilot-provider] Chat is plain OpenAI Chat Completions at
+                // api.githubcopilot.com, so the existing provider carries it —
+                // what Copilot adds is auth and headers.
+                //
+                // The token provider hands back the SHORT-LIVED session token
+                // (CopilotOAuthManager refreshes it lazily); the long-lived
+                // GitHub account token never reaches the request layer.
+                //
+                // [T-android-copilot-per-request-headers] The static editor
+                // identity goes on extraHeaders; X-Initiator, X-Request-Id and
+                // the vision flag are derived per request instead.
+                //
+                // They used to be pinned HERE, at construction, to
+                // `isAgentInitiated=false, hasImages=false` and one UUID — so
+                // every agent turn went out labelled as human traffic (the
+                // specific thing GitHub acts on), no request ever carried the
+                // vision flag, and one request id stood for the whole life of
+                // the instance. The factory genuinely cannot see the message
+                // list, which is why the derivation belongs at the request
+                // site; `perRequestHeaders` is that seam.
+                if (context == null) throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+                val oauthManager = com.openminis.app.auth.CopilotOAuthManager(context, instance.id)
+                OpenAIProvider.oauthOpenAICompat(
+                    oauthTokenProvider = {
+                        oauthManager.validAccessToken()
+                            ?: throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+                    },
+                    model = model,
+                    basePath = basePath ?: com.openminis.app.auth.CopilotDeviceFlow.API_BASE,
+                    extraHeaders = com.openminis.app.auth.CopilotDeviceFlow.staticChatHeaders(),
+                ).also { p ->
+                    p.perRequestHeaders = { body ->
+                        com.openminis.app.auth.CopilotDeviceFlow.perRequestHeaders(body)
+                    }
+                }
+            }
             // [T-android-provider-type-parity] Types this build can decode and
             // display but not drive. Reaching here means the user selected a
             // model on an instance restored from another platform (or a newer
@@ -315,6 +410,22 @@ object ProviderFactory {
         // only type that needs it.
         (provider as? OpenAIProvider)?.thinkingRuleInstanceId = instance.id
         SamplingIdentity.bind(provider, instance.id)
+        // [T-android-opencode-session-header] (上游 1.14) Hand the conversation id
+        // to the provider; it derives OpenCode Go's `x-opencode-session` per
+        // request (gated on host + on the id being persisted, so nothing else
+        // sees it). Set here rather than per-branch so every OpenAI-compatible
+        // path is covered by one line, and left null for callers that serve no
+        // single conversation (quick test, vision, model-use offload, voice).
+        (provider as? OpenAIProvider)?.sessionId = sessionId
+        // [T-android-model-custom-params] (上游 1.14) Per-model request tuning, set
+        // beside the other post-construction wiring so every OpenAI-compatible
+        // branch is covered by one line. `takeIf { !it.isEmpty }` keeps the
+        // field null in the overwhelmingly common no-override case, so the
+        // merge helpers early-return and the built body stays byte-identical to
+        // before this change. [create] already folds the same normalized value
+        // into its memo key, so a shared provider can never carry one model's
+        // tuning into another model's request.
+        (provider as? OpenAIProvider)?.modelOverrides = overrides?.takeIf { !it.isEmpty }
         return provider
     }
 }

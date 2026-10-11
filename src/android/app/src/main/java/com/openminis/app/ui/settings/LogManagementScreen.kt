@@ -90,6 +90,7 @@ fun LogManagementScreen(
     var loading by remember { mutableStateOf(true) }
     var showDeleteAllConfirm by remember { mutableStateOf(false) }
     var loggingEnabled by remember { mutableStateOf(AppLogger.isEnabled(context)) }
+    var loggingVerbose by remember { mutableStateOf(AppLogger.isVerbose(context)) }
 
     // T-config: Logs / Config Changes segmented control. Default to
     // "logs"; a `?tab=config-audit` deep-link query lands users straight
@@ -168,6 +169,11 @@ fun LogManagementScreen(
                     loggingEnabled = it
                     AppLogger.setEnabled(context, it)
                 },
+                loggingVerbose = loggingVerbose,
+                onSetVerbose = {
+                    loggingVerbose = it
+                    AppLogger.setVerbose(context, it)
+                },
                 onLogFileClick = onLogFileClick,
                 onDeleteAll = { showDeleteAllConfirm = true },
             )
@@ -209,6 +215,8 @@ private fun LogsBody(
     loading: Boolean,
     loggingEnabled: Boolean,
     onToggleLogging: (Boolean) -> Unit,
+    loggingVerbose: Boolean,
+    onSetVerbose: (Boolean) -> Unit,
     onLogFileClick: (fileName: String) -> Unit,
     onDeleteAll: () -> Unit,
 ) {
@@ -237,6 +245,27 @@ private fun LogsBody(
                 onCheckedChange = onToggleLogging,
                 showDivider = false,
             )
+        }
+
+        // [T-android-log-level] Mirrors iOS's "Detail Level" picker.
+        // (upstream 1.14 — 复用我们已接好的 loggingVerbose / onSetVerbose 通路)
+        if (loggingEnabled) {
+            SettingsSection(
+                header = stringResource(R.string.log_section_detail_level),
+                footer = stringResource(R.string.log_detail_level_footer),
+            ) {
+                SettingsChoiceRow(
+                    title = stringResource(R.string.log_detail_level_info),
+                    selected = !loggingVerbose,
+                    onSelect = { onSetVerbose(false) },
+                )
+                SettingsChoiceRow(
+                    title = stringResource(R.string.log_detail_level_verbose),
+                    selected = loggingVerbose,
+                    onSelect = { onSetVerbose(true) },
+                    showDivider = false,
+                )
+            }
         }
 
         // [T-stream-trace-live] 轨迹录制开关与回放入口。

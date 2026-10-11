@@ -23,6 +23,12 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
 ) {
     // [T-queue-shelved] 搁置态的消息不自动 drain（打断/异常后不自动重发旧消息）。
     while (_promptQueue.value.any { !it.shelved }) {
+        // [T-android-mute-reset-on-drain] 每一批 drain 都是**新的一轮**：上一轮里
+        // "停掉某个子代理"留下的委派静音只属于那一轮。上游 1.14 之前，静音只由公开
+        // 的 sendMessage 解除，于是 Stop 之后排队、轮末被 drain 的提示词整轮都是静音
+        // 的——它启的子代理把结果投给没人。iOS f1f4f23ba 在这里也重置。
+        // 位置对齐上游：取批之前、每轮循环入口。
+        com.openminis.app.agent.jobs.AgentJobRegistry.clearDelegationMute(activeSessionId)
         if (!materializeQueuedPromptsAsUserTurn()) break
 
         try {
@@ -98,9 +104,8 @@ internal suspend fun ChatViewModel.materializeQueuedPromptsAsUserTurn(): Boolean
         }
     }
     prepared.imageParts.forEachIndexed { idx, part ->
-        val path = prepared.imageUploadPaths.getOrNull(idx)
-        if (path != null) combinedParts.add(AgentContentPart.Text("[attached image: $path]"))
-        combinedParts.add(AgentContentPart.ImageData(part.data, part.mimeType, linuxPath = path, noVisionPlaceholder = visionPlaceholderFor(path)))
+        // [T-android-image-downscale-parity] 上游 1.14 ChatViewModel.kt:8762-8764。
+        combinedParts.addModelImage(part, prepared.imageUploadPaths.getOrNull(idx), prepared.imageModelNotes.getOrNull(idx))
     }
     prepared.attachedFilesXml?.let { combinedParts.add(AgentContentPart.Text(it)) }
 
@@ -110,17 +115,17 @@ internal suspend fun ChatViewModel.materializeQueuedPromptsAsUserTurn(): Boolean
     }
 
     // —— 消费确定：清队（按 id 精确移除，不吃并发新入队）+ 气泡翻转 + 落盘 ——
+    //
+    // [T-queue-dequeue-after-persist] 与 injectQueuedPromptsAsNewTurn 同一条纪律：
+    // 提示词离开队列（气泡翻成「已发送」、摘录清空）必须发生在
+    // `chatRepository.appendMessage` **返回之后**，中间不再有挂起点。旧顺序把清队
+    // 放在落库之前，而落库是挂起调用：用户在这个窗口里点 Stop，协程在 appendMessage
+    // 处被取消，队列已经是空的 —— cancelStream 随后查 _promptQueue 找不到东西，
+    // resumeQueueAfterCancel 不会跑，这条消息既没发出去也没落库（它那条虚线「排队」
+    // 气泡要等重进会话才无声消失）。cancelStream 的 T189 契约是「排队消息必须活过
+    // Stop」，这正是它被违反的那条路径。按 id 精确移除（而非清空）保住并发新入队。
+    // （上游 1.14 ChatViewModel.kt:8929-8936 / 8977-8995。）
     val queuedIds = queued.map { it.id }.toSet()
-    _promptQueue.value = _promptQueue.value.filterNot { it.id in queuedIds }
-    // [T-truncation-digest-clear][T-queue-digest-clear-after-consume] 清空点必须在
-    // 「消费确定」之后：空内容早退与 prepare 异常都到不了这里，摘录因此不会在
-    // 「一行都没注入」的尝试里被白抹掉。
-    clearHistoryDigestState()
-    _messages.value = _messages.value.map { m ->
-        if (m.queuedPromptId != null && queuedIds.contains(m.queuedPromptId)) {
-            m.copy(isQueued = false, queuedPromptId = null)
-        } else m
-    }
 
     val userText = combinedText.toString()
     // [T-android-paste-mediaref] Same marker handling as the mid-loop
@@ -138,6 +143,17 @@ internal suspend fun ChatViewModel.materializeQueuedPromptsAsUserTurn(): Boolean
         bodyPartsJson = drainPaste?.partsJson,
     )
     val persistedUser = chatRepository.appendMessage(sid, "user", userPartsJson)
+    // [T-queue-dequeue-after-persist] 落库已返回：现在清队是确定的。
+    _promptQueue.value = _promptQueue.value.filterNot { it.id in queuedIds }
+    // [T-truncation-digest-clear][T-queue-digest-clear-after-consume] 清空点必须在
+    // 「消费确定」之后：空内容早退与 prepare 异常都到不了这里，摘录因此不会在
+    // 「一行都没注入」的尝试里被白抹掉。
+    clearHistoryDigestState()
+    _messages.value = _messages.value.map { m ->
+        if (m.queuedPromptId != null && queuedIds.contains(m.queuedPromptId)) {
+            m.copy(isQueued = false, queuedPromptId = null)
+        } else m
+    }
     // [T-queue-disk-persistence] drained prompts became real DB rows —
     // confirm their disk mirrors consumed (best-effort).
     runCatching {

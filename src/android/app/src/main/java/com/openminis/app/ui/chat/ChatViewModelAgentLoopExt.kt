@@ -252,12 +252,105 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // that emits text across several turns doesn't re-fire it and cut off
     // its own speech mid-sentence.
     var didStopStaleReadAloud = false
+    // [T-subagent-turn-countdown] / [T-agent-wrapup-turn] 上游 1.14
+    // ChatViewModel.kt:10717-10724，合并时丢了：helper（子代理）的回合上限不是
+    // 主会话的 200，而是它自己的 HelperConfig.maxTurns；两个一次性标记分别管
+    // 「工具被收走、只写交付物」的收尾回合，和「还剩几轮，趁工具还能用赶紧落地」的
+    // 预警。
+    //
+    // 与上游的差别只有一处：上游还有一个 helperWrapUpRequested（父级按分钟预算叫停
+    // 时置位）。本移植的 helper 只在 ScheduledAgentRunner 里按轮次跑、父级超时直接
+    // 取消，没有那个生产者，所以收尾条件只剩「最后一轮」。
+    val turnCap = helperConfig?.maxTurns ?: ChatViewModel.MAX_AGENT_TURNS
+    var helperWrapUpInjected = false
+    var helperTurnWarningInjected = false
     beginRunMetrics() // [T-run-metrics-wiring]
-    for (turn in 0 until ChatViewModel.MAX_AGENT_TURNS) {
+    for (turn in 0 until turnCap) {
         noteRunRound() // [T-run-metrics-wiring]
         currentCoroutineContext().ensureActive()
         // Sanitize history before each API call (mirrors iOS pre-API validation)
         sanitizeAgentHistory()
+
+        // [T-agent-wrapup-turn] 上游 1.14 ChatViewModel.kt:10783-10798，合并时丢了：
+        // 走到最后一轮的 helper 不能以一个工具调用收场——父级收到的只有孩子最后的
+        // **文本**。这一轮把工具收走，明确要交付物，就像人说「时间到了」。
+        if (helperConfig != null && !helperWrapUpInjected && turn == turnCap - 1) {
+            helperWrapUpInjected = true
+            val note = com.openminis.app.agent.jobs.HelperRunner.wrapUpPrompt(
+                com.openminis.app.agent.jobs.HelperWrapUpReason.TURNS,
+            )
+            val lastIdx = agentHistory.lastIndex
+            if (lastIdx >= 0 && agentHistory[lastIdx].role == LLMMessage.Role.USER) {
+                val last = agentHistory[lastIdx]
+                agentHistory[lastIdx] = if (last.contentParts.isEmpty()) {
+                    last.copy(content = (last.content + "\n\n" + note).trim())
+                } else {
+                    last.copy(contentParts = last.contentParts + AgentContentPart.Text(note))
+                }
+            } else {
+                appendBoundedHistory(LLMMessage(role = LLMMessage.Role.USER, content = note))
+            }
+            AppLogger.info(ChatViewModel.TAG, "[delegate_task] wrap-up turn injected reason=TURNS turn=${turn + 1}/$turnCap")
+        }
+        // [T-subagent-turn-countdown] 上游 1.14 ChatViewModel.kt:10813-10827：
+        // 在工具被收走之前先预警。
+        //
+        // 上面的收尾块是一道悬崖：它只在最后一轮触发，而那正是工具已经消失的回合，
+        // 于是把预算全花在调研上的孩子，恰恰在自己再也写不出任何东西的那一刻才知道
+        // 轮次用完了——这就是被报上来的失败（「它只能回一条消息，存不了那个文件」）。
+        // 上限本身是有意为之，被它伏击不是。
+        //
+        // 所以给它那个自己算不出来的事实：还剩几轮。这一轮工具仍然可用，预警才因此
+        // 可执行，而不是一句墓志铭。收尾已经注入时跳过——那时剩余轮次是零，而收尾
+        // 的措辞比这里更硬。
+        if (helperConfig != null && !helperWrapUpInjected && !helperTurnWarningInjected) {
+            val remaining = turnCap - 1 - turn
+            if (remaining in 1..com.openminis.app.agent.jobs.HelperRunner.TURN_WARNING_LEAD) {
+                helperTurnWarningInjected = true
+                val note = com.openminis.app.agent.jobs.HelperRunner.turnBudgetWarning(remaining)
+                val lastIdx = agentHistory.lastIndex
+                if (lastIdx >= 0 && agentHistory[lastIdx].role == LLMMessage.Role.USER) {
+                    val last = agentHistory[lastIdx]
+                    agentHistory[lastIdx] = if (last.contentParts.isEmpty()) {
+                        last.copy(content = (last.content + "\n\n" + note).trim())
+                    } else {
+                        last.copy(contentParts = last.contentParts + AgentContentPart.Text(note))
+                    }
+                } else {
+                    appendBoundedHistory(LLMMessage(role = LLMMessage.Role.USER, content = note))
+                }
+                AppLogger.info(ChatViewModel.TAG, "[subagent_task] turn budget warning injected remaining=$remaining turn=${turn + 1}/$turnCap")
+            }
+        }
+        // [T-sub-agents-steer] 递送父级在这个孩子干活期间发来的纠偏。上游 1.14
+        // ChatViewModel.kt:10833-10895，合并时整段丢了：读走队列里的纠偏，作为孩子
+        // 自己转录里的一条真实用户消息落下来，并告诉它这是来自委派方的纠偏，而不是
+        // 用户的新要求。放在收尾/预警块之后是有意的——两者落在同一轮时，「现在就写
+        // 交付物」必须是最后读到的东西。
+        if (helperConfig != null) {
+            val steers = synchronized(pendingSteerMessages) {
+                val out = pendingSteerMessages.toList()
+                pendingSteerMessages.clear()
+                out
+            }
+            if (steers.isNotEmpty()) {
+                val note = steers.joinToString("\n") {
+                    "[Course correction from the delegating agent] $it"
+                }
+                val lastIdx = agentHistory.lastIndex
+                if (lastIdx >= 0 && agentHistory[lastIdx].role == LLMMessage.Role.USER) {
+                    val last = agentHistory[lastIdx]
+                    agentHistory[lastIdx] = if (last.contentParts.isEmpty()) {
+                        last.copy(content = (last.content + "\n\n" + note).trim())
+                    } else {
+                        last.copy(contentParts = last.contentParts + AgentContentPart.Text(note))
+                    }
+                } else {
+                    appendBoundedHistory(LLMMessage(role = LLMMessage.Role.USER, content = note))
+                }
+                AppLogger.info(ChatViewModel.TAG, "[subagent_task] steer delivered count=${steers.size} turn=${turn + 1}/$turnCap")
+            }
+        }
 
         // Context window management: offload large tool outputs in older
         // messages to disk when the policy threshold for this model's
@@ -600,6 +693,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
                         ),
                     )
                 }
+                // [T-ctx-overflow-attribute-dispatch] 记录这次请求要发给谁：真正收到
+                // 它的模型与它的窗口。上游在同一位置调用（ChatViewModel.kt:11292
+                // `recordContextDispatch(outboundHistory, currentProvider.model)`），
+                // 溢出归因读的就是这条记录 —— 少了它，1M 的备用模型一旦接手，
+                // 128K 那次拒绝会被按 1M 的窗口评分，真正溢出的模型永远不被校正。
+                recordOutboundDispatch(requestHistory)
                 // [T-first-event-watchdog] A hung relay below the provider
                 // never throws — the stream below will cancel itself and surface
                 // a TransientError, letting the existing retry chain take over.
@@ -621,21 +720,50 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // first chunk the connect budget is irrelevant and a stall must
                 // keep surfacing at 90s/180s.
                 val streamIdleTimeoutMs = baseFirstEventTimeoutMs * 2
+                // [T-switch-model-retry-counter-reset] 首个 chunk 是「这次请求真的在产出」
+                // 的唯一信号。上游 1.14 ChatViewModel.kt:11227 在本回合内声明它，由下面的
+                // collector 翻转；合并时这个钩子整个丢了。
+                val firstChunkSeen = java.util.concurrent.atomic.AtomicBoolean(false)
                 // [T-android-seam-extraction] 片段三：流入口走接缝一（ProviderStreamClient）
                 // ——循环体自此不直接攥 provider 对象；请求形状搬运即适配。
                 com.openminis.app.provider.LlmProviderStreamClient(currentProvider).streamRound(
                     HarnessRoundRequest(
-                        messages = applyRequestImageBudget(requestHistory),
+                        // [T-android-payload-size-audit] (上游 1.14
+                        // ChatViewModel.kt:11300-11307) 字节侧交叉校验放在**最外层**：
+                        // 它必须看到的正是即将离开设备的那份历史，所以套在图片预算
+                        // 之外（审计 → 预算 → 历史）。纯诊断，见
+                        // ChatViewModelImageBudgetExt.auditOutgoingPayload。
+                        messages = auditOutgoingPayload(applyRequestImageBudget(requestHistory)),
                         systemPrompt = systemPrompt,
                         maxTokens = dynamicMaxTokens(currentProvider, lastContextTokens),
                         temperature = samplingTemperature(_activeEntryId.value),
-                        tools = agentTools,
-                        thinkingLevel = if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF,
+                        // [T-agent-wrapup-turn] 上游 1.14 ChatViewModel.kt:10914：
+                        // 收尾回合把工具表收走——没有工具可调的模型只能给文本，
+                        // 而父级收到的正是这段文本。
+                        tools = if (helperWrapUpInjected) emptyList() else agentTools,
+                        // [T-switch-model-thinking-gate] Gate on the provider that
+                        // serves THIS turn. selectEntry swaps the class-level
+                        // currentModel mid-turn while the turn keeps its local
+                        // provider, so reading the class-level model would send the
+                        // NEW model's reasoning decision to the OLD model.
+                        // （上游 1.14 ChatViewModel.kt:11310-11315；合并时这里退回了
+                        // 读类级 currentModelSupportsReasoning。）
+                        thinkingLevel = if (currentProvider.model.supportsReasoning == true) _thinkingLevel.value else ThinkingLevel.OFF,
                         systemStablePrefixLen = systemPromptStablePrefixLen,
                     ),
                 ).streamStallWatchdog(firstEventTimeoutMs, streamIdleTimeoutMs).collect { chunk ->
             // [T-stream-trace-live] 运行时轨迹录制（日志页开关控制，默认关）。
             com.openminis.app.provider.StreamTraceRecorder.record(chunk)
+            // [T-switch-model-retry-counter-reset] The retried attempt is
+            // producing output, so the ladder is done. isBoundToAbandonedModel()
+            // reads these counters; left set until the stream COMPLETES, a
+            // healthy turn that needed one retry looked like a ghost retry and
+            // a model switch cancelled it. iOS clears them on stream open.
+            // （上游 1.14 ChatViewModel.kt:11318-11334 的同名钩子；合并时丢了。）
+            if (firstChunkSeen.compareAndSet(false, true)) {
+                _autoRetryAttempt.value = 0
+                _autoRetryCountdown.value = 0
+            }
             when (chunk) {
                 is LLMStreamChunk.ThinkingDelta -> {
                     turnThinking.append(chunk.text)
@@ -860,7 +988,13 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     // the block that ToolUseStart created.
                     val toolInputId = toolIdDedupe.inputId(chunk.id)
                     val deltaLen = chunk.accumulated.length
-                    if (com.openminis.app.text.BoundedText.shouldLogLengthStride(deltaLen)) {
+                    // [T-android-log-hotpath] （上游 1.14 移植）逐 chunk 的诊断必须
+                    // 「没人读就一条都不写」：debug 构建或 Verbose 打开才有人看。我们
+                    // 审计侧的步长节流只限制行数，release 默认 Info 级下仍会照写，故
+                    // 两道门都留：traceEnabled 决定要不要写，步长决定写多密。
+                    if (com.openminis.app.logging.AppLogger.traceEnabled &&
+                        com.openminis.app.text.BoundedText.shouldLogLengthStride(deltaLen)
+                    ) {
                         android.util.Log.d("ToolChain[VM]", "[turn=$turn] ToolInputDelta id=$toolInputId len=$deltaLen")
                     }
                     // Maintain a per-tool ring of the most recent `accumulated`
@@ -982,6 +1116,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     }
                     if (lastContextTokens > 0) {
                         _lastTurnContextTokens.value = lastContextTokens
+                        // [T-ctx-overflow-attribute-dispatch] 上游在同一个 usage
+                        // 落点把「本次派发」的那对 (report, estimate) 记账
+                        // （ChatViewModel.kt:11662 `calibrateContextSize(lastContextTokens)`）。
+                        // 与通用 observe 的区别：它只在两者描述**同一个请求**时生效，
+                        // 用的是派发时记录下来的 estimate。
+                        calibrateContextSize(lastContextTokens)
                         // [T-token-usage-calibration] 用真实 usage 校准估算器。
                         val modelKey = currentModel?.id ?: ""
                         if (modelKey.isNotEmpty()) {
@@ -1093,6 +1233,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
             } catch (e: Exception) {
                 if (e is CancellationException && e.cause == null) throw e  // real job cancellation
                 val actual = unwrapFlowException(e)
+                // [T-ctx-overflow-attribute-dispatch] 上游在同一层捕获里记一次
+                // 「provider 说这次请求太长」（ChatViewModel.kt:11948
+                // `noteContextOverflow(overflowErr?.detail ?: "")`）：这是「我们低估了」
+                // 的直接证据，要按**实际收到请求的模型**抬高它的 ratio，下一次就会
+                // 先压缩而不是再被拒一次。
+                noteProviderContextRejection(actual)
                 // [T-loop-retry-cut] 分类与重试/回退判定走 harness 纯策略
                 // （StreamRetryPolicy）——catch 块只留 UI 编排。判定表逐条
                 // 对齐原内联实现：瞬态=Network/Transient/429/5xx/CONNECT 超时
@@ -1680,6 +1826,35 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     withContext(Dispatchers.Main) { setInlineError(hint) }
                 }
             }
+            // [T-subagent-steer-continues-loop] 上游 1.14 ChatViewModel.kt:12394-12421
+            // （iOS 671a12ce2），合并时整段丢了：在这一轮收敛时到达的纠偏，要让循环
+            // 再活一个回合。
+            //
+            // 纠偏是在某一轮的开头读取的，所以只有当另一轮真的发生时它才会被递送。
+            // 正在写最终答案的孩子在流式输出，enqueueSteer 因此不会去戳它，而一个
+            // 没有工具调用的回合就停在这里——纠偏一直排队到 job 收档，
+            // drainMissedSteers 把它报成「没读过」：父级被告知孩子根本没看到，
+            // 而那条指令也确实什么也没做。
+            //
+            // 条件本身在 HelperRunner.shouldContinueForSteer 里（不是最后一轮、
+            // 不是空回合）。
+            if (com.openminis.app.agent.jobs.HelperRunner.shouldContinueForSteer(
+                    isHelper = helperConfig != null,
+                    isEmptyTurn = !hasVisibleContent,
+                    turn = turn,
+                    turnCap = turnCap,
+                    pendingSteers = pendingSteerMessages.size,
+                )
+            ) {
+                AppLogger.info(ChatViewModel.TAG_STREAM, "[subagent_task] steer arrived at loop end — continuing for another turn (turn=${turn + 1}/$turnCap)")
+                // 上面那条无工具调用的路径已经把这个气泡标成结束了；下一轮会接着往
+                // 同一个气泡里流。
+                withContext(Dispatchers.Main) {
+                    updateAssistantMessage(assistantId, accumulatedText, true, allToolBlocks)
+                }
+                _canResume.value = false
+                continue
+            }
             // Auto-title after first exchange
             if (turn == 0) generateSessionTitleIfNeeded()
             loopExitedNormally = true
@@ -2206,6 +2381,48 @@ internal suspend fun ChatViewModel.runAgentLoop(
         ) {
             withContext(Dispatchers.Main) {
                 updateAssistantMessage(assistantId, accumulatedText, false, allToolBlocks)
+            }
+            loopExitedNormally = true
+            break
+        }
+
+        // [T-android-stop-sibling-subagent-loop] The user stopped this
+        // conversation's sub agents from a card (AgentJobRegistry
+        // .cancelSiblings mutes the parent). The mute already kept a
+        // finished sibling's CALLBACK from waking the parent, but a turn
+        // that was itself waiting on the batch came straight back here with
+        // the stopped results and sent them to the model, which narrated
+        // them and delegated again - the Stop appeared not to work (iOS
+        // 59c1d7208). End the turn here instead: the results just appended
+        // stay in the transcript and history (every call stays paired),
+        // nothing more is sent, and delegation notices still queued would
+        // only restart the turn, so they go too. A user's own queued
+        // message and scheduled fires are kept.
+        //
+        // 上游 1.14 的原文与位置：`git show upstream-1.14:src/android/app/src/
+        // main/java/com/openminis/app/ui/chat/ChatViewModel.kt` 的 12850-12881
+        // （工具结果追加进 history 之后、队列注入之前）。合并时整段丢了：
+        // AgentJobRegistry 侧的 mute 一直在（muteDelegationResults /
+        // isDelegationMuted / clearDelegationMute，AgentJobRegistry.kt:622-661），
+        // 只是没有任何人读它，于是"Stop 之后父级又自己动起来"原样留在本移植里。
+        // 位置放在 goal 记账之后、auto-title 之前：两边都与上游等价（结果已 append、
+        // 还没有任何新东西被发出去），但不动本移植自己的 goal 记账行为。
+        if (com.openminis.app.agent.jobs.AgentJobRegistry.isDelegationMuted(activeSessionId)) {
+            val stale = _promptQueue.value.filter {
+                it.origin == QueuedPromptOrigin.PROGRAMMATIC && !it.isScheduledFire &&
+                    it.text.contains("<agent_callback")
+            }
+            AppLogger.info(
+                ChatViewModel.TAG_STREAM,
+                "[delegate_task] turn=$turn parent stops here — its sub agents were stopped by the user; " +
+                    "results kept, not sent (dropped ${stale.size} queued delegation notice(s))",
+            )
+            withContext(Dispatchers.Main) {
+                stale.forEach { removeQueuedPrompt(it.id) }
+                updateAssistantMessage(
+                    assistantId, accumulatedText, false, allToolBlocks,
+                    isAwaitingModelResponse = false,
+                )
             }
             loopExitedNormally = true
             break

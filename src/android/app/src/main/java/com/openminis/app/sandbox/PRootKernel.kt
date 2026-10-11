@@ -8,6 +8,7 @@ import android.os.Environment
 import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.util.Log
+import kotlinx.coroutines.sync.withLock
 import com.openminis.app.data.FileMentionIndex
 import com.openminis.app.data.MountedFoldersStore
 import java.io.File
@@ -44,20 +45,64 @@ object PRootKernel {
     private var rootfsManagerRef: RootfsManager? = null
     private val rootfsManager: RootfsManager get() = checkNotNull(rootfsManagerRef) { "PRootKernel.boot must be called first" }
 
+    /**
+     * [T-android-env-first-turn] Guards [boot]. See the comment there: the
+     * `isBooted` flag alone is a check-then-act race because it flips only
+     * after the slow install work has finished.
+     */
+    private val bootMutex = kotlinx.coroutines.sync.Mutex()
+
     /** Custom environment variables injected into every proot command. */
     val customEnvironment: MutableMap<String, String> = mutableMapOf()
 
     /**
-     * Bind mounts: Linux path -> host filesystem path.
+     * Bind mounts: Linux path -> host filesystem path. GLOBAL mounts only —
+     * `memory` is per-session and therefore NOT here; the global set is
+     * `skills`, `shared`, `mcp-servers` and `mounts/<name>`
+     * ([SessionWorkspace.GLOBAL_BIND_SUBDIRS]).
      *
-     * [T-b4-#2] 改用 ConcurrentHashMap：这张表会被主线程
+     * [T-android-session-private-mounts] Per-session directories (workspace,
+     * attachments, offloads, browser, memory) must never be in here: this map is
+     * process-wide, so a session dir written into it is whichever session
+     * wrote last. Those mounts live in each shell's own argv
+     * ([SessionMounts]); [addBindMount] refuses them, and readers with no
+     * session id fall back to the explicit [legacySessionId] hint.
+     *
+     * [T-b4-#2] 仍然用 ConcurrentHashMap：这张表会被主线程
      * （TerminalSession.buildTermuxArgs、WebAppPathResolver.inferScope）与 IO 线程
-     * （建壳时 buildSessionBindMounts(publish = true) → [addBindMount]）同时
-     * 遍历/写入。原来的 linkedMapOf 会让遍历方抛 CME（Compose 路径上就是闪退），
-     * 排序后按键取值还可能 NPE。插入顺序从来不是契约的一部分：需要顺序的调用方
-     * 自行排序（如 [resolveHostPath] 按 key 长度降序）。
+     * （建壳、applyMountedFoldersSnapshot）同时遍历/写入。原来的 linkedMapOf 会让
+     * 遍历方抛 CME（Compose 路径上就是闪退），排序后按键取值还可能 NPE。
+     * 插入顺序从来不是契约的一部分：需要顺序的调用方自行排序
+     * （如 [resolveHostPath] 按 key 长度降序）。
      */
     val bindMounts: MutableMap<String, String> = ConcurrentHashMap()
+
+    /**
+     * [T-android-session-private-mounts] LEGACY fallback for readers that
+     * resolve a per-session `/var/minis/...` path with no session id through
+     * [resolveHostPath]. It reproduces exactly what they got before (the
+     * session that most recently built a shell), but as an explicit, logged
+     * hint instead of a side effect on the mount table. Session-aware callers
+     * use [resolveSessionHostPath] and never read it.
+     */
+    @Volatile
+    private var legacySessionId: String? = null
+
+    @Volatile
+    private var legacyFilesDir: File? = null
+
+    fun noteLegacySession(context: Context, sessionId: String) = noteLegacySession(context.filesDir, sessionId)
+
+    internal fun noteLegacySession(filesDir: File, sessionId: String) {
+        legacyFilesDir = filesDir
+        legacySessionId = sessionId
+    }
+
+    /** How many times the legacy fallback answered (diagnostics / tests). */
+    @Volatile
+    var legacyResolveCount: Long = 0
+        private set
+
 
     /**
      * Initialize the PRoot environment: install rootfs and proot binary.
@@ -67,7 +112,27 @@ object PRootKernel {
             Log.d(TAG, "Already booted")
             return
         }
+        // [T-android-env-first-turn] Serialize boot. `isBooted` is only set at
+        // the END of this function, so a bare check-then-act let a second
+        // caller walk straight past it while the first was still suspended
+        // inside installIfNeeded(). Both then raced on, and whoever spawned a
+        // shell first did it with nativeLibDir/prootLoaderPath still empty —
+        // proot then bare-execve'd the rootfs busybox and SELinux killed it
+        // with `execve("/bin/sh"): Permission denied`.
+        bootMutex.withLock {
+            // Re-check under the lock: the caller we queued behind may have
+            // completed the boot while we waited.
+            if (isBooted) {
+                Log.d(TAG, "Already booted (post-lock)")
+                return@withLock
+            }
+            bootLocked(context)
+        }
+    }
 
+    private suspend fun bootLocked(context: Context) {
+        // [T-b4-fail-closed-rootfs] 赋给 rootfsManagerRef：rootfsManager 是带
+        // checkNotNull 的 val getter（未 boot 就取用会给出可读错误），不能直接赋值。
         rootfsManagerRef = RootfsManager.getInstance(context)
         rootfsManager.installIfNeeded()
         rootfsManager.installProotIfNeeded()
@@ -247,7 +312,19 @@ object PRootKernel {
     }
 
     fun addBindMount(linuxPath: String, hostPath: String) {
+        if (isPerSessionPath(linuxPath)) {
+            // Would reintroduce last-writer-wins for every global reader.
+            Log.e(TAG, "refusing per-session bind mount in the global table: $linuxPath -> $hostPath")
+            return
+        }
         bindMounts[linuxPath] = hostPath
+    }
+
+    /** True for `/var/minis/<attachments|offloads|workspace|browser>` and below. */
+    fun isPerSessionPath(linuxPath: String): Boolean {
+        if (!linuxPath.startsWith("/var/minis/")) return false
+        val sub = linuxPath.removePrefix("/var/minis/").substringBefore('/')
+        return sub in perSessionSubdirs
     }
 
     /**
@@ -903,6 +980,26 @@ object PRootKernel {
             cmd.add("--native-offload=${NativeOffloadServer.socketName}:${handlers.joinToString(",")}")
         }
 
+        // [T-android-fake-netlink] Emulate rtnetlink inside the sandbox.
+        //
+        // Android's untrusted_app SELinux domain may not create an
+        // AF_NETLINK/NETLINK_ROUTE socket, and the refusal comes from the real
+        // kernel — so anything that enumerates interfaces dies on startup.
+        // Go's net.Interfaces() reports
+        //   route ip+net: netlinkrib: permission denied
+        // which is what takes tailscale/tsnet-based tools out of service.
+        // With this flag proot answers rtnetlink itself with an EMPTY
+        // interface list, which is enough for those callers to start.
+        //
+        // ⚠️ INTERNAL TESTING ONLY, currently unconditional and with no user
+        // control. Before this ships it needs a decision on exposure, because
+        // it is a deliberate lie to guest programs about the machine they run
+        // on: "no interfaces at all" satisfies a caller that only needs the
+        // enumeration to succeed, but a caller that then picks a source
+        // interface or binds a local address fails LATER instead of at
+        // startup — a worse failure, not a better one.
+        cmd.add("--fake-netlink")
+
         // Shell command
         cmd.add("/bin/bash")
         cmd.add("-c")
@@ -911,6 +1008,9 @@ object PRootKernel {
         Log.d(TAG, "proot cmd: ${cmd.take(cmd.size - 1).joinToString(" ")} <shellCommand ${shellCommand.length} bytes>")
         return cmd
     }
+
+    /** Subdirs that live under `minis-sessions/<sessionId>/` rather than the global pool. */
+    private val perSessionSubdirs = SessionMounts.SESSION_SUBDIRS.toSet()
 
     /**
      * Resolve a `/var/minis/...` Linux path against the same host directory the
@@ -982,6 +1082,20 @@ object PRootKernel {
                 val relativePath = linuxPath.removePrefix(mountPoint).removePrefix("/")
                 val file = if (relativePath.isEmpty()) File(hostBase) else File(hostBase, relativePath)
                 return file.takeIf { SessionWorkspace.staysInside(File(hostBase), it) }
+            }
+        }
+
+        // [T-android-session-private-mounts] Per-session path with no session
+        // context: the legacy "most recent session" answer (see
+        // [legacySessionId]). Logged so the remaining callers stay findable.
+        if (isPerSessionPath(linuxPath)) {
+            val sid = legacySessionId
+            val filesDir = legacyFilesDir
+            if (sid != null && filesDir != null) {
+                legacyResolveCount++
+                val rest = linuxPath.removePrefix("/var/minis/")
+                Log.d(TAG, "legacy session resolve $linuxPath -> session $sid")
+                return File(filesDir, "minis-sessions/$sid/$rest")
             }
         }
 

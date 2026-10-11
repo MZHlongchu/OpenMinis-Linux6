@@ -76,6 +76,35 @@ object ThinkingLadder {
     const val DEFAULT_CAPACITY = 32_768
 
     /**
+     * [T-gemini-25-family-ladder] Per-FAMILY fallback capacities for the two
+     * Gemini 2.5 branches, used when neither models.dev nor the live model
+     * declares a `budgetTokensMax`.
+     *
+     * 2.5 Pro and 2.5 Flash are the SAME mechanism with different numbers, and
+     * the difference is load-bearing in both directions:
+     *
+     *  * 2.5 Pro rejects `thinkingBudget: 0` outright (df8a823d) and its
+     *    documented ladder sits ABOVE Flash's at every rung — upstream ships
+     *    absolute per-family tables (2048 / 8192 / 16384 / 32768 against Flash's
+     *    1024 / 4096 / 8192 / 16384) precisely so a Pro request spends more
+     *    thinking budget than the same tier on Flash.
+     *  * Sharing ONE 32 768-scaled fallback for both families collapsed them
+     *    onto identical budgets, which is what GeminiThinkingBranchTest's
+     *    "pro must budget more than flash at <tier>" pins.
+     *
+     * Scaling each family against its own documented ceiling reproduces that
+     * ordering while keeping the proportional (never-collapsing) shape this
+     * object exists for: Pro → 2048 / 4096 / 8192 / 14336 / 22528 / 30720,
+     * Flash → 1024 / 2048 / 4096 / 7168 / 11264 / 15360. Every rung is still
+     * strictly increasing and below its own capacity, so no two rungs collapse
+     * into one wire value (the bug [T-thinking-ladder-shared] removed).
+     */
+    const val GEMINI_25_PRO_CAPACITY = 32_768
+
+    /** See [GEMINI_25_PRO_CAPACITY]: Flash's own (lower) ceiling. */
+    const val GEMINI_25_FLASH_CAPACITY = 16_384
+
+    /**
      * The budget for [level] on a model whose output capacity is [capacity].
      *
      * @param capacity the model's maximum output tokens — the ceiling this

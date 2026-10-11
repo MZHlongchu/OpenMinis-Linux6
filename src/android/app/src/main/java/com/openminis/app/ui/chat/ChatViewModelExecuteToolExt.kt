@@ -129,7 +129,16 @@ internal suspend fun ChatViewModel.executeTool(
         // /var/minis/{workspace,attachments,offloads,browser} files.
         ReadImageTool.NAME -> executeReadImageTool(argsJson)
         "shell_execute", "shell_exec", "env_exec" -> {
-            executeShellCommand(argsJson, toolId, toolBlocks, assistantId, currentText)
+            executeShellCommand(argsJson, toolId, toolBlocks, assistantId, currentText).also {
+                // [T-android-skill-scan-parity] Stands in for the iOS fakefs
+                // notifier: a shell command may have cloned, edited or removed a
+                // skill. The repository compares a directory signature in the
+                // background and only reloads when /var/minis/skills changed.
+                // 上游 1.14 ChatViewModel.kt:13110-13116 的接线，合并时丢了；
+                // 少了它，`git clone` 进来的技能要等下次启动才可见——而那正是
+                // 老实现拿「每次 send 都 reloadFromDisk」顶着的 2 秒卡顿来源。
+                skillRepository?.requestReload("shell_execute")
+            }
         }
         "su_exec" -> {
             val o = JSONObject(argsJson)

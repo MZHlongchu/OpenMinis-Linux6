@@ -1,6 +1,8 @@
 package com.openminis.app.ui.chat
 
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.data.BPETokenizer
+import com.openminis.app.data.PayloadSizeAudit
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.provider.ImageBudget
@@ -123,4 +125,83 @@ internal fun ChatViewModel.applyRequestImageBudget(messages: List<LLMMessage>): 
         "applyRequestImageBudget: dropped=${plan.droppedCount}/${plan.totalCount} keptBytes=${plan.keptBytes}B elidedBytes=${plan.elidedBytes}B",
     )
     return mutated
+}
+
+/** 一个部件在出站审计里的四项读数（上游 ChatViewModel 的私有 `Quad`）。 */
+private data class AuditedPayloadPart(
+    val bytes: Int,
+    val estimatedTokens: Int,
+    val kind: String,
+    val id: String?,
+)
+
+/**
+ * [T-android-payload-size-audit] (GH#352) 出站负载的**字节侧**交叉校验。
+ *
+ * 两个预算计量单位不同：[ImageBudget] 数**字节**（25 MB 请求上限），
+ * [BPETokenizer.countImageTokens] 数**token**（视觉网格启发式，一张大图几千）。
+ * 图片按结构化 `image_url` 走时两者都对；同一张图若在下游被当成**文本**计量，
+ * 真实代价是几十万 token，而 app 里每一道闸门看到的数都小三个数量级 —— 没人
+ * 会发现。这里按比值（[PayloadSizeAudit.SUSPICIOUS_BYTES_PER_TOKEN]）在两者
+ * 明显不可能同时成立时落一条 warning，供下一次排查直接从日志读出结论。
+ *
+ * 上游 1.14 的实现：`git show upstream-1.14:.../ui/chat/ChatViewModel.kt` 的
+ * 4205-4248，调用点在同一个文件的 11303 ——
+ * `auditOutgoingPayload(applyRequestImageBudget(outboundHistory))`，注释写明
+ * "outermost so it sees exactly what goes on the wire"。本移植把 ChatViewModel
+ * 拆成多片、出站链路又多了接缝（LlmProviderStreamClient），所以函数落在
+ * [applyRequestImageBudget] 旁边（同一个"出站负载"话题），调用点仍然贴着真正
+ * 发请求的那一次调用，嵌套顺序与上游一致：**审计在外、预算在内**。
+ *
+ * 纯诊断：只读入参、只记日志，返回原列表（上游同样 `return messages`），
+ * 不参与预算、不改任何部件。
+ */
+internal fun ChatViewModel.auditOutgoingPayload(messages: List<LLMMessage>): List<LLMMessage> {
+    val window = effectiveContextWindowTokens() ?: 0
+    for ((msgIdx, msg) in messages.withIndex()) {
+        for (part in msg.contentParts) {
+            val audited = when (part) {
+                is AgentContentPart.ImageData ->
+                    // 真正离开设备的是 base64，所以按 base64 量，不按原始字节数。
+                    // 公式只有一份实现：ImageBudget.estimatedBase64Length。
+                    AuditedPayloadPart(
+                        ImageBudget.estimatedBase64Length(part.data.size).toInt(),
+                        BPETokenizer.countImageTokens(part.data),
+                        "image",
+                        null,
+                    )
+                is AgentContentPart.ToolResult -> {
+                    val imgBytes = part.imageData?.size ?: 0
+                    AuditedPayloadPart(
+                        part.content.length + ImageBudget.estimatedBase64Length(imgBytes).toInt(),
+                        BPETokenizer.countTokens(part.content) +
+                            (part.imageData?.let { BPETokenizer.countImageTokens(it) } ?: 0),
+                        "tool_result",
+                        part.id,
+                    )
+                }
+                is AgentContentPart.Text ->
+                    AuditedPayloadPart(part.text.length, BPETokenizer.countTokens(part.text), "text", null)
+                is AgentContentPart.ToolUse -> {
+                    val raw = part.input.toString()
+                    AuditedPayloadPart(raw.length, BPETokenizer.countTokens(raw), "tool_use", part.id)
+                }
+            }
+            val finding = PayloadSizeAudit.audit(audited.bytes, audited.estimatedTokens, window)
+            if (!finding.suspicious && !finding.dangerous) continue
+            AppLogger.warning(
+                ChatViewModel.TAG,
+                "[PayloadAudit] GH#352 oversized part msgIdx=$msgIdx role=${msg.role} " +
+                    "kind=${audited.kind} id=${audited.id ?: "-"} bytes=${finding.bytes} " +
+                    "estTokens=${finding.estimatedTokens} bytesPerToken=${finding.bytesPerToken} " +
+                    "window=$window suspicious=${finding.suspicious} dangerous=${finding.dangerous}" +
+                    if (finding.dangerous) {
+                        " — this part alone could exhaust the window if measured as text; " +
+                            "if the provider now 400s on context length the self-heal path " +
+                            "([T-android-context-overflow-selfheal]) will offload it."
+                    } else "",
+            )
+        }
+    }
+    return messages
 }

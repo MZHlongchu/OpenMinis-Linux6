@@ -11,6 +11,23 @@ import androidx.room.PrimaryKey
  * startup with an IllegalStateException.
  *
  * Non-unique on purpose: many sessions share one group.
+ *
+ * [T-android-moveto-perf] `updated_at` is indexed for the same
+ * entity-must-match-migration reason. Every session listing orders by it
+ * (`ORDER BY updated_at DESC`), which without an index degrades to a full scan
+ * plus a sort as the table grows — the "Move to" sheet's visible loading pause.
+ *
+ * The index lands in MIGRATION_15_16 on this branch. Upstream 1.14 ships the
+ * identical index as its own 13 → 14; the two are the same statement, and this
+ * lineage's chain (13 → 14 creates kanban_tasks, 15 → 16 adds the index) is
+ * the one the committed schema json and DatabaseVersionGuard agree with, so the
+ * upstream numbering is deliberately not adopted here.
+ *
+ * Ascending, not DESC: Room's Index annotation emits a plain
+ * `CREATE INDEX … ON sessions(updated_at)` and validates the live schema
+ * against exactly that string. Declaring DESC in the migration would not match
+ * what Room expects and would abort startup. SQLite walks a B-tree index in
+ * either direction, so an ascending index serves ORDER BY … DESC fine.
  */
 @Entity(
     tableName = "sessions",
@@ -61,8 +78,31 @@ data class ChatSessionEntity(
      */
     @ColumnInfo(name = "folder_id") val folderId: String? = null,
     /**
+     * [T-p1-delegate-task] Child-session ownership (design v4 §3.1). Non-null
+     * ⇒ this is a hidden child of that session: it never appears in the home
+     * list and is reached only through the parent's helper capsule / tool
+     * block. Nullable, no DEFAULT, no FK (same reasoning as [folderId]: a
+     * parent that is not here yet is a transient state, not corruption — and
+     * cascade delete is explicit in ChatRepository.deleteSession, not a
+     * constraint). Field names are the iOS wire names verbatim.
+     *
+     * Created by MIGRATION_12_13 on this branch: upstream 1.14 introduces the
+     * two columns in its own 12 → 13, and our 12 → 13 (code graph) was folded
+     * into the same step so a v12 database reaches v22 with both sets present.
+     */
+    @ColumnInfo(name = "parent_session_id") val parentSessionId: String? = null,
+    /** The parent's `delegate_task` tool_use id that spawned this child, or
+     *  null for a child created by `minis-scheduled --target child-of-current`. */
+    @ColumnInfo(name = "parent_tool_use_id") val parentToolUseId: String? = null,
+    /**
      * Session tool gate: ASK (审批) or ALLOW_ALL (YOYO). Default ASK.
      * Other enum names are accepted on read but the UI only writes these two.
+     *
+     * Added by MIGRATION_16_17, which also back-fills every pre-existing row to
+     * `ASK` so an upgraded chat never inherits the old build-wide ALLOW_ALL /
+     * READ_ONLY preference.
      */
     @ColumnInfo(name = "permission_mode") val permissionMode: String? = "ASK",
-)
+) {
+    val isChild: Boolean get() = parentSessionId != null
+}

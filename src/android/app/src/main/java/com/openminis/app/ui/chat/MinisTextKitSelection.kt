@@ -331,13 +331,91 @@ class SelectionController {
 
     fun register(shard: TextShard) {
         shards[shard.id] = shard
+        // [T-u6-sel-merge] Both registration side-effects, in this order: our
+        // document table keeps the TEXT (it survives recycling even with no
+        // selection active), upstream's ShardText seam keeps the text AND the
+        // last known y for the ordering/copy logic the tests exercise.
         rememberShardText(shard.id, shard.plainText)
+        registerText(
+            ShardText(shard.id, shard.plainText, shard.rawMarkdown) {
+                // A shard's coordinates can detach before its dispose runs.
+                runCatching { shard.positionInWindow().y }.getOrNull()
+            },
+        )
+    }
+
+    /**
+     * [T-android-selection-offscreen-order] (GH#296) Where each shard sits in
+     * the document, whether or not it is composed. The chat supplies
+     * [chatDocumentOrder]; null (every other surface) keeps the on-screen-y
+     * ordering those surfaces always had. See SelectionDocumentOrder.kt.
+     *
+     * [T-u6-sel-merge] Kept alongside our document table rather than replacing
+     * it: this is what orders shards ACROSS blocks and ACROSS messages (a row
+     * index plus a sub-index), while [documentTextMap] is what still holds the
+     * TEXT of a shard LazyColumn already recycled. Either alone leaves half of
+     * GH#296 open — no order without the provider, no text without the table.
+     */
+    var documentOrder: ((TextShardId) -> DocOrder?)? = null
+
+    /** Text + position of every registered shard ([ShardText] view of [shards]). */
+    private val liveTexts = HashMap<TextShardId, ShardText>()
+
+    /**
+     * [T-android-selection-offscreen-order] (GH#296) Shards that unregistered
+     * while a selection was active — scrolled out of the LazyColumn by the
+     * handle's edge auto-scroll, typically the selection's own start. Their
+     * text is frozen here so ordering and copy still see the whole selected
+     * span; before, a copy walked registered shards only and returned just
+     * the tail of the last one. Emptied when a selection begins or is
+     * cleared, so it only ever holds what the current selection scrolled
+     * past.
+     */
+    private val retired = HashMap<TextShardId, ShardText>()
+
+    /** Test seam for the ordering / copy logic, which needs no TextLayoutResult. */
+    internal fun registerText(text: ShardText) {
+        liveTexts[text.id] = text
+        retired.remove(text.id)
     }
 
     fun unregister(id: TextShardId) {
         // [T-cross-shard-copy-recycled] 只摘掉注册项；文本留在 documentTextMap 里
         // ——否则端点分片一被回收，跨分片复制就再也取不到它的文本。
         shards.remove(id)
+        val live = liveTexts.remove(id) ?: return
+        if (selection.value != null) {
+            val lastY = live.y()
+            retired[id] = ShardText(live.id, live.plainText, live.rawMarkdown) { lastY }
+        }
+    }
+
+    /** Number of frozen off-screen shards (tests / diagnostics). */
+    internal fun retiredCount(): Int = retired.size
+
+    private fun yOf(id: TextShardId): Float? = liveTexts[id]?.y?.invoke() ?: retired[id]?.y?.invoke()
+
+    /**
+     * [T-android-selection-offscreen-order] Order of two shards: document
+     * order when the surface provides it for both, else on-screen y (a
+     * retired shard answers with the y it had when it left). Null when
+     * neither is known, i.e. the order genuinely cannot be decided.
+     */
+    internal fun compareShards(a: TextShardId, b: TextShardId): Int? {
+        if (a == b) return 0
+        documentOrder?.let { order ->
+            val oa = order(a)
+            val ob = order(b)
+            if (oa != null && ob != null) return oa.compareTo(ob)
+        }
+        // The id-embedded index that `shardOrderKey` used to provide, kept as
+        // a fallback for surfaces without document order — now scoped to one
+        // message AND one parent block (an index means nothing across
+        // parents) and aware of the `#subIndex` suffix it choked on.
+        sameBlockOrder(a, b)?.let { return it }
+        val ya = yOf(a) ?: return null
+        val yb = yOf(b) ?: return null
+        return ya.compareTo(yb)
     }
 
     /**
@@ -354,20 +432,40 @@ class SelectionController {
         documentTextMap[id] = text
     }
 
-    /** [T-cross-shard-copy-recycled] 分片文本：注册中的实例 → 文档级表 → 调用方注册表。 */
-    private fun textOf(id: TextShardId, documentRegistry: Map<TextShardId, String>): String? =
-        shards[id]?.plainText ?: documentTextMap[id] ?: documentRegistry[id]
+    /**
+     * [T-cross-shard-copy-recycled] 分片文本：注册中的实例 → 未回收的 [ShardText]
+     * → 回收后冻结的 [retired] → 文档级表 → 调用方注册表。
+     *
+     * [T-u6-sel-merge] 两侧各有一份同名实现（文本来源不同）。合成一条链：先问
+     * 「当下真的挂着」的分片，再问上游冻结的 ShardText，最后才是我们那张按字节
+     * 预算淘汰的文档级表——表可能因 LRU 淘汰而缺条目，而 retired 只在选区活动期间
+     * 保留，两者互补，谁先谁后都能取到文本，取不到才返回 null（调用方按缺口计）。
+     * 单一实现也意味着 [selectedPlainText] 的两条路径不会再各说各话。
+     */
+    private fun textOf(id: TextShardId, documentRegistry: Map<TextShardId, String> = emptyMap()): String? =
+        shards[id]?.plainText
+            ?: liveTexts[id]?.plainText
+            ?: retired[id]?.plainText
+            ?: documentTextMap[id]
+            ?: documentRegistry[id]
 
-    /** [T-cross-shard-copy-recycled] 有文本可用的分片：注册中的 + 回收后留在表里的。 */
+    /**
+     * [T-cross-shard-copy-recycled] 我们知道存在的分片：注册中的（[shards]）、文档级
+     * 表里留有文本的（已回收）、以及 [ShardText] 那一侧登记过的（[liveTexts] /
+     * [retired]）。
+     *
+     * [T-u6-sel-merge] 第三类必须算进来：合并后 [registerText] 是 [register] 的另一半
+     * （上游的 ShardText 缝合口），而**只有 [register] 会写文档级表**——只认表的话，
+     * 经 [ShardText] 登记的分片在键序跨度里完全不可见，跨度会被判成「枚举完整」却少
+     * 一段：正是 [T-cross-shard-copy-span-blind] 要消灭的静默缺口，只是换了个入口。
+     */
     private fun knownShardIds(): List<TextShardId> =
-        if (documentTextMap.isEmpty()) {
-            shards.keys.toList()
-        } else {
-            LinkedHashSet<TextShardId>(shards.size + documentTextMap.size).apply {
-                addAll(shards.keys)
-                addAll(documentTextMap.keys)
-            }.toList()
-        }
+        LinkedHashSet<TextShardId>(shards.size + documentTextMap.size + liveTexts.size + retired.size).apply {
+            addAll(shards.keys)
+            addAll(documentTextMap.keys)
+            addAll(liveTexts.keys)
+            addAll(retired.keys)
+        }.toList()
 
     /** Read-only snapshot of currently-composed shards. */
     internal fun currentShards(): Map<TextShardId, TextShard> = shards
@@ -448,6 +546,7 @@ class SelectionController {
 
     /** Begin a fresh selection collapsed at [pos] (long-press start). */
     fun beginSelection(pos: TextPosition) {
+        retired.clear()
         selection.value = TextSelection(start = pos, end = pos)
     }
 
@@ -459,6 +558,7 @@ class SelectionController {
      * shard isn't registered or the character isn't part of a word.
      */
     fun beginSelectionWord(pos: TextPosition) {
+        retired.clear()
         val shard = currentShards()[pos.shard]
         if (shard == null) {
             beginSelection(pos)
@@ -569,6 +669,7 @@ class SelectionController {
 
     fun clearSelection() {
         selection.value = null
+        retired.clear()
         messageMarkdownCache.clear()
         contextMenuRequest.value = null
     }
@@ -974,15 +1075,18 @@ class SelectionController {
         if (a.shard.messageId == b.shard.messageId &&
             shardIdRoot(a.shard.shardId) == shardIdRoot(b.shard.shardId)
         ) {
-            val sa = shardSubIndex(a.shard.shardId)
-            val sb = shardSubIndex(b.shard.shardId)
+            val sa = subIndexOrNull(a.shard.shardId)
+            val sb = subIndexOrNull(b.shard.shardId)
             if (sa != null && sb != null) return if (sa <= sb) a to b else b to a
         }
-        val sA = shards[a.shard] ?: return null
-        val sB = shards[b.shard] ?: return null
-        val yA = sA.positionInWindow().y
-        val yB = sB.positionInWindow().y
-        return if (yA <= yB) a to b else b to a
+        // [T-u6-sel-merge] 上游的文档序（GH#296）接在这两级之后：跨块、跨消息的
+        // 端点没有数字块序号，[shardOrderKey] 给不出键，而 [compareShards] 会先问
+        // 面板注入的 [documentOrder]（DocOrder = 行号 + 子序号，跨块跨消息都能排），
+        // 再退到 [sameBlockOrder] 与 y（已回收的分片答它离开时的 y）。两段合起来：
+        // 无 provider 的面板靠我们的键序，有 provider 的面板靠上游的文档序，都拿不到
+        // 才返回 null —— 与上游一致，调用方据此按「顺序未知」处理而不是瞎猜。
+        val c = compareShards(a.shard, b.shard) ?: return null
+        return if (c <= 0) a to b else b to a
     }
 
     /**
@@ -1196,13 +1300,17 @@ class SelectionController {
             }
             val root = shardIdRoot(a.shardId)
             if (root == shardIdRoot(b.shardId)) {
-                val sa = shardSubIndex(a.shardId)
-                val sb = shardSubIndex(b.shardId)
+                // [T-u6-sel-merge] 这里必须用我们自己的 [subIndexOrNull]（三态：有子号
+                // / 无子号），不能用上游 SelectionDocumentOrder.kt 的 shardSubIndex
+                // ——后者把「没有 #n」和「#0」都算成 0，unplaceable 会恒为 0，跨度被
+                // 误判成 complete，缺口不再计数：正是审计要消灭的静默少复制。
+                val sa = subIndexOrNull(a.shardId)
+                val sb = subIndexOrNull(b.shardId)
                 // 子序号只给「同根 + 有子序号」的分片定序：同根无子号、或异根又无块
                 // 序号的分片都可能落在跨度里却排不上，有它们就不能声称枚举完整。
                 val unplaceable = known.count { id ->
                     if (shardIdRoot(id.shardId) == root) {
-                        shardSubIndex(id.shardId) == null
+                        subIndexOrNull(id.shardId) == null
                     } else {
                         shardOrderKey(id) == null
                     }
@@ -1210,7 +1318,7 @@ class SelectionController {
                 if (sa != null && sb != null && unplaceable == 0) {
                     return ShardSpan(
                         keyedSpan(a, b, sa.toLong(), sb.toLong()) { id ->
-                            if (shardIdRoot(id.shardId) == root) shardSubIndex(id.shardId)?.toLong() else null
+                            if (shardIdRoot(id.shardId) == root) subIndexOrNull(id.shardId)?.toLong() else null
                         },
                         complete = true,
                     )
@@ -1221,19 +1329,31 @@ class SelectionController {
     }
 
     /**
-     * [T-cross-shard-copy-span-blind] 第 3 类兜底：y 序兜底枚举 + 完整性判定。
+     * [T-cross-shard-copy-span-blind] 第 3 类兜底：文档序 / y 序兜底枚举 + 完整性判定。
      *
      * y 序只在**两端都注册且坐标已挂载**时才可信（[positionedInWindow]）：视口是连续
      * 的，两个可见分片之间的一切必然也已组合（[isShardBetween] 的 y 分支同样要求三者
      * 在册且定得了位）。否则跨越已回收分片的那一段既排不上序、也进不了 [middles]，
      * 只能按缺口计。
+     *
+     * [T-u6-sel-merge] 候选集换成 [knownShardsInOrder]（组合中的 + 已回收的 + 文档级
+     * 表里的 + 调用方注册表里的，按文档序、其次 y 序）。原先只看 `shards.values`
+     * ——「当下组合出来的 TextShard」——经 [registerText] 登记的 [ShardText] 分片与
+     * **已回收**的分片全都看不见，而这正是上游 GH#296 的形状：端点一滚出屏幕，中间段落
+     * 就整段消失（复制只剩末分片的半截前缀，[complete] 还谎称枚举完整）。上游同一处
+     * 走的就是已知分片表（`knownShardsInOrder(documentRegistry)`）。
+     *
+     * [T-u6-sel-merge] 完整性再补上文档序这一路：端点没有窗口坐标、但跨度涉及的消息里
+     * **每个已知分片都能用 [documentOrder] 定序**时，谁落在跨度里由全序唯一决定，不必
+     * 再靠坐标去证明（见 [spanOrderable]）。缺了这条，跨消息选区——本就拿不到单一窗口
+     * 坐标——永远被当成有缺口，复制结果后面会挂一条不该有的提示。
      */
     private fun fallbackSpan(
         a: TextShardId,
         b: TextShardId,
         documentRegistry: Map<TextShardId, String>,
     ): ShardSpan {
-        val middles = registeredShardsInOrder()
+        val middles = knownShardsInOrder(documentRegistry)
             .filter { it != a && it != b && isShardBetween(a, b, it) }
         // [T-cross-shard-copy-y-fallback-position] 「注册了」不等于「定得了位」：
         // LayoutCoordinates 已 detach 时 positionInWindow 回退 Offset.Zero，两端点的 y
@@ -1243,6 +1363,7 @@ class SelectionController {
         val endpointsPositioned = positionedInWindow(a) && positionedInWindow(b)
         val complete = when {
             endpointsPositioned -> true
+            spanOrderable(a, b, documentRegistry) -> true
             a.messageId != b.messageId -> false
             else -> {
                 // 端点有回收的：同消息里任何「不是端点、也没进跨度」的已知分片都可能
@@ -1253,6 +1374,25 @@ class SelectionController {
             }
         }
         return ShardSpan(middles, complete)
+    }
+
+    /**
+     * [T-u6-sel-merge] 这个跨度能不能用文档序**证明**：[documentOrder] 在册、两个端点
+     * 定得了序，且跨度涉及的两条消息里每个已知分片都定得了序。
+     *
+     * 全序意味着「谁在跨度内」不是猜的：[isShardBetween] 对每个候选都给得出确定答案。
+     * 定不了序的分片（行不在已加载窗口里）可能正落在跨度内，那种情况仍按缺口计
+     * ——fail-closed 不变。两条消息都要查：跨消息选区的中间分片可能来自任意一侧。
+     */
+    private fun spanOrderable(
+        a: TextShardId,
+        b: TextShardId,
+        documentRegistry: Map<TextShardId, String>,
+    ): Boolean {
+        val order = documentOrder ?: return false
+        if (order(a) == null || order(b) == null) return false
+        return knownShardIdsIn(a.messageId, documentRegistry).all { order(it) != null } &&
+            knownShardIdsIn(b.messageId, documentRegistry).all { order(it) != null }
     }
 
     /**
@@ -1498,11 +1638,28 @@ class SelectionController {
         return txt.substring(minOf(a, b), maxOf(a, b))
     }
 
-    /** Currently-composed shards in visual top-to-bottom order. */
-    private fun registeredShardsInOrder(): List<TextShardId> =
-        shards.values
-            .sortedBy { it.positionInWindow().y }
-            .map { it.id }
+    /**
+     * Every shard the current selection has seen (composed + retired + the
+     * document-level text table + the caller's registry), in document order
+     * where the surface provides one, else by y. Nulls sort first, so on a
+     * surface without document order this is exactly the old y ordering.
+     *
+     * [T-u6-sel-merge] 这是**唯一**的候选枚举：跨度补全（[fallbackSpan]）与
+     * [knownShardIds] 都从它取「我们知道存在哪些分片」。文档级表也一并算上——它的
+     * 条目可能连 [liveTexts] 都没有（[rememberShardText] 可以单独登记文本），能定序
+     * 就该照常参与跨度补全；定不了序的由 [isShardBetween] fail-closed 挡掉。
+     */
+    private fun knownShardsInOrder(registry: Map<TextShardId, String>): List<TextShardId> {
+        val order = documentOrder
+        return LinkedHashSet<TextShardId>(
+            liveTexts.size + retired.size + documentTextMap.size + registry.size,
+        ).apply {
+            addAll(liveTexts.keys)
+            addAll(retired.keys)
+            addAll(documentTextMap.keys)
+            addAll(registry.keys)
+        }.sortedWith(compareBy<TextShardId>({ order?.invoke(it) }, { yOf(it) }))
+    }
 }
 
 /**
@@ -1571,9 +1728,12 @@ fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSelectionForShard(
     if (maxOffset == 0 || lineCount == 0) return
 
     val ordered = controller?.orderedEndpoints(selection) ?: run {
+        // [T-android-selection-offscreen-order] (GH#296) When the order is
+        // unknown, keep the user's own direction (start, end). This used to
+        // return (end, start) for ANY cross-shard pair, inverting the range.
         val a = selection.start
         val b = selection.end
-        if (a.shard == b.shard && a.charOffset <= b.charOffset) a to b else b to a
+        if (a.shard == b.shard && a.charOffset > b.charOffset) b to a else a to b
     }
     val (first, last) = ordered
 
@@ -1634,12 +1794,33 @@ fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSelectionForShard(
 }
 
 /**
- * Tells whether shard [middle] lies (in visual top-to-bottom order) between
- * shards [a] and [b], using their current registered positions. Used by the
- * highlight code to decide whether a shard with no selection endpoint
- * inside it should still be filled (it lies in the middle of a multi-shard
- * range).
+ * Order of two `mdblock:<parent>:<index>[#sub]` shards of the same message and
+ * the same parent block, by (index, sub); null for any other pair.
+ *
+ * [T-u6-sel-merge] Upstream's cross-check, kept because [SelectionController.compareShards]
+ * calls it between the document-order provider and the y fallback, and because
+ * upstream's SelectionOffscreenOrderTest pins it. It uses the shared
+ * [shardSubIndex] (SelectionDocumentOrder.kt), whose "absent means 0" rule is
+ * what makes `#subIndex` suffixed ids comparable at all.
  */
+internal fun sameBlockOrder(a: TextShardId, b: TextShardId): Int? {
+    if (a.messageId != b.messageId) return null
+    fun parse(id: TextShardId): Triple<String, Int, Int>? {
+        val s = id.shardId
+        if (!s.startsWith("mdblock:")) return null
+        val hash = s.lastIndexOf('#')
+        val base = if (hash >= 0) s.substring(0, hash) else s
+        val colon = base.lastIndexOf(':')
+        if (colon <= "mdblock:".length - 1) return null
+        val index = base.substring(colon + 1).toIntOrNull() ?: return null
+        return Triple(base.substring(0, colon), index, shardSubIndex(s))
+    }
+    val pa = parse(a) ?: return null
+    val pb = parse(b) ?: return null
+    if (pa.first != pb.first) return null
+    return compareValuesBy(pa, pb, { it.second }, { it.third })
+}
+
 /**
  * Best-effort document-order key for a shard, extracted from the block index in
  * its shardId string. Returns null if the shardId doesn't carry a numeric block
@@ -1664,7 +1845,7 @@ fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSelectionForShard(
  */
 private fun shardOrderKey(id: TextShardId): Long? {
     val block = shardBlockIndex(id.shardId) ?: return null
-    val sub = shardSubIndex(id.shardId) ?: 0
+    val sub = subIndexOrNull(id.shardId) ?: 0
     return (block.toLong() shl 32) or (sub.toLong() and SHARD_SUB_MASK)
 }
 
@@ -1683,8 +1864,14 @@ private fun shardIdRoot(shardId: String): String {
     }
 }
 
-/** [T-cross-shard-copy-recycled] `#<子序号>` 的数字值；没有该后缀时 null。 */
-private fun shardSubIndex(shardId: String): Int? {
+/**
+ * [T-cross-shard-copy-recycled] `#<子序号>` 的数字值；没有该后缀时 null。
+ *
+ * [T-u6-sel-merge] 名字区别于上游的 [shardSubIndex]（SelectionDocumentOrder.kt，
+ * internal，缺后缀返回 0）：这里要的是「有没有子序号」这个三态，键序与跨度完整性
+ * 判定都依赖它；两者语义不同，不能共用一个名字（同名同签名会直接编译失败）。
+ */
+private fun subIndexOrNull(shardId: String): Int? {
     val hash = shardId.lastIndexOf('#')
     if (hash <= 0) return null
     return shardId.substring(hash + 1).toIntOrNull()
@@ -1736,6 +1923,15 @@ internal const val DEFAULT_GAP_NOTICE_TEMPLATE =
 /** [T-cross-shard-copy-recycled] [shardOrderKey] 低 32 位的子序号掩码。 */
 private const val SHARD_SUB_MASK = 0xFFFF_FFFFL
 
+/**
+ * Tells whether shard [middle] lies between shards [a] and [b] (either order).
+ * Used by the highlight code to decide whether a shard with no selection
+ * endpoint inside it should still be filled.
+ *
+ * [T-android-selection-offscreen-order] (GH#296) An endpoint that scrolled
+ * off-screen unregisters, and everything ordered by on-screen y loses its
+ * footing: every paragraph between the endpoints lost its highlight mid-drag.
+ */
 internal fun SelectionController.isShardBetween(
     a: TextShardId,
     b: TextShardId,
@@ -1759,27 +1955,24 @@ internal fun SelectionController.isShardBetween(
         val hi = maxOf(orderA, orderB)
         return orderM in lo..hi
     }
-    // Fall back to y-based comparison when index parsing fails or the
-    // selection spans multiple messages.
+    // [T-u6-sel-merge] Upstream's route for everything the numeric key cannot
+    // place — a selection that spans messages, or ids without a block index:
+    // [compareShards] asks the surface's [documentOrder] first (DocOrder =
+    // flattened-row index + sub-index, so it orders across blocks AND
+    // messages), then [sameBlockOrder], then the last known y of a shard that
+    // has since been retired.
     //
-    // [T-cross-shard-copy-y-fallback-position] 坐标未挂载（LayoutCoordinates 已
-    // detach，positionInWindow 回退 Offset.Zero）时 y 序没有意义：三个 y 全是 0，
-    // 任意两个未挂载分片互相都判成「在中间」（把无关内容卷进复制），真正在中间的
-    // 已挂载分片反而判不出来。fail-closed：定不了位就不算在中间，调用方按缺口计。
-    val shards = currentShards()
-    val sa = shards[a] ?: return false
-    val sb = shards[b] ?: return false
-    val sm = shards[middle] ?: return false
-    val originA = sa.positionInWindow()
-    val originB = sb.positionInWindow()
-    val originM = sm.positionInWindow()
-    if (originA == Offset.Zero || originB == Offset.Zero || originM == Offset.Zero) return false
-    val ya = originA.y
-    val yb = originB.y
-    val ym = originM.y
-    val lo = minOf(ya, yb)
-    val hi = maxOf(ya, yb)
-    return ym in lo..hi
+    // [T-cross-shard-copy-y-fallback-position] Fail-closed is preserved: when
+    // compareShards cannot decide (an endpoint never registered, no provider),
+    // it returns null and this returns false — "cannot position it" is NOT
+    // "it lies between", exactly as before. Treating an unpositionable shard
+    // as between is what dragged unrelated content into a copy, and reading a
+    // detached shard's Offset.Zero as y=0 did the same.
+    val ab = compareShards(a, b) ?: return false
+    val (lo, hi) = if (ab <= 0) a to b else b to a
+    val loToMiddle = compareShards(lo, middle) ?: return false
+    val middleToHi = compareShards(middle, hi) ?: return false
+    return loToMiddle <= 0 && middleToHi <= 0
 }
 
 /**

@@ -14,9 +14,6 @@ import java.io.FileWriter
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Main-thread hang watchdog.
@@ -35,6 +32,21 @@ import kotlinx.coroutines.flow.asStateFlow
  *
  * The counter resets when the user successfully runs a chat session for
  * [RESET_AFTER_QUIET_MS] without another hang firing — see [markHealthyTick].
+ *
+ * [T-android-hang-false-positive] Gaps are measured on the MONOTONIC uptime
+ * clock, the same clock the heartbeat's postDelayed runs on. The wall clock
+ * used before kept running through deep sleep and jumped on time sync, so a
+ * phone waking up (09-25: "41509s") or correcting its clock after boot
+ * (09-28: "16521299s", main thread idle in nativePollOnce) was recorded and
+ * COUNTED as a hang. Two more guards keep a false positive out of the count:
+ * a main thread found idle at trip time, and a gap no real hang can reach.
+ *
+ * [T-a7-hang-clock] 上面这段在合并后一度只是"文档"：本文件自己的 nowElapsed()
+ * 返回的是 SystemClock.elapsedRealtime()（含深睡时间），而 postDelayed 与
+ * 上游用的是 SystemClock.uptimeMillis()（不含深睡）。两者混用会把一次深睡
+ * 算成 41509s 的"间隙"，正是这里要修掉的假阳性。已按上游统一回
+ * SystemClock.uptimeMillis()：进程被冻结仍会体现在该时钟上（冻结闸门照常
+ * 生效），只有深睡不再计入。
  *
  * No iOS counterpart yet (intentional — iOS only has the DEBUG-mode RPC hang
  * detector at src/ios/Debug/DebugRPCHangDetector.swift; this is a production
@@ -92,15 +104,28 @@ object HangDetector {
      */
     private const val FREEZE_GAP_CEILING_MS = 30_000L
 
+    // [T-a7-render-breaker-removed] 上游 1.14 的 [T-android-hang-false-positive]
+    // 把"按全局 hang 计数降级流式渲染"的 render breaker 从看门狗与渲染器一起
+    // 删掉了：它会在任何屏幕的任何 3s 主线程间隙（首页等锁、手机深睡醒来）之后
+    // 把后续每一条流式回复都降级，简单回复也不例外，而记录到的 33 个样本没有
+    // 一个落在流式渲染里。合并时渲染端（LargeContentGuard）已经改成只看体积，
+    // 看门狗侧的计数阈值常量与那个布尔状态却残留下来，成了一个没有任何读取方的
+    // 信号（RemediationLoop 只是往里写）。这里随上游一并删除；沙盒侧的降级/止损
+    // 仍由 RemediationLoop 的 DegradeFlags + kill 路径负责，不受影响。
+
     /**
-     * [T-android-render-breaker] Once `count >= this`, streaming markdown
-     * rendering degrades to plain text until the hang count resets (quiet
-     * period or manual reset). Deliberately one step EARLIER than the launch
-     * breaker: the ANR-loop baseline (minis-2026-06-10.log) shows the system
-     * kills the process between hang #2 and #3, so a count-3 gate never fires
-     * in the scenario it exists for.
+     * [T-android-hang-false-positive] A heartbeat gap longer than this is not a
+     * hang the watchdog can have observed: the system ANR-kills a main thread
+     * blocked for ~5 s of input, and the longest real stall on record here is
+     * ~33 s. Anything this long is the process having been frozen or
+     * suspended as a whole (cached-app freezer, debugger), so it is logged and
+     * not counted.
      */
-    private const val RENDER_DEGRADE_HANG_COUNT = 2
+    private const val MAX_PLAUSIBLE_GAP_MS = 5 * 60_000L
+
+    /** Other app threads written per episode, and frames per thread. */
+    private const val PEER_THREAD_LIMIT = 16
+    private const val PEER_STACK_DEPTH = 30
 
     /** Quiet period (no hang firing) after which the count resets. */
     private const val RESET_AFTER_QUIET_MS = 10_000L
@@ -111,6 +136,62 @@ object HangDetector {
 
     private const val STALL_LOG_DIR = "logs"
     private const val STALL_LOG_PREFIX = "stall-"
+    // [T-u12-merge] Upstream 1.14's caller-attribution block is adopted as-is:
+    // a stall's JankDiag line now names the screen and the first app frame, and
+    // STALL_STACK_DEPTH 25 → 120 is what lets a Compose text-layout stall leave
+    // the framework frames. Its two SimpleDateFormat vals are deliberately NOT
+    // adopted — the merged file carries no java.text/java.util imports, ours
+    // already formats these stamps with IsoTime (see writeStallSample), and a
+    // shared SimpleDateFormat is not thread-safe on a watchdog that runs beside
+    // the main thread.
+    /**
+     * [T-android-hang-caller-attribution] Frames persisted per sample into
+     * stall-<date>.log. Was 25, which is not enough to leave Compose's text
+     * stack: StaticLayout → TextLayout → AndroidParagraph → MultiParagraph →
+     * TextStringSimpleNode → LayoutNode measure/remeasure alone runs past 25,
+     * so a text-layout stall never showed which UI laid the text out. A
+     * 12.4 s stall on a user device (zzz, 2026-09-22 14:04:40) could not be
+     * attributed to any composable for exactly this reason.
+     */
+    internal const val STALL_STACK_DEPTH = 120
+
+    /** Package prefix that marks a frame as ours rather than framework. */
+    internal const val APP_FRAME_PREFIX = "com.openminis.app."
+
+    /**
+     * [T-android-hang-caller-attribution] Navigation route of the screen on top,
+     * published by MainActivity's back-stack collector. Written on the main
+     * thread, read by the watchdog thread — hence @Volatile. A stall's
+     * JankDiag line carries it so the daily log (the file users actually send)
+     * says which screen hung without needing the separate stall log.
+     */
+    @Volatile
+    var currentScreen: String = "unknown"
+        private set
+
+    fun noteScreen(route: String?) {
+        currentScreen = route?.takeIf { it.isNotBlank() } ?: "unknown"
+    }
+
+    /**
+     * First frame that belongs to this app, formatted `Class.method:line`, or
+     * null when the whole stack is framework / library code.
+     *
+     * The top of a hung main thread is almost always framework (Paint,
+     * LineBreaker, StaticLayout…) — true, but it names what was slow, not who
+     * asked for it. The first app frame below it is the caller that matters.
+     */
+    internal fun firstAppFrame(stack: Array<StackTraceElement>): String? {
+        val frame = stack.firstOrNull { it.className.startsWith(APP_FRAME_PREFIX) } ?: return null
+        return "${frame.className.removePrefix(APP_FRAME_PREFIX)}.${frame.methodName}:${frame.lineNumber}"
+    }
+
+    /**
+     * The compact attribution appended to every JankDiag line. Pure so it can
+     * be tested on the JVM; [writeStallSample] supplies the live values.
+     */
+    internal fun attributionFields(screen: String, stack: Array<StackTraceElement>): String =
+        " screen=$screen appFrame=${firstAppFrame(stack) ?: "none"}"
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val started = AtomicBoolean(false)
@@ -144,33 +225,15 @@ object HangDetector {
     @Volatile var hasLiveWorkload: () -> Boolean = { false }
     @Volatile var onCountedHang: (count: Int, durationMs: Long) -> Unit = { _, _ -> }
 
-    private val _renderBreakerActive = MutableStateFlow(false)
-
-    /**
-     * [T-android-render-breaker] Live signal that streaming markdown rendering
-     * should degrade to plain text (main thread has hung
-     * [RENDER_DEGRADE_HANG_COUNT]+ times recently). Consumed by the chat
-     * renderer (LargeContentGuard); cleared by the same quiet-period / manual
-     * resets that clear the hang count. Seeded from the persisted count at
-     * [start] so a relaunch mid-loop starts degraded instead of hanging again
-     * before the first in-process hang fires.
-     */
-    val renderBreakerActive: StateFlow<Boolean> = _renderBreakerActive.asStateFlow()
-
     /** Start the watchdog. Idempotent; safe to call from MinisApp.onCreate(). */
     fun start(context: Context) {
         if (!started.compareAndSet(false, true)) return
         appContext = context.applicationContext
+        // [T-a7-hang-clock] nowElapsed() 与 postDelayed / 心跳写入端同一时钟
+        // （SystemClock.uptimeMillis()，不含深睡）。合并后它一度被实现成
+        // elapsedRealtime()，深睡时间会被算进心跳间隙 —— 那正是本文件要修掉的
+        // 41509s 假阳性来源。
         lastHeartbeatAt.set(nowElapsed())
-        // [T-android-render-breaker] Seed the render breaker from the
-        // PERSISTED hang count: in the ANR-kill loop the process never lives
-        // long enough to accumulate 2 in-process hangs, but the count
-        // survives restarts — so a relaunch mid-loop starts with degraded
-        // streaming rendering instead of hanging once more first.
-        if (currentHangCount(context) >= RENDER_DEGRADE_HANG_COUNT) {
-            _renderBreakerActive.value = true
-            Log.w(TAG, "render breaker seeded ACTIVE from persisted hang count")
-        }
         scheduleHeartbeat()
         // Use a non-daemon thread so the watchdog isn't reaped while the app
         // is still alive but scheduled out. Daemon threads also die earlier
@@ -206,10 +269,13 @@ object HangDetector {
         if (asyncPrefs.getInt(KEY_HANG_COUNT, 0) == 0) return
         val lastHangAt = asyncPrefs.getLong(KEY_LAST_HANG_AT, 0L)
         if (lastHangAt > 0 && System.currentTimeMillis() - lastHangAt < RESET_AFTER_QUIET_MS) return
+        // [T-u12-merge] Ours is kept: this is the main-thread path, so the reset
+        // goes through AsyncPrefs ([T-android-mainthread-prefs-hang]) instead of
+        // a second getSharedPreferences handle — upstream's `prefs.edit()` here
+        // also referenced a `prefs` local that does not exist in the merged
+        // function.
         asyncPrefs.putInt(KEY_HANG_COUNT, 0)
         asyncPrefs.putLong(KEY_LAST_HANG_AT, 0L)
-        // [T-android-render-breaker] Healthy again — restore full rendering.
-        _renderBreakerActive.value = false
         Log.i(TAG, "hang count reset after quiet period")
     }
 
@@ -232,8 +298,6 @@ object HangDetector {
             .putInt(KEY_HANG_COUNT, 0)
             .putLong(KEY_LAST_HANG_AT, 0L)
             .apply()
-        // [T-android-render-breaker] Manual reset also restores full rendering.
-        _renderBreakerActive.value = false
     }
 
     fun currentHangCount(context: Context): Int =
@@ -242,7 +306,12 @@ object HangDetector {
 
     // -- internals -----------------------------------------------------------
 
-    private fun nowElapsed(): Long = SystemClock.elapsedRealtime()
+    /**
+     * [T-a7-hang-clock] 与 [scheduleHeartbeat] 里 postDelayed 的计时基准、以及
+     * [watchLoop] 读的必须是同一个时钟：SystemClock.uptimeMillis()（不含深睡）。
+     * 合并后它一度被写成 elapsedRealtime()，深睡会被算成巨型心跳间隙。
+     */
+    private fun nowElapsed(): Long = SystemClock.uptimeMillis()
 
     /**
      * API 35+: when the UID is unfrozen, reset the heartbeat so the first
@@ -293,7 +362,9 @@ object HangDetector {
 
     private fun scheduleHeartbeat() {
         mainHandler.postDelayed({
-            lastHeartbeatAt.set(nowElapsed())
+            // [T-a7-hang-clock] 与 postDelayed 的计时基准同源（上游 1.14 的
+            // 字面写法）：写入端换成别的时钟就会凭空产生间隙。
+            lastHeartbeatAt.set(SystemClock.uptimeMillis())
             scheduleHeartbeat()
         }, HEARTBEAT_INTERVAL_MS)
     }
@@ -312,6 +383,8 @@ object HangDetector {
         var lastSampleAt = 0L
         var escalation = 0
         var episodePeakSinceMs = 0L
+        // [T-android-hang-false-positive] One log line per skipped gap, not one per tick.
+        var skipLogged = false
         while (true) {
             try {
                 Thread.sleep(500)
@@ -319,7 +392,11 @@ object HangDetector {
                 return
             }
             ticks++
-            val now = nowElapsed()
+            // [T-a7-hang-clock] 上游 1.14 的字面写法：读的是 heartbeat 写入端与
+            // postDelayed 同一个时钟 SystemClock.uptimeMillis()（不含深睡）。
+            // 合并后这里一度用 nowElapsed()（当时是 elapsedRealtime，含深睡）——
+            // 那才会让间隙带上深睡增量并记成假阳性。
+            val now = SystemClock.uptimeMillis()
             val since = now - lastHeartbeatAt.get()
             com.openminis.app.sandbox.kernel.remediation.StallSignal.observe(since)
             // [T-HANG-DIAG] every 30 ticks (~15s) emit a liveness ping so we
@@ -329,7 +406,12 @@ object HangDetector {
                 println("[T-HANG-DIAG] HangDetector tick=$ticks sinceHeartbeat=${since}ms")
             }
             if (since < HANG_THRESHOLD_MS) {
+                // [T-u12-merge] Both sides here: ours clears the sandbox stall
+                // signal (the Linux guest's remediation hook), upstream's
+                // skipLogged reset re-arms the one-line-per-skipped-gap
+                // throttle used by the freeze-artifact branch below.
                 com.openminis.app.sandbox.kernel.remediation.StallSignal.clear()
+                skipLogged = false
                 if (hangActive) {
                     // Episode over — the heartbeat landed. One labeled
                     // post-recovery snapshot closes the record (its stack is
@@ -344,6 +426,24 @@ object HangDetector {
                 continue
             }
             if (!hangActive) {
+                // [T-android-hang-false-positive] Not a hang: the process was
+                // frozen or suspended as a whole, or the main thread is idle
+                // and simply has not run the heartbeat yet. Logged, never
+                // counted — a false positive in the count is what used to
+                // trip the launch breaker and (until it was removed) degrade
+                // every streaming reply.
+                val notAHang = when {
+                    since > MAX_PLAUSIBLE_GAP_MS -> "gap beyond ${MAX_PLAUSIBLE_GAP_MS}ms (process frozen/suspended)"
+                    isIdleMainStack(mainThreadStack()) -> "main thread idle in the looper"
+                    else -> null
+                }
+                if (notAHang != null) {
+                    if (!skipLogged) {
+                        skipLogged = true
+                        println("[T-HANG-DIAG] heartbeat gap ${since}ms NOT counted: $notAHang")
+                    }
+                    continue
+                }
                 hangActive = true
                 escalation = 0
                 episodePeakSinceMs = since
@@ -415,8 +515,8 @@ object HangDetector {
         builder.append(
             "===== HANG @ $ts (duration ~${durationMs}ms) sample=$label escalation=$escalation =====\n",
         )
-        builder.append("thread: main\n")
-        for (frame in mainStack.take(25)) builder.append("  at $frame\n")
+        builder.append("thread: main screen=$currentScreen\n")
+        for (frame in mainStack.take(STALL_STACK_DEPTH)) builder.append("  at $frame\n")
         builder.append("\n")
 
         val top5 = mainStack.take(5).joinToString(" <- ") {
@@ -426,8 +526,11 @@ object HangDetector {
         // message's structural fingerprint (if any) so a Matcher/Pattern stall
         // stack maps straight to "this message, this content shape" from the log.
         val renderFields = ContentDiag.currentRenderLogFields()
+        // [T-android-hang-caller-attribution] Screen + first app frame, so the
+        // daily log alone names who hung, not just which framework call was slow.
+        val attribution = attributionFields(currentScreen, mainStack)
         println(
-            "[T-HANG-DIAG][JankDiag] sample=$label escalation=$escalation duration=${durationMs}ms top5: $top5$renderFields",
+            "[T-HANG-DIAG][JankDiag] sample=$label escalation=$escalation duration=${durationMs}ms top5: $top5$renderFields$attribution",
         )
 
         // [T-android-hangdetector-full-dump] Main-thread stack alone cannot
@@ -459,13 +562,6 @@ object HangDetector {
         }
     }
 
-    fun tripRenderBreaker() {
-        if (!_renderBreakerActive.value) {
-            _renderBreakerActive.value = true
-            Log.w(TAG, "render breaker TRIPPED by remediation loop")
-        }
-    }
-
     private fun recordHang(durationMs: Long, counts: Boolean, sample: Boolean = true) {
         val ctx = appContext ?: return
         // [T-android-hangdetector-midhang-sample] The trip-time stack IS a
@@ -483,20 +579,70 @@ object HangDetector {
             .putInt(KEY_HANG_COUNT, newCount)
             .putLong(KEY_LAST_HANG_AT, System.currentTimeMillis())
             .apply()
-        // [T-android-render-breaker] Trip the render degrade one hang BEFORE
-        // the system would ANR-kill us (baseline showed death between #2/#3).
-        if (newCount >= RENDER_DEGRADE_HANG_COUNT && !_renderBreakerActive.value) {
-            _renderBreakerActive.value = true
-            Log.w(TAG, "render breaker TRIPPED at hang count=$newCount — streaming markdown degrades to plain text")
-        }
+        // [T-u12-merge] 保留两侧：本移植把计数扇出到 app 的 hook（沙盒据此止损），
+        // 上游补上 peer-thread dump —— 主线程卡在锁上时，只有它能点出持锁线程。
         val hook = onCountedHang
         thread(name = "HangDetector-breaker", isDaemon = true) {
             runCatching { hook(newCount, durationMs) }
                 .onFailure { Log.w(TAG, "hang breaker hook failed: ${it.message}") }
         }
+        // [T-android-hang-false-positive] Who else was running: a main thread
+        // WAITING on a lock (09-24/09-25: 21 s in ProviderRepository.getInstances
+        // -> synchronized(configLock)) never shows the thread holding it.
+        writePeerThreads()
         val tail = "hang detected duration=${durationMs}ms count=$newCount " +
-            "breakerActive=${newCount >= HANG_LIMIT_FOR_BREAKER}"
+            "launchBreaker=${newCount >= HANG_LIMIT_FOR_BREAKER}"
         println("[T-HANG-DIAG] $tail")
         Log.w(TAG, tail)
+    }
+
+    // -- [T-android-hang-false-positive] helpers ----------------------------
+
+    private fun mainThreadStack(): Array<StackTraceElement> = try {
+        Looper.getMainLooper().thread.stackTrace
+    } catch (t: Throwable) {
+        arrayOf()
+    }
+
+    /**
+     * True when the main thread is parked in the looper waiting for work, i.e.
+     * not hung: the top frame is `MessageQueue.nativePollOnce`.
+     */
+    internal fun isIdleMainStack(stack: Array<StackTraceElement>): Boolean {
+        val top = stack.firstOrNull() ?: return false
+        return top.className == "android.os.MessageQueue" && top.methodName == "nativePollOnce"
+    }
+
+    /**
+     * Append the stacks of the app's other threads to today's stall log: every
+     * thread that is BLOCKED, plus any with an app frame on its stack, capped.
+     * Once per hang episode, so the cost (one getAllStackTraces) is bounded.
+     */
+    private fun writePeerThreads() {
+        val ctx = appContext ?: return
+        try {
+            val main = Looper.getMainLooper().thread
+            val peers = Thread.getAllStackTraces().entries
+                .filter { (t, st) ->
+                    t !== main && st.isNotEmpty() &&
+                        (t.state == Thread.State.BLOCKED || st.any { it.className.startsWith(APP_FRAME_PREFIX) })
+                }
+                .sortedBy { (t, _) -> if (t.state == Thread.State.BLOCKED) 0 else 1 }
+                .take(PEER_THREAD_LIMIT)
+            val b = StringBuilder("---- other app threads (${peers.size}) ----\n")
+            for ((t, st) in peers) {
+                b.append("thread: ${t.name} state=${t.state}\n")
+                for (frame in st.take(PEER_STACK_DEPTH)) b.append("  at $frame\n")
+            }
+            b.append("\n")
+            val dir = File(ctx.filesDir, STALL_LOG_DIR).also { it.mkdirs() }
+            // [T-u12-merge] Was upstream's DATE_FORMAT.format(Date()); IsoTime is
+            // the merged file's only formatter (already used for the JankDiag
+            // stamp above) and needs no java.text/java.util imports.
+            FileWriter(File(dir, "$STALL_LOG_PREFIX${IsoTime.formatLocalDate()}.log"), true)
+                .use { it.write(b.toString()) }
+        } catch (t: Throwable) {
+            println("[T-HANG-DIAG] peer thread dump failed: ${t.javaClass.simpleName}: ${t.message}")
+        }
     }
 }

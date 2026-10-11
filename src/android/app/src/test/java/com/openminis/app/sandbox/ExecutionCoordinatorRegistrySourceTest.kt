@@ -21,6 +21,17 @@ import org.junit.Test
  * 这两处都要真机 `Context` 与真实 proot 才能跑（`ExecutionCoordinator.init` 依赖
  * Android），所以按仓库惯例（见 [ShellSupersedeTakeoverRecheckTest]）直接对源码断言
  * **调用点结构**：判据是"锁怎么取到的""谁在什么时候被摘和被停"，注释不算数。
+ *
+ * [T-android-concurrent-shell] 合并上游 1.14 之后，"每会话一把锁"变成了
+ * **按槽位池化**：`acquireShellLease` 为 `<sessionId>#<slot>`（每个会话最多
+ * `MAX_SHELLS_PER_SESSION` 把壳）原子地取一把 Mutex，拿到之后**一直持有到命令跑完**
+ * 才在 `executeWarm` 的 `finally` 里 `unlock()`。所以本用例的锚点跟着结构走：
+ * 判据从"`mutexes.computeIfAbsent(sessionId)`"改为"`acquireShellLease` 里的
+ * `mutexes.computeIfAbsent(<key>)`"，从"`return mutex.withLock {`"改为
+ * "取锁 → `shell.executeCommand(` → `finally` 里的 `lease.mutex.unlock()`"。
+ * **意图一个字没变**：锁必须是 ConcurrentHashMap 内原子取到的同一实例（禁用
+ * `getOrPut` 那种先读再写、读代码看不出返回的是不是赢家的写法），且取到的那把锁
+ * 必须真的包住命令体，否则"同槽位串行"只是拿到了锁没用。
  */
 class ExecutionCoordinatorRegistrySourceTest {
 
@@ -32,11 +43,25 @@ class ExecutionCoordinatorRegistrySourceTest {
     private fun code(text: String): String = text.lineSequence()
         .joinToString("\n") { it.substringBefore("//").substringBefore("/*") }
 
-    /** `execute` 入口 → 命令体进入会话锁为止；每会话锁的取用点就在这一段里。 */
+    /**
+     * [T-e4-#1-#2-call-site] 每槽位锁的取用点：`acquireShellLease` 的整个函数体
+     * （到下一个成员 `getOrCreateShell` 为止）。两个分支都在这一段里：池未满时
+     * `tryLock()` 抢占一个空槽，池满时退到 0 号槽的 `lock()`。
+     */
     private val mutexSite: String = code(
         source
-            .substringAfter("MCPToolPolicy.blockedMessage")
-            .substringBefore("return mutex.withLock {"),
+            .substringAfter("private suspend fun acquireShellLease(")
+            .substringBefore("private suspend fun getOrCreateShell("),
+    )
+
+    /**
+     * [T-e4-#1-#2-call-site] 命令体：`executeWarm` 的函数体（到 `acquireShellLease`
+     * 的定义为止）。取到的锁必须由它持有到命令结束。
+     */
+    private val commandSite: String = code(
+        source
+            .substringAfter("private suspend fun executeWarm(")
+            .substringBefore("private suspend fun acquireShellLease("),
     )
 
     /** "停掉全部会话"分支（到它释放 ShellExecutor 为止）。 */
@@ -49,24 +74,31 @@ class ExecutionCoordinatorRegistrySourceTest {
     @Test
     fun `the per-session mutex is taken atomically and locks the command`() {
         assertTrue(
-            "没定位到每会话锁的取用点，本测试的锚点需要跟着改:\n$mutexSite",
-            mutexSite.contains("SandboxJobKeepAlive.onStart") &&
-                !mutexSite.contains("SandboxResourceGate.withCommandLock"),
+            "没定位到每槽位锁的取用点，本测试的锚点需要跟着改:\n$mutexSite",
+            mutexSite.contains("ShellLease(") && mutexSite.contains("tryLock()"),
         )
         assertTrue(
-            "每会话 Mutex 必须在 ConcurrentHashMap 内原子取用，" +
-                "两个并发调用者才拿到同一个实例：用 computeIfAbsent(sessionId) { Mutex() }。" +
+            "槽位 Mutex 必须在 ConcurrentHashMap 内原子取用，" +
+                "两个并发调用者才拿到同一把实例：用 computeIfAbsent(<sessionId>#<slot>) { Mutex() }。" +
                 "手写 putIfAbsent 只有在返回它的赢家（`?: 自己刚建的那个`）时才对，" +
                 "改成那种写法要同步改本守卫:\n$mutexSite",
-            mutexSite.contains("mutexes.computeIfAbsent(sessionId)"),
+            mutexSite.contains("mutexes.computeIfAbsent(key)"),
         )
         assertFalse(
             "getOrPut 是先读再写两步，读代码看不出返回的是不是赢家——不能再用在这一处:\n$mutexSite",
             mutexSite.contains("getOrPut"),
         )
+        val acquire = commandSite.indexOf("val lease = acquireShellLease(sessionId, fsSessionId ?: sessionId)")
+        val run = commandSite.indexOf("shell.executeCommand(")
+        val release = commandSite.indexOf("lease.mutex.unlock()")
         assertTrue(
-            "取到的那把锁必须真的包住命令体，否则“同会话串行”只是拿到了锁没用:\n$source",
-            source.contains("return mutex.withLock {"),
+            "没定位到命令体，本测试的锚点需要跟着改:\n$commandSite",
+            acquire >= 0 && run > acquire && release > run,
+        )
+        assertTrue(
+            "取到的那把锁必须真的包住命令体，且只在 finally 里放行（同一槽位的下一个命令" +
+                "等的就是这次 unlock），否则“同槽位串行”只是拿到了锁没用:\n$commandSite",
+            commandSite.substring(run, release).contains("finally {"),
         )
     }
 

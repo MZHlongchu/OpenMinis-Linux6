@@ -134,6 +134,79 @@ class UpButtonTurnWalkTest {
         assertEquals("u1", target)
     }
 
+    /**
+     * [U14-merge] Upstream 1.14's regression pair for the row-index seek, kept
+     * as-is: our side of this hunk was empty (the walk decision moved into
+     * `ChatHistoryWindow.previousUserTurnTarget`, tested above), while upstream
+     * still pins the retired stride-upward search and the forward sweep that
+     * replaced it. The helper is deliberately self-contained — it mirrors the
+     * composable's row search instead of calling it — so it keeps documenting
+     * the scroll bug (viewport on rows 0..8, target at row 9, old stride jumps
+     * 17 → 41 and steps over it) without depending on ChatScreen internals.
+     *
+     * Mirrors the row-index search in ChatScreen. `rows` is the flat row list
+     * (index -> key); `viewport` is the inclusive range of rows on screen when
+     * the tap happens. Returns the found row index, or null for a dead tap.
+     */
+    private fun seekRowIndex(
+        rows: List<String>,
+        viewport: IntRange,
+        targetKey: String,
+        strideFromHighestOnly: Boolean,
+    ): Int? {
+        rows.indexOf(targetKey).let { if (it in viewport) return it }
+        if (strideFromHighestOnly) {
+            // The OLD algorithm: stride upward from the highest visible row by a
+            // viewport's worth of rows at a time.
+            var hi = viewport.last
+            val stride = viewport.count().coerceAtLeast(1)
+            var guard = 0
+            while (guard++ < 60) {
+                val next = (hi + stride).coerceAtMost(rows.lastIndex)
+                if (next <= hi) return null
+                // After scrolling to `next`, roughly that row and the following
+                // viewport-worth are on screen.
+                val window = next..(next + stride - 1).coerceAtMost(rows.lastIndex)
+                val found = rows.indexOf(targetKey)
+                if (found in window) return found
+                hi = window.last
+            }
+            return null
+        }
+        // The NEW algorithm: sweep from row 0 forward.
+        return rows.indexOf(targetKey).takeIf { it >= 0 }
+    }
+
+    @Test
+    fun `the seek finds a target that sits just below the viewport`() {
+        // Device repro (a long test session, user's real flow): viewport on rows 0..8,
+        // target user bubble at row 9 — one row BELOW the window. The old
+        // stride-upward seek jumped 17 -> 41, stepped straight over row 9, and
+        // returned null, which surfaced as a completely dead button.
+        val rows = List(47) { "row$it" }.toMutableList().also { it[9] = "user:u2" }
+        val viewport = 0..8
+
+        assertNull(
+            "old stride seek must miss it (this is the reported bug)",
+            seekRowIndex(rows, viewport, "user:u2", strideFromHighestOnly = true),
+        )
+        assertEquals(
+            9,
+            seekRowIndex(rows, viewport, "user:u2", strideFromHighestOnly = false),
+        )
+    }
+
+    @Test
+    fun `the seek still finds a target far above the viewport`() {
+        // The other direction must keep working: oldest turn at the very last
+        // row, viewport near the newest end.
+        val rows = List(47) { "row$it" }.toMutableList().also { it[46] = "user:u1" }
+        assertEquals(
+            46,
+            seekRowIndex(rows, 0..8, "user:u1", strideFromHighestOnly = false),
+        )
+    }
+
     @Test
     fun `a conversation with no user turns yields no target`() {
         val noUsers = listOf("a1" to false, "a2" to false)

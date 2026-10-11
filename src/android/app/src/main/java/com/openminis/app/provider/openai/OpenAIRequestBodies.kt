@@ -1,6 +1,5 @@
 package com.openminis.app.provider.openai
 
-import android.util.Base64
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMMessage
@@ -33,12 +32,39 @@ internal class OpenAIRequestBodies(
         val isOAuth: Boolean
         val chatExtraBody: Map<String, Any?>
         val chatExtraHeaders: Map<String, String>
+        /**
+         * [T-android-model-custom-params] (上游 1.14) 该模型条目上的用户自定义
+         * 请求参数（temperature / top_p / 自定义头 / 额外 body 字段）。null =
+         * 无覆盖，绝大多数请求走这条早退路径，body 与本次改动前逐字节一致。
+         * 与 [chatExtraBody] / [chatExtraHeaders] 刻意分开：那两个是"按次调用"
+         * 的透传，归属 ModelUseOffloadHandler，合并会让两者按调用顺序互相覆盖。
+         */
+        val modelOverrides: com.openminis.app.data.model.ModelOverrides?
+        /**
+         * [T-android-copilot-per-request-headers] (上游 1.14) 由**本次请求体**
+         * 推导的头（Copilot 的 X-Initiator / Copilot-Vision-Request /
+         * X-Request-Id）。null = 不需要，多数 provider 都是 null。
+         */
+        val perRequestHeaders: ((org.json.JSONObject) -> Map<String, String>)?
+        /**
+         * [T-android-opencode-session-header] (上游 1.14) 本 provider 正在服务的
+         * 会话 id，仅用于推导 OpenCode Go 的 `x-opencode-session`。晚读的原因：
+         * provider 活得比这个 id 久 —— 新会话在仍是草稿时就建好 provider，真
+         * UUID 要等首发的 ensureSession() 落库，构造期取值会让首发缺头。
+         */
+        val sessionId: String?
         val absoluteEndpointOverride: String?
         val isOpenRouter: Boolean
         val needsOpenRouterAnthropicCacheControl: Boolean
         val isMistral: Boolean
         val isDashScope: Boolean
         val isXAI: Boolean
+        /**
+         * [T-android-cerebras-reasoning-400] (上游 1.14) Cerebras 的助手消息
+         * 是闭集 schema，且它托管 qwen 命名模型 —— 两处门控都需要这个标志，
+         * 由 OpenAIProvider 的端口实现转发。
+         */
+        val isCerebras: Boolean
         val usesUnifiedReasoningEffort: Boolean
         val thinkingRuleInstanceId: String?
         /** True when this instance points at the Zen host with no API key —
@@ -114,9 +140,16 @@ internal class OpenAIRequestBodies(
         // OpenAI-compatible relay would 400 on the unknown key.
         host.resolvedServiceTier()?.let { body.put("service_tier", it) }
 
-        SamplingPolicy.wire(
-            SamplingIdentity.of(host.provider), host.model.id, temperature, thinkingLevel.isEnabled,
-        )?.let { body.put("temperature", it) }
+        // [T-A5-builder-writes-caller-temperature] 调用方给了什么就写什么 ——
+        // builder 既不发明默认值，也不替调用方把值否掉。上一条 SamplingPolicy 门控
+        // 是重复把关：LLMProvider.sendMessage / streamMessage 这两个公共入口
+        // 已经用 SamplingPolicy.wire(...) 算好温度再交给 provider，思考开启 /
+        // 家族拒收在这里再判一次，只会让**直接调 builder** 的路径（ModelUseOffload
+        // Handler 的按次实参、单测）静默丢字段 —— 同一件事放在两处，两边必然漂移。
+        // 上游 1.14 OpenAIProvider.kt:2201-2203 就是这两行。
+        if (temperature != null) {
+            body.put("temperature", temperature)
+        }
 
         if (streamForced && !host.isOpenRouter) {
             body.put("stream_options", JSONObject().put("include_usage", true))
@@ -211,7 +244,13 @@ internal class OpenAIRequestBodies(
         // history while Mistral forbids it, and neither advertises
         // supportsReasoning via /v1/models — opposite requirements on the same
         // generic openAI provider path. Hence a spec-driven vendor flag.
-        val forbidReasoningField = host.isMistral
+        //
+        // [T-android-cerebras-reasoning-400] (上游 1.14) Cerebras (OpenMinis#361)
+        // 的助手 schema 同样是闭集：把已捕获的 reasoning_content 回显进历史会得到
+        // `400 … property 'messages.N.assistant.reasoning_content' is unsupported`，
+        // 于是第 1 轮成功、第 2 轮起必然失败。按端点限定，因此要求该字段"必须存在"
+        // 的 MiMo / DeepSeek 完全不受影响。
+        val forbidReasoningField = host.isMistral || host.isCerebras
         val includeReasoning =
             (thinkingLevel.isEnabled || modelAlwaysReasons) && modelMayReason && !forbidReasoningField
         val echoReasoning = includeReasoning
@@ -284,6 +323,29 @@ internal class OpenAIRequestBodies(
                         val textParts = msg.contentParts.filterIsInstance<AgentContentPart.Text>()
                         val imageParts = msg.contentParts.filterIsInstance<AgentContentPart.ImageData>()
 
+                        // [T-android-parallel-toolresult-image-split] (上游 1.14)
+                        // 每条 `tool` 回复先全部放完，图片载体统一放到**整段之后**。
+                        //
+                        // 这就是被报告的 bug：过去是"每条结果后面紧跟它自己的图片
+                        // 载体 user 消息"。只有一个工具调用时载体落在唯一的 tool 消息
+                        // 之后，不会拆开任何东西 —— 所以单图场景一直正常。两个并行
+                        // 调用时它插在中间：
+                        //
+                        //   assistant  tool_calls:[call_01, call_02]
+                        //   tool       call_01
+                        //   user       [Image returned by read_image]   <-- 拆断整段
+                        //   tool       call_02
+                        //
+                        // OpenAI 兼容端点要求回答同一组 tool_calls 的 `tool` 回复
+                        // 紧邻跟随。插进来的 user 消息终结了整段，于是 call_02 被视作
+                        // 未应答，DeepSeek 以 `[400] No tool output found for tool
+                        // call call_…` 拒绝请求。各 provider 只是严格程度不同 —— GLM
+                        // 容忍同一个 body，这正是一个模型能用、另一个不能用的原因；
+                        // 但两种情况下请求都是畸形的。
+                        //
+                        // 因而先收集载体、循环结束后再追加，无论并行了多少个调用，
+                        // tool 段都保持不被拆断。
+                        val imageCarriers = mutableListOf<JSONObject>()
                         for (tr in toolResults) {
                             messagesArray.put(JSONObject().apply {
                                 put("role", "tool")
@@ -306,32 +368,45 @@ internal class OpenAIRequestBodies(
                             // the same intent expressed in the shape this API allows.
                             val trBytes = tr.imageData
                             if (trBytes != null && trBytes.isNotEmpty() && supportsImages) {
-                                val safeBytes = com.openminis.app.provider.ImageBudget
-                                    .compressUnderBudget(trBytes)
-                                val safeMime = if (safeBytes === trBytes) {
-                                    tr.imageMimeType ?: "image/jpeg"
-                                } else "image/jpeg"
-                                val b64 = Base64.encodeToString(safeBytes, Base64.NO_WRAP)
-                                messagesArray.put(JSONObject().apply {
+                                // [T-android-image-upload-format] (上游 1.14) 接受的
+                                // 格式 + MIME 都取自真正发出去的字节；转码不出来时
+                                // 用文字占位符，而不是把原格式塞进 data URL。
+                                val upload = com.openminis.app.provider.ImageBudget
+                                    .prepareForUpload(trBytes, tr.imageMimeType)
+                                imageCarriers.add(JSONObject().apply {
                                     put("role", "user")
                                     put("content", JSONArray().apply {
                                         put(JSONObject().apply {
                                             put("type", "text")
+                                            // 点名这次调用，而不只是工具名。两个并行的
+                                            // read_image 结果过去都写作
+                                            // "[Image returned by read_image]"，
+                                            // 载体被归组到整段之后，模型就再无任何线索
+                                            // 区分它们。
                                             put(
                                                 "text",
-                                                "[Image returned by ${tr.name}]",
+                                                "[Image returned by ${tr.name} " +
+                                                    "(tool_call_id: ${capChatToolCallId(tr.id)})]",
                                             )
                                         })
-                                        put(JSONObject().apply {
-                                            put("type", "image_url")
-                                            put("image_url", JSONObject().apply {
-                                                put("url", "data:$safeMime;base64,$b64")
-                                            })
-                                        })
+                                        put(
+                                            if (upload != null) JSONObject().apply {
+                                                put("type", "image_url")
+                                                put("image_url", JSONObject().apply {
+                                                    put("url", upload.dataUrl())
+                                                })
+                                            } else JSONObject().apply {
+                                                put("type", "text")
+                                                put("text", com.openminis.app.provider.ImageBudget.UNSENDABLE_IMAGE_PLACEHOLDER)
+                                            },
+                                        )
                                     })
                                 })
                             }
                         }
+                        // 载体放这里 —— 在每一条 `tool` 回复之后，回答该 assistant
+                        // tool_calls 的整段因此保持连续。
+                        for (carrier in imageCarriers) messagesArray.put(carrier)
                         // T132: emit text + image_url parts as a structured user
                         // message. The previous structured-contentParts branch
                         // dropped AgentContentPart.ImageData entirely — only the
@@ -359,17 +434,21 @@ internal class OpenAIRequestBodies(
                                         }
                                         is AgentContentPart.ImageData -> {
                                             if (supportsImages) {
-                                                // T-imgsize: backstop — re-encode oversize
-                                                // history image bytes before base64-inlining.
-                                                val safeBytes = com.openminis.app.provider.ImageBudget.compressUnderBudget(part.data)
-                                                val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
-                                                val b64 = Base64.encodeToString(safeBytes, Base64.NO_WRAP)
-                                                contentArray.put(JSONObject().apply {
-                                                    put("type", "image_url")
-                                                    put("image_url", JSONObject().apply {
-                                                        put("url", "data:$safeMime;base64,$b64")
-                                                    })
-                                                })
+                                                // T-imgsize + [T-android-image-upload-format]
+                                                // (上游 1.14): 接受的格式、字节预算，以及
+                                                // 与实际发出字节相符的 MIME。
+                                                val upload = com.openminis.app.provider.ImageBudget.prepareForUpload(part.data, part.mimeType)
+                                                contentArray.put(
+                                                    if (upload != null) JSONObject().apply {
+                                                        put("type", "image_url")
+                                                        put("image_url", JSONObject().apply {
+                                                            put("url", upload.dataUrl())
+                                                        })
+                                                    } else JSONObject().apply {
+                                                        put("type", "text")
+                                                        put("text", com.openminis.app.provider.ImageBudget.UNSENDABLE_IMAGE_PLACEHOLDER)
+                                                    },
+                                                )
                                             } else {
                                                 // T264: target model has no vision modality —
                                                 // emit a text placeholder in place of the pixels.
@@ -425,16 +504,31 @@ internal class OpenAIRequestBodies(
                     if (attachTopLevelImages) {
                         for (part in imageParts) {
                             if (supportsImages) {
-                                // T-imgsize: provider-boundary backstop.
-                                val safeBytes = com.openminis.app.provider.ImageBudget.compressUnderBudget(part.data)
-                                val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
-                                val b64 = Base64.encodeToString(safeBytes, Base64.NO_WRAP)
-                                val imageUrl = JSONObject()
-                                imageUrl.put("url", "data:$safeMime;base64,$b64")
-                                contentArray.put(JSONObject().apply {
-                                    put("type", "image_url")
-                                    put("image_url", imageUrl)
-                                })
+                                // T-imgsize + [T-android-image-upload-format]
+                                // (上游 1.14): provider 边界的格式、预算与 MIME。
+                                val upload = com.openminis.app.provider.ImageBudget.prepareForUpload(part.data, part.mimeType)
+                                contentArray.put(
+                                    if (upload != null) JSONObject().apply {
+                                        put("type", "image_url")
+                                        put("image_url", JSONObject().put("url", upload.dataUrl()))
+                                    } else JSONObject().apply {
+                                        put("type", "text")
+                                        put("text", com.openminis.app.provider.ImageBudget.UNSENDABLE_IMAGE_PLACEHOLDER)
+                                    },
+                                )
+                                // [T-android-image-path-metadata] (上游 1.14) 告诉模型
+                                // 它看到的图实际存在哪里，文件级追问（按全分辨率重读、
+                                // 裁剪、OCR、EXIF、校验和）才成为可能。这句话明确说了
+                                // "就是上面那张、不是又一张" —— 没有它，N 张图 + N 条
+                                // 说明会被读成 2N 张。
+                                com.openminis.app.tools.VisionGroupResolver
+                                    .visionImagePathNote(part.linuxPath)
+                                    ?.let { note ->
+                                        contentArray.put(JSONObject().apply {
+                                            put("type", "text")
+                                            put("text", note)
+                                        })
+                                    }
                             } else {
                                 // T264: target model has no vision modality — emit
                                 // a text placeholder in place of the pixels.
@@ -497,6 +591,9 @@ internal class OpenAIRequestBodies(
         // body fields verbatim (no OpenAI→native conversion — callers own the
         // shape). User keys win over our defaults, but `model` is force-kept so a
         // stray override can't misroute. Mirrors generateImage's merge + iOS.
+        // [T-android-model-custom-params] (上游 1.14) 条目覆盖先合并，按次透传
+        // 后合并 —— 后者在同名键上仍然赢。
+        mergeModelOverridesBody(body, temperature, thinkingLevel.isEnabled)
         mergeChatExtraBody(body)
 
         return body
@@ -513,6 +610,64 @@ internal class OpenAIRequestBodies(
         if (host.chatExtraBody.isEmpty()) return
         if (host.isOAuth && !host.forceChatCompletions) return  // Codex OAuth exemption
         for ((k, v) in host.chatExtraBody) body.put(k, v ?: JSONObject.NULL)
+        body.put("model", host.model.id)
+    }
+
+    /**
+     * [T-android-model-custom-params] (上游 1.14) 把用户在该模型条目上设置的
+     * 请求参数合并进 body。两个 builder 都调用，与 [mergeChatExtraBody] 对称。
+     *
+     * 上游把它写在 OpenAIProvider.kt 里；本移植把请求体的构造整体搬到了本文件，
+     * 合并逻辑必须跟着来 —— 否则 [host.modelOverrides] 被 ProviderFactory 赋了
+     * 值却**没有任何读取点**，用户在模型详情页设的 top_p / 自定义头 / 额外 body
+     * 字段会静默失效（temperature 之所以看起来还有效，只是因为它另外经
+     * ChatViewModel→SamplingPolicy 这条老路径走了出去）。
+     *
+     * @param explicitTemperature 调用方传入的 temperature。非 null 表示调用方
+     *   指定了具体值（今天只有 ModelUseOffloadHandler 会，来自 minis-model-use
+     *   自己的实参），按次指定的值必须压过条目上的默认值 —— 因此仅当其为 null
+     *   时才套用覆盖。普通聊天路径一律传 null，正是用户设置存在的场景。
+     * @param thinkingEnabled 本请求是否开启思考。覆盖值同样要过
+     *   [SamplingPolicy]：把条目温度直接写进 body 会绕过审计修复
+     *   （gpt-5 / o 系 / reasoner 系对 temperature 一律 400），所以这里选
+     *   "更安全的一方" —— 保留上游的优先级，但采样开关仍由策略层决定。
+     *
+     * 顺序：本函数在 [mergeChatExtraBody] **之前**运行，因此显式的按次
+     * `extra_body` 在同名键上仍然压过条目覆盖。
+     *
+     * Codex OAuth 与 [mergeChatExtraBody] 一样豁免：该 body 是 ChatGPT 后端校验
+     * 的客户端指纹，塞用户键会让整条路径 400。
+     */
+    private fun mergeModelOverridesBody(
+        body: JSONObject,
+        explicitTemperature: Double?,
+        thinkingEnabled: Boolean,
+    ) {
+        val o = host.modelOverrides ?: return
+        if (host.isOAuth && !host.forceChatCompletions) return  // Codex OAuth exemption
+
+        // null 表示"继承 / 不下发"，绝不等于 0.0 —— 0.0 是合法的全确定性温度，
+        // 这正是该字段可空的原因。
+        if (explicitTemperature == null) {
+            SamplingPolicy.wire(
+                SamplingIdentity.of(host.provider),
+                host.model.id,
+                o.temperature,
+                thinkingEnabled,
+            )?.let { body.put("temperature", it) }
+        }
+        // top_p 是按模型显式设置的旋钮，不经默认值路径，因此原样下发（上游语义）。
+        o.topP?.let { body.put("top_p", it) }
+
+        // extraBodyParams 是 kotlinx 的 JsonObject 而 body 是 org.json，所以按
+        // 序列化形式往返 —— 导出路径（ProviderRepository ~2768）用的同一手法，
+        // 它能保留嵌套结构，而不是被 toString() 拍平成字符串。
+        o.extraBodyParams?.let { extra ->
+            runCatching { JSONObject(extra.toString()) }.getOrNull()?.let { parsed ->
+                for (k in parsed.keys()) body.put(k, parsed.get(k))
+            }
+        }
+        // `model` 由我们决定，与 mergeChatExtraBody 末尾的恢复一致。
         body.put("model", host.model.id)
     }
 
@@ -649,6 +804,37 @@ internal class OpenAIRequestBodies(
         for ((key, value) in host.extraHeaders) {
             builder.header(key, value)
         }
+        // [T-android-copilot-per-request-headers] (上游 1.14) 依赖**本次请求体**
+        // 的头（见 Host.perRequestHeaders）。这里拿到的是已序列化的字符串，
+        // 所以先解析；畸形 body 只可能来自上面的构造器，但"计算尺寸的辅助函数
+        // 绝不能是抛异常的那一个"，因此解析失败就退化为"不追加派生头"而不是
+        // 让整次发送失败。
+        //
+        // 本移植的端口早已把 CopilotDeviceFlow.perRequestHeaders 接到
+        // OpenAIProvider.perRequestHeaders 上，缺的就是这一处应用点 —— 少了它，
+        // X-Initiator 永远缺失、每个 agent 轮次都被标成人工流量。
+        host.perRequestHeaders?.let { derive ->
+            val parsed = runCatching { JSONObject(bodyStr) }.getOrNull()
+            if (parsed != null) {
+                for ((key, value) in derive(parsed)) builder.header(key, value)
+            }
+        }
+        // [T-android-opencode-session-header] (上游 1.14) 每次请求都用当前
+        // [Host.sessionId] 现算，草稿会话在对话中途拿到正式 id 后无需重建
+        // provider 就会开始带头。按 requestUrl 而不是 basePath 判定，因为那才是
+        // 实际拨号的地址 —— 绝对端点覆盖或 Azure 路由可能把请求发到配置的 base
+        // 之外，id 必须跟着真实目的地走。非 OpenCode Go 主机、草稿/空 id 都为空。
+        for ((key, value) in com.openminis.app.provider.OpenCodeSessionHeader
+            .headersFor(requestUrl, host.sessionId)) {
+            builder.header(key, value)
+        }
+        // [T-android-model-custom-params] (上游 1.14) 条目自定义头。位置在构造器
+        // extraHeaders 之后（用户头可覆盖 provider 默认），但在 chatExtraHeaders
+        // 之前 —— 显式的按次透传仍然赢。Authorization/Content-Type 只在用户
+        // 点名时才会被碰，这正是 API key 与 OAuth 认证不受影响的原因。
+        host.modelOverrides?.customHeaders?.let { headers ->
+            for ((key, value) in headers) builder.header(key, value)
+        }
         // [T-android-model-use-passthrough-mode] Per-call chat header overrides,
         // applied AFTER the ctor extraHeaders → same-name REPLACE over any
         // default (incl. Authorization/Content-Type). Empty on normal calls.
@@ -658,7 +844,27 @@ internal class OpenAIRequestBodies(
         // [T-provider-custom-user-agent] Covers both chat/completions and
         // /responses (this builder serves both). Applied after extraHeaders
         // so the per-provider override wins. null/blank → default UA.
-        builder.applyUserAgentOverride(host.customUserAgent)
+        //
+        // [T-android-copilot-editor-ua] (上游 1.14) …除非 extraHeaders 里已经带了
+        // User-Agent —— 那说明该 provider 的身份属于它的**协议**而不是品牌。
+        // Copilot 就是这种情况：它拒绝不像编辑器插件的请求，而带品牌的
+        // `Minis/…` 默认值会在每个 chat 请求上盖掉 `GitHubCopilotChat/…`
+        // （抓包可见）。这与 Codex 路径数百行前用 `defaultUserAgent = null`
+        // 表达的是同一件事，这里改成推导出来，任何 provider 都不必再记。
+        // 显式的按实例覆盖依然优先；对 Copilot 而言也不可能发生
+        // （supportsCustomUserAgent 为 false）。
+        //
+        // 这是本移植在拆分中丢掉的那一环：上游是"先写 Copilot 的 UA，随后
+        // applyUserAgentOverride 覆盖"，我们的 OpenAIRequestBodies 只有后者。
+        val providerOwnsUserAgent = host.extraHeaders.keys.any { it.equals("User-Agent", ignoreCase = true) }
+        builder.applyUserAgentOverride(
+            host.customUserAgent,
+            defaultUserAgent = if (providerOwnsUserAgent) {
+                null
+            } else {
+                com.openminis.app.provider.MinisUserAgent.DEFAULT
+            },
+        )
         return builder.build()
     }
 
@@ -769,6 +975,16 @@ internal class OpenAIRequestBodies(
     private fun injectThinkingParams(body: JSONObject, level: ThinkingLevel, maxTokens: Int) {
         // [T-android-thinking-level-arch] `level` is already clamped to the model ceiling
         // by LLMProvider.streamMessage/sendMessage — do NOT re-clamp here.
+        //
+        // [T-A5-native-ignores-declaration] 这条注释此前与代码不符：上下文里又调了
+        // 一次 `host.clampThinkingLevel(level)`，等于把天花板放到了第二处（而
+        // ThinkingWireGoldenSnapshotTest 的文件头明确写着「不要靠在这里 clamp 来
+        // 修快照 —— 那会让天花板有两个来源、两边漂移」）。后果之一就是上游
+        // OpenAIFamilyGatesTest 钉住的行为被改掉：OpenAI 原生分支（o 系 / gpt-5 /
+        // gpt-6）**按请求原样下发** reasoning_effort，声明集只对通用分支生效；
+        // 多这一道 clamp 后，一个只声明 ["low","medium"] 的 gpt-5 模型会把用户要的
+        // "high" 悄悄降成 "medium"。上游 1.14 OpenAIProvider.kt:2964-2981 里
+        // `level = level`，天花板只由公共入口施加。
         val ctx = ThinkingResolveContext(
             modelId = host.model.id,
             instanceId = host.thinkingRuleInstanceId,
@@ -779,13 +995,18 @@ internal class OpenAIRequestBodies(
             // [OpenMinis#163] null (catalog silent) must read as false here —
             // only an affirmative declaration may suppress the field.
             declaresNoEffortTiers = host.model.declaresNoEffortTiers == true,
-            level = host.clampThinkingLevel(level),
+            level = level,
             maxTokens = maxTokens,
             isOpenRouter = host.isOpenRouter,
             usesUnifiedReasoningEffort = host.usesUnifiedReasoningEffort,
             isMistral = host.isMistral,
             isDashScope = host.isDashScope,
             isXAI = host.isXAI,
+            // [T-android-cerebras-reasoning-400] (上游 1.14) 少了这一项，`*qwen*`
+            // 规则就会按模型名命中 Cerebras 托管的 qwen-3.8-27b 并塞进 Qwen 原生的
+            // enable_thinking；Cerebras 不接受该字段，其文档给出的控制项是根级
+            // reasoning_effort。
+            isCerebras = host.isCerebras,
             offEffort = host.explicitOffEffort(),
         )
         val trace = ThinkingRuleResolver.apply(body, ctx)
@@ -821,13 +1042,15 @@ internal class OpenAIRequestBodies(
         supportsImages: Boolean,
         noVisionPlaceholder: String?,
     ): JSONObject = if (supportsImages) {
-        // T-imgsize: provider-boundary backstop.
-        val safeBytes = com.openminis.app.provider.ImageBudget.compressUnderBudget(data)
-        val safeMime = if (safeBytes === data) mimeType else "image/jpeg"
-        val b64 = Base64.encodeToString(safeBytes, Base64.NO_WRAP)
-        JSONObject().apply {
+        // T-imgsize + [T-android-image-upload-format] (上游 1.14): provider 边界的
+        // 格式、预算与 MIME。
+        val upload = com.openminis.app.provider.ImageBudget.prepareForUpload(data, mimeType)
+        if (upload != null) JSONObject().apply {
             put("type", "input_image")
-            put("image_url", "data:$safeMime;base64,$b64")
+            put("image_url", upload.dataUrl())
+        } else JSONObject().apply {
+            put("type", "input_text")
+            put("text", com.openminis.app.provider.ImageBudget.UNSENDABLE_IMAGE_PLACEHOLDER)
         }
     } else {
         JSONObject().apply {
@@ -972,7 +1195,17 @@ internal class OpenAIRequestBodies(
             !thinkingLevel.isEnabled && host.model.supportsReasoning == true &&
                 !host.model.id.lowercase().let { it.contains("mimo") || it.contains("agnes") } -> {
                 host.explicitOffEffort()?.let { offEffort ->
-                    body.put("reasoning", JSONObject().put("effort", offEffort))
+                    // [OpenMinis#377] (上游 1.14) 把 off 档夹到该模型真正接受的
+                    // 取值上。explicitOffEffort() 回答的是"这是哪个厂商"（官方
+                    // OpenAI → "none"），从不回答"这个模型接受什么" —— 于是声明
+                    // [low…max] 且拒绝 "none" 的 gpt-6-astra 每次压缩都吃
+                    // HTTP 400 invalid_request_error，四次折半重试全废。上面的
+                    // enabled 分支一直在夹，只有这一支漏了。
+                    val safe = ThinkingRuleResolver.clampOffEffort(
+                        offEffort,
+                        host.model.reasoningEffortValues,
+                    )
+                    body.put("reasoning", JSONObject().put("effort", safe))
                 }
             }
         }
@@ -1077,6 +1310,24 @@ internal class OpenAIRequestBodies(
                         }
                     }
                     LLMMessage.Role.USER -> {
+                        // [T-android-responses-toolresult-image-split] (上游 1.14)
+                        // 先放完全部 function_call_output，图片载体统一放到整段
+                        // 之后 —— 这是 T-android-parallel-toolresult-image-split
+                        // (030d059cb) 的 Responses 孪生兄弟，那一次只修了 Chat
+                        // Completions 分支。
+                        //
+                        // 把某条结果的载体紧跟它的输出，会在并行输出之间插进一个
+                        // `user` item：
+                        //   function_call        call_00 (read_image)
+                        //   function_call        call_01 (shell_execute)
+                        //   function_call_output call_00
+                        //   user  [Image returned by read_image]   <-- 拆断整段
+                        //   function_call_output call_01
+                        // 于是 DeepSeek 的 /v1/responses 以 `[400] No tool output
+                        // found for tool call call_01_…` 拒绝请求（现场报告：
+                        // deepseek-flash，read_image 与 shell 命令并行）。单个调用
+                        // 永远不会拆断任何东西，这就是单次 read_image 一直能用的原因。
+                        val imageCarriers = mutableListOf<JSONObject>()
                         for (tr in msg.contentParts.filterIsInstance<AgentContentPart.ToolResult>()) {
                             val (callId, _) = splitResponsesAPIIds(tr.id)
                             input.put(JSONObject().apply {
@@ -1091,7 +1342,7 @@ internal class OpenAIRequestBodies(
                             // user turn carrying an input_image block.
                             val trBytes = tr.imageData
                             if (trBytes != null && trBytes.isNotEmpty() && supportsImages) {
-                                input.put(JSONObject().apply {
+                                imageCarriers.add(JSONObject().apply {
                                     put("role", "user")
                                     put("content", JSONArray().apply {
                                         put(JSONObject().apply {
@@ -1110,6 +1361,9 @@ internal class OpenAIRequestBodies(
                                 })
                             }
                         }
+                        // 载体放这里 —— 在每一条 function_call_output 之后，回答并行
+                        // 调用的输出因此保持连续。
+                        for (carrier in imageCarriers) input.put(carrier)
                         // T132: emit text + input_image content for the user
                         // turn so vision-capable Responses-API models actually
                         // see the bytes. Without the input_image branch the
@@ -1135,18 +1389,17 @@ internal class OpenAIRequestBodies(
                                     }
                                     is AgentContentPart.ImageData -> {
                                         if (supportsImages) {
-                                            // T-imgsize: backstop for Responses API path.
-                                            val safeBytes = com.openminis.app.provider.ImageBudget.compressUnderBudget(part.data)
-                                            val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
-                                            val b64 = Base64.encodeToString(safeBytes, Base64.NO_WRAP)
-                                            contentArray.put(JSONObject().apply {
-                                                put("type", "input_image")
-                                                // Responses API takes image_url
-                                                // as a *string*, not the
-                                                // {"url":...} object shape used
-                                                // by Chat Completions.
-                                                put("image_url", "data:$safeMime;base64,$b64")
-                                            })
+                                            // T-imgsize + [T-android-image-upload-format]
+                                            // (上游 1.14): Responses API 路径的
+                                            // 格式、预算与 MIME。
+                                            contentArray.put(
+                                                responsesImageBlock(
+                                                    part.data,
+                                                    part.mimeType,
+                                                    supportsImages = true,
+                                                    noVisionPlaceholder = null,
+                                                ),
+                                            )
                                         } else {
                                             // T264: target model has no vision modality —
                                             // emit a text placeholder. [T-android-vision-group
@@ -1297,7 +1550,30 @@ internal class OpenAIRequestBodies(
                 })
             }
         }
-        body.put("input", input)
+        // [T-android-responses-orphan-tool-output] Last gate on the tool
+        // pairing, over the ids this request actually carries (split on "|"
+        // and capped). Without it a stranded or duplicated tool result 400s
+        // every send until the chat is cleared. See ResponsesToolPairing.
+        //
+        // 本移植把上游 1.14 的调用点一并补回：ResponsesToolPairing.sanitize
+        // 早已随合并进仓，但拆分时**没有任何调用点** —— 空转的守卫等于没有守卫。
+        val paired = ResponsesToolPairing.sanitize(input)
+        if (paired.changed) {
+            android.util.Log.w(
+                "OpenAIProvider",
+                "[sanitize-responses] repaired outgoing tool pairing: " +
+                    "droppedOrphanOutputs=${paired.droppedOrphanOutputs.size} " +
+                    "droppedDuplicateOutputs=${paired.droppedDuplicateOutputs.size} " +
+                    "placeholderCalls=${paired.placeholderCalls.size} items=${input.length()}",
+            )
+        }
+        body.put("input", paired.items)
+
+        // [T-android-model-custom-params] (上游 1.14) Responses 路径同样合并条目
+        // 覆盖。上游这里写死 explicitTemperature = null（其签名没有 temperature
+        // 参数）；本移植的 builder 有该参数且调用方（ChatViewModel）会传，因此
+        // 按同一优先级语义把实际值传下去 —— 调用方指定了就不覆盖。
+        mergeModelOverridesBody(body, temperature, thinkingLevel.isEnabled)
 
         // [T-android-model-use-passthrough-mode GH#72] Same verbatim merge as the
         // chat-completions builder. Skipped for Codex OAuth inside mergeChatExtraBody.

@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.R
@@ -182,6 +183,14 @@ internal fun RenderTable(block: MdBlock.Table) {
                     val isLastRow = rowIndex == totalRowCount - 1
                     for (colIndex in 0 until colCount) {
                         val isLastCol = colIndex == colCount - 1
+                        // [T-android-table-column-align] The GFM separator row's
+                        // per-column alignment, defaulting to start — upstream
+                        // 1.14 `RenderTable` (StreamingMarkdownText.kt:3506) had
+                        // exactly this line. The separator used to be skipped
+                        // outright here, so every column rendered at start
+                        // whatever the markdown asked for, while iOS
+                        // (SelectableMarkdownView: .center / .right) honoured it.
+                        val columnAlign = block.alignments.getOrElse(colIndex) { MdTableAlign.START }
                         Box(
                             modifier = Modifier
                                 .then(if (isHeader) Modifier.background(colors.tableHeaderBg) else Modifier)
@@ -206,7 +215,15 @@ internal fun RenderTable(block: MdBlock.Table) {
                                     }
                                 }
                                 .padding(horizontal = 10.dp, vertical = 8.dp),
-                            contentAlignment = Alignment.CenterStart,
+                            // [T-android-table-column-align] Top-aligned (as
+                            // before), and now horizontally on the column's GFM
+                            // alignment like iOS. Upstream 1.14
+                            // StreamingMarkdownText.kt:3537-3541.
+                            contentAlignment = when (columnAlign) {
+                                MdTableAlign.CENTER -> Alignment.TopCenter
+                                MdTableAlign.END -> Alignment.TopEnd
+                                MdTableAlign.START -> Alignment.TopStart
+                            },
                         ) {
                             val cellText = cells.getOrElse(colIndex) { "" }
                             MdText(
@@ -221,6 +238,16 @@ internal fun RenderTable(block: MdBlock.Table) {
                                 // comma, which is never what someone pressing a
                                 // table cell is after.
                                 isAtomicSelectionUnit = true,
+                                // [T-android-table-column-align] A wrapped cell
+                                // fills the column, so the Box alignment alone
+                                // would leave its lines at start — the text needs
+                                // the same alignment. Upstream 1.14
+                                // StreamingMarkdownText.kt:3558-3562.
+                                textAlign = when (columnAlign) {
+                                    MdTableAlign.CENTER -> TextAlign.Center
+                                    MdTableAlign.END -> TextAlign.End
+                                    MdTableAlign.START -> TextAlign.Start
+                                },
                             )
                         }
                     }

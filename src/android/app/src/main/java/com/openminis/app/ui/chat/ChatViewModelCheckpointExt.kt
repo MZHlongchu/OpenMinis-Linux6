@@ -131,7 +131,12 @@ internal fun ChatViewModel.rewindToMessage(
                             for (m in _messages.value.subList(idx + 1, _messages.value.size)) {
                                 m.queuedPromptId?.let { pid -> forgetQueuedPrompt(pid) }
                             }
-                            _messages.value = _messages.value.subList(0, idx + 1)
+                            // [T-android-uimessages-sublist-cme] 与上游
+                            // ChatViewModel.kt 的尾部窗口同一条纪律：`subList` 返回的是
+                            // 与父表共享 modCount 的**活视图**，把它发布进 Compose 状态
+                            // 是 GH#239 那类并发 diff 崩溃的温床（实测：父表被原地结构性
+                            // 修改时 SubList 会抛 CME）。窗口按定义就是快照，必须 toList()。
+                            _messages.value = _messages.value.subList(0, idx + 1).toList()
                         }
                     }
                     val tail = awaitBoundedHistoryRebuild(sid)

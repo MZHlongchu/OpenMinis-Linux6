@@ -14,17 +14,40 @@ import org.junit.Test
 class ProviderCredentialCapabilityTest {
     @Test
     fun `capability table accepts only implemented provider credential pairs`() {
-        val oauthTypes = setOf(
-            ProviderType.anthropic,
-            ProviderType.openAI,
-            ProviderType.openRouter,
-            ProviderType.xAI,
-            ProviderType.kimiCode,
-            ProviderType.openAIResponses,
+        // 期望表按「实现的凭据对」逐个类型写死，枚举仍被穷举：新增一个 ProviderType
+        // 而忘了归类，这里会显式报错，而不是被默认值蒙混过去。
+        val both = setOf(ProviderCredential.apiKey, ProviderCredential.oauth)
+        val apiKeyOnly = setOf(ProviderCredential.apiKey)
+        val oauthOnly = setOf(ProviderCredential.oauth)
+        val expected = mapOf(
+            ProviderType.anthropic to both,
+            ProviderType.openAI to both,
+            ProviderType.openRouter to both,
+            ProviderType.xAI to both,
+            ProviderType.kimiCode to both,
+            ProviderType.openAIResponses to both,
+            ProviderType.gemini to apiKeyOnly,
+            // [T-copilot-provider][T-android-copilot-oauth-only] 上游 1.14 新增的
+            // githubCopilot 是 OAuth-ONLY：Copilot 的聊天端点没有用户可获取的
+            // API key（粘 GitHub PAT 也会被拒）。这条用例原来断言「每个类型都支持
+            // apiKey」——那是 githubCopilot 进枚举之前的形状；现在把 oauth-only
+            // 显式列出来，与 AddProviderScreen 的 availableCredentials 分支、
+            // ProviderRepository.refreshModels 的「Copilot holds NO api key」
+            // 判断保持同一口径。
+            ProviderType.githubCopilot to oauthOnly,
+            ProviderType.antigravity to apiKeyOnly,
+            ProviderType.unsupported to apiKeyOnly,
         )
         for (type in ProviderType.values()) {
-            assertTrue(ProviderRepository.supportsCredential(type, ProviderCredential.apiKey))
-            assertEquals(type in oauthTypes, ProviderRepository.supportsCredential(type, ProviderCredential.oauth))
+            val want = expected[type]
+                ?: throw AssertionError("ProviderType.$type 未在能力表期望里归类")
+            for (credential in ProviderCredential.values()) {
+                assertEquals(
+                    "$type × $credential",
+                    credential in want,
+                    ProviderRepository.supportsCredential(type, credential),
+                )
+            }
         }
     }
 
