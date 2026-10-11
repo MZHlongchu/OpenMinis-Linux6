@@ -145,8 +145,8 @@ class BrowserUseManager(
         check(Looper.myLooper() == Looper.getMainLooper())
         if (isDisposed) return
         isDisposed = true
-        navigationDeferred?.cancel()
-        navigationDeferred = null
+        pendingNavigation?.deferred?.cancel()
+        pendingNavigation = null
         asyncJsDeferred?.cancel()
         asyncJsDeferred = null
         onNewWindow = null
@@ -209,9 +209,6 @@ class BrowserUseManager(
      */
     var onBlobDownloadData: ((data: ByteArray, filename: String, mimeType: String?) -> Unit)? = null
 
-    /** Deferred for awaiting navigation completion. */
-    private var navigationDeferred: CompletableDeferred<Unit>? = null
-
     /** Screenshots directory. */
     private val screenshotsDir: File by lazy {
         File(webView.context.cacheDir, "browser_screenshots").also { it.mkdirs() }
@@ -220,15 +217,79 @@ class BrowserUseManager(
     /** Deferred used by executeJS to receive results from async scripts via JS bridge. */
     private var asyncJsDeferred: CompletableDeferred<String>? = null
 
+    /**
+     * [T-browser-js-deferred-identity] 当前这轮注入脚本的代号。脚本把它原样回传
+     * 给 bridge，桥只认领代号匹配的那一轮——上一轮脚本迟到的 resolve/reject
+     * 不再能完成本轮的 deferred（"跨调用互相完成"），而本轮自己的回调一定带
+     * 本轮代号，不会误伤。
+     */
+    @Volatile
+    private var asyncJsGeneration: Long = 0L
+
+    /** 登记新一轮 async JS，返回其代号（同时写入 [asyncJsDeferred]）。 */
+    private fun beginAsyncJs(deferred: CompletableDeferred<String>): Long {
+        val gen = asyncJsGeneration + 1
+        asyncJsGeneration = gen
+        asyncJsDeferred = deferred
+        return gen
+    }
+
+    /** 只清理本轮自己的登记，避免把后到者的 deferred 置空。 */
+    private fun endAsyncJs(gen: Long, deferred: CompletableDeferred<String>) {
+        if (asyncJsGeneration == gen && asyncJsDeferred === deferred) asyncJsDeferred = null
+    }
+
+    /**
+     * [T-browser-nav-deferred-identity] 一次"等待页面加载完成"的登记记录。
+     *
+     * 单槽字段本身没错（WebView 一次只加载一个主框架文档），错在认领没有归属：
+     * 页面事件与超时 runnable 都只按"槽里现在是谁"完成，于是被后一次登记顶替
+     * 的那条 waiter 既等不到页面事件（事件会认领新槽），也等不到自己的超时
+     * runnable（它按身份校验拒绝完成）——navigate/reloadAndWait 会**永久挂起**。
+     * 登记记录让每次导航的完成/清空都带归属：顶替时立即放行被顶替者（并 WARN），
+     * 清空侧只清自己那条。
+     */
+    private class PendingNavigation(val deferred: CompletableDeferred<Unit>)
+
+    /** 当前登记着的那一次导航等待。 */
+    private var pendingNavigation: PendingNavigation? = null
+
+    /** 登记一次导航等待；顶替前一条登记时立刻放行它的 waiter，不让它永挂。 */
+    private fun registerNavigation(): PendingNavigation {
+        val rec = PendingNavigation(CompletableDeferred())
+        pendingNavigation?.let { displaced ->
+            Log.w(TAG, "navigation superseded before completion; releasing its waiter")
+            displaced.deferred.complete(Unit)
+        }
+        pendingNavigation = rec
+        return rec
+    }
+
+    /** 只完成/清空"仍然是当前登记"的那条。 */
+    private fun completeNavigation(rec: PendingNavigation) {
+        if (pendingNavigation === rec) {
+            pendingNavigation = null
+            rec.deferred.complete(Unit)
+        }
+    }
+
     /** JavaScript interface for async script result callbacks. */
     private val jsBridge = object {
         @JavascriptInterface
-        fun resolve(result: String) {
+        fun resolve(generation: String, result: String) {
+            if (generation.toLongOrNull() != asyncJsGeneration) {
+                Log.d(TAG, "ignoring stale async JS resolve (gen=$generation)")
+                return
+            }
             asyncJsDeferred?.complete(result)
         }
 
         @JavascriptInterface
-        fun reject(error: String) {
+        fun reject(generation: String, error: String) {
+            if (generation.toLongOrNull() != asyncJsGeneration) {
+                Log.d(TAG, "ignoring stale async JS reject (gen=$generation)")
+                return
+            }
             asyncJsDeferred?.complete("{\"error\":${JSONObject.quote(error)}}")
         }
 
@@ -421,8 +482,9 @@ class BrowserUseManager(
                 _pageTitle.value = view.title ?: ""
                 _canGoBack.value = view.canGoBack()
                 _canGoForward.value = view.canGoForward()
-                navigationDeferred?.complete(Unit)
-                navigationDeferred = null
+                // [T-browser-nav-deferred-identity] 只认领"仍然是当前登记"的那次
+                // 导航等待；清空也只清自己那条。
+                pendingNavigation?.let { completeNavigation(it) }
                 // Record in browser history
                 val histUrl = url ?: ""
                 val histTitle = view.title ?: ""
@@ -449,8 +511,8 @@ class BrowserUseManager(
                 if (request.isForMainFrame) {
                     _isLoading.value = false
                     Log.e(TAG, "Navigation error: ${error.description}")
-                    navigationDeferred?.complete(Unit)
-                    navigationDeferred = null
+                    // [T-browser-nav-deferred-identity] 同 onPageFinished。
+                    pendingNavigation?.let { completeNavigation(it) }
                 }
             }
 
@@ -693,10 +755,10 @@ class BrowserUseManager(
     /** Immediately stop page navigation and complete any waiter. */
     fun stopActiveAction() {
         webView.post {
-            navigationDeferred?.let { deferred ->
-                navigationDeferred = null
+            pendingNavigation?.let { rec ->
+                // [T-browser-nav-deferred-identity] 用户主动停止 → 完成并注销登记。
                 _isLoading.value = false
-                deferred.complete(Unit)
+                completeNavigation(rec)
             }
             asyncJsDeferred?.let { deferred ->
                 asyncJsDeferred = null
@@ -785,8 +847,9 @@ class BrowserUseManager(
         var normalized = urlString
         if (!normalized.contains("://")) normalized = "https://$normalized"
 
-        val deferred = CompletableDeferred<Unit>()
-        navigationDeferred = deferred
+        // [T-browser-nav-deferred-identity] 登记本次导航：若上一条登记还挂着，
+        // registerNavigation 会立即放行它，不让它永久等待。
+        val nav = registerNavigation()
         _isLoading.value = true
 
         withContext(Dispatchers.Main) {
@@ -802,17 +865,19 @@ class BrowserUseManager(
         // Wait with timeout
         val handler = Handler(Looper.getMainLooper())
         val timeoutRunnable = Runnable {
-            if (navigationDeferred === deferred) {
+            if (pendingNavigation === nav) {
                 Log.w(TAG, "Navigation timed out for $normalized")
                 _isLoading.value = false
-                deferred.complete(Unit)
-                navigationDeferred = null
+                completeNavigation(nav)
+            } else {
+                // 已被后一次导航顶替：自己的 waiter 也必须放行，否则永久挂起。
+                nav.deferred.complete(Unit)
             }
         }
         handler.postDelayed(timeoutRunnable, NAVIGATION_TIMEOUT_MS)
 
         try {
-            deferred.await()
+            nav.deferred.await()
         } finally {
             handler.removeCallbacks(timeoutRunnable)
         }
@@ -1114,23 +1179,25 @@ class BrowserUseManager(
         // Wrap in an async IIFE so `await` works in user scripts.
         // Android WebView doesn't resolve Promises from evaluateJavascript,
         // so we use a JS bridge callback (__minis__.resolve / __minis__.reject).
+        val deferred = CompletableDeferred<String>()
+        // [T-browser-js-deferred-identity] 本轮代号随脚本注入，脚本回传时 bridge
+        // 用它认领——上一轮迟到的回调不再完成本轮的 deferred。
+        val generation = beginAsyncJs(deferred)
         return try {
-            val deferred = CompletableDeferred<String>()
-            asyncJsDeferred = deferred
             val wrapped = """
                 (async function(){
                     try {
                         var __r__ = (async function(){ $script })();
                         var __v__ = await __r__;
                         if (__v__ === undefined || __v__ === null) {
-                            __minis__.resolve(String(__v__));
+                            __minis__.resolve('$generation', String(__v__));
                         } else if (typeof __v__ === 'object') {
-                            __minis__.resolve(JSON.stringify(__v__));
+                            __minis__.resolve('$generation', JSON.stringify(__v__));
                         } else {
-                            __minis__.resolve(String(__v__));
+                            __minis__.resolve('$generation', String(__v__));
                         }
                     } catch(e) {
-                        __minis__.reject(e.message || String(e));
+                        __minis__.reject('$generation', e.message || String(e));
                     }
                 })();
             """.trimIndent()
@@ -1139,10 +1206,10 @@ class BrowserUseManager(
             }
             val raw = withTimeoutOrNull(30_000L) { deferred.await() }
                 ?: run {
-                    asyncJsDeferred = null
+                    endAsyncJs(generation, deferred)
                     return BrowserActionResult.error("JavaScript execution timed out (30s)")
                 }
-            asyncJsDeferred = null
+            endAsyncJs(generation, deferred)
             val json = try { JSONObject(raw) } catch (_: Exception) { null }
             if (json != null) {
                 if (json.has("error")) {
@@ -1154,7 +1221,8 @@ class BrowserUseManager(
                 BrowserActionResult(text = raw)
             }
         } catch (e: Exception) {
-            asyncJsDeferred = null
+            // [T-browser-js-deferred-identity] 只清本轮登记。
+            endAsyncJs(generation, deferred)
             BrowserActionResult.error("JavaScript error: ${e.message}")
         }
     }
@@ -1252,20 +1320,22 @@ class BrowserUseManager(
      */
     private suspend fun awaitPromiseJs(js: String): String? {
         val deferred = CompletableDeferred<String>()
-        asyncJsDeferred = deferred
+        // [T-browser-js-deferred-identity] 同 executeJS：本轮代号随脚本回传，
+        // 桥只认领本轮。
+        val generation = beginAsyncJs(deferred)
         val wrapped = """
             (async function(){
                 try {
                     var __v__ = await ($js);
                     if (__v__ === undefined || __v__ === null) {
-                        __minis__.resolve('null');
+                        __minis__.resolve('$generation', 'null');
                     } else if (typeof __v__ === 'object') {
-                        __minis__.resolve(JSON.stringify(__v__));
+                        __minis__.resolve('$generation', JSON.stringify(__v__));
                     } else {
-                        __minis__.resolve(String(__v__));
+                        __minis__.resolve('$generation', String(__v__));
                     }
                 } catch(e) {
-                    __minis__.reject(e && e.message ? e.message : String(e));
+                    __minis__.reject('$generation', e && e.message ? e.message : String(e));
                 }
             })();
         """.trimIndent()
@@ -1273,7 +1343,7 @@ class BrowserUseManager(
             webView.evaluateJavascript(wrapped, null)
         }
         val raw = withTimeoutOrNull(60_000L) { deferred.await() }
-        asyncJsDeferred = null
+        endAsyncJs(generation, deferred)
         return raw
     }
 
@@ -1384,8 +1454,7 @@ class BrowserUseManager(
      */
     suspend fun reloadAndWait() {
         if (isDisposed) return
-        val deferred = CompletableDeferred<Unit>()
-        navigationDeferred = deferred
+        val nav = registerNavigation()
         _isLoading.value = true
         val url = _currentURL.value
         if (url.isEmpty() || url == "about:blank") {
@@ -1402,14 +1471,16 @@ class BrowserUseManager(
         }
         val handler = Handler(Looper.getMainLooper())
         val timeoutRunnable = Runnable {
-            if (navigationDeferred === deferred) {
+            if (pendingNavigation === nav) {
                 _isLoading.value = false
-                deferred.complete(Unit)
-                navigationDeferred = null
+                completeNavigation(nav)
+            } else {
+                // [T-browser-nav-deferred-identity] 已被顶替也要放行自己的 waiter。
+                nav.deferred.complete(Unit)
             }
         }
         handler.postDelayed(timeoutRunnable, NAVIGATION_TIMEOUT_MS)
-        try { deferred.await() } finally { handler.removeCallbacks(timeoutRunnable) }
+        try { nav.deferred.await() } finally { handler.removeCallbacks(timeoutRunnable) }
         _isLoading.value = false
     }
 
@@ -1425,20 +1496,21 @@ class BrowserUseManager(
      */
     suspend fun loadBlankPage() {
         check(!isDisposed) { "Browser tab is closed" }
-        val deferred = CompletableDeferred<Unit>()
-        navigationDeferred = deferred
+        val nav = registerNavigation()
         _isLoading.value = true
         webView.loadDataWithBaseURL(null, BLANK_PAGE_HTML, "text/html", "utf-8", null)
         val handler = Handler(Looper.getMainLooper())
         val timeoutRunnable = Runnable {
-            if (navigationDeferred === deferred) {
+            if (pendingNavigation === nav) {
                 _isLoading.value = false
-                deferred.complete(Unit)
-                navigationDeferred = null
+                completeNavigation(nav)
+            } else {
+                // [T-browser-nav-deferred-identity] 已被顶替也要放行自己的 waiter。
+                nav.deferred.complete(Unit)
             }
         }
         handler.postDelayed(timeoutRunnable, NAVIGATION_TIMEOUT_MS)
-        try { deferred.await() } finally { handler.removeCallbacks(timeoutRunnable) }
+        try { nav.deferred.await() } finally { handler.removeCallbacks(timeoutRunnable) }
         _isLoading.value = false
     }
 

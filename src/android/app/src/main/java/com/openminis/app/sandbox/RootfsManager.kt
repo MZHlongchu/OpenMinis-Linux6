@@ -1980,6 +1980,12 @@ class RootfsManager private constructor(private val context: Context) {
          * Rootfs paths whose contents must be executable. Matches iOS
          * RootfsManager.swift:199 byte-for-byte so the same overlay tree
          * produces identical file modes on both platforms.
+         *
+         * [T-d11-a11y-cli-syntax] 只作用于**资产覆盖层**拷进来的文件。`android-*`
+         * offload CLI（`android-a11y-cli` 等）不在这里：它们是
+         * [PRootKernel.installHandlerStubs] 按 `NativeOffloadServer.registeredHandlers`
+         * 写进 rootfs `usr/local/bin/` 的 `exit 0` 桩（自己 setExecutable），所以
+         * 找 a11y CLI 的安装点要看 PRootKernel，不是本文件的资产覆盖。
          */
         private val BIN_DIR_PREFIXES = listOf(
             "/bin/",

@@ -6,6 +6,9 @@ import com.openminis.app.harness.ToolCall
 import com.openminis.app.harness.ToolResult
 import com.openminis.app.harness.effects.ToolReplayPolicy
 import com.openminis.app.harness.operation.OperationSnapshot
+// [T-b18-op-lookup-session-domain] 转移入口现为 OperationCoordinator 的扩展函数。
+import com.openminis.app.harness.operation.toolIntent
+import com.openminis.app.harness.operation.toolSettled
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject

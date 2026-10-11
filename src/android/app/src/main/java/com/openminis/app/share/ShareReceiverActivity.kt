@@ -297,11 +297,21 @@ class ShareReceiverActivity : ComponentActivity() {
         val name = "$prefix-${shortId()}${if (ext.isNotEmpty()) ".$ext" else ""}"
         val dest = File(SharedShareStore.sharedFileDirectory(this), name)
         return try {
-            contentResolver.openInputStream(uri)?.use { input ->
-                dest.outputStream().use { input.copyTo(it) }
+            // [T-b15-share-ghost-attachment] 旧代码在 openInputStream 返回 null 时被 ?.
+            // 短路：既没写文件也没报错，却照样返回文件名——下游
+            // ChatViewModel.addAttachmentFromStagedShare 见 !file.exists() 直接 return
+            // null，附件凭空消失且无任何提示。复制成功必须是返回值的前置条件。
+            val input = contentResolver.openInputStream(uri)
+            if (input == null) {
+                AppLogger.warning(TAG, "copyUriToStaging($uri): openInputStream returned null, attachment dropped")
+                null
+            } else {
+                input.use { src -> dest.outputStream().use { src.copyTo(it) } }
+                name
             }
-            name
         } catch (e: Exception) {
+            // 半截文件不能留在 staging：下游只判 exists()，会把它当完整附件收下。
+            dest.delete()
             AppLogger.warning(TAG, "copyUriToStaging($uri): ${e.message}")
             null
         }

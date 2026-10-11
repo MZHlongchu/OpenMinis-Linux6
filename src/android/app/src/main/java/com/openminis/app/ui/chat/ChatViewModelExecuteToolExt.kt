@@ -115,11 +115,13 @@ internal suspend fun ChatViewModel.executeTool(
         }
         // [T-ui-read] GUI Agent 的眼睛：a11y 读屏快照，配合 shell_execute 里
         // 的 android-a11y-cli 点击/输入形成"看屏→决策→执行→再看"闭环。
+        // [T-a11y-cli-guest] 两者都在 guest 里执行（宿主没有 /bin/bash，CLI 只装
+        // 在 rootfs），所以必须带上 activeSessionId 以复用本会话的持久 shell。
         com.openminis.app.tools.UiReadTool.NAME ->
-            com.openminis.app.tools.UiReadTool.execute(argsJson)
+            com.openminis.app.tools.UiReadTool.execute(argsJson, activeSessionId)
         // [T-ui-action] GUI Agent 的手：tap/type/swipe/scroll/back/open_app/open_url。
         com.openminis.app.tools.UiActionTool.NAME ->
-            com.openminis.app.tools.UiActionTool.execute(argsJson)
+            com.openminis.app.tools.UiActionTool.execute(argsJson, activeSessionId)
         // T178: pass sessionId + context so read_image routes through
         // resolveSessionHostPath like file_read/write/edit do — without
         // these, the tool consults the global last-writer-wins
@@ -286,8 +288,18 @@ internal suspend fun ChatViewModel.executeTool(
         )
     }
     // [T-tool-output-policy] 统一出口：环境变量脱敏 + 超长输出降级为可检索文件。
+    // [T-tool-output-host-dir] 溢出目录由宿主侧解析成**宿主**目录（guest 的
+    // /var/minis/workspace 就是它的挂载视图）；旧实现拼的是 guest 路径，真机上
+    // mkdirs/writeText 双双失败、上限静默失效。解析是惰性的：只有真的要落盘时
+    // 才做（SessionWorkspace.hostDir 对归档到项目文件夹的会话要做一次目录探测）。
     if (result.imageData == null) {
-        return result.copy(output = ToolOutputPolicy.apply(result.output, toolId))
+        return result.copy(
+            output = ToolOutputPolicy.apply(result.output, toolId) {
+                com.openminis.app.sandbox.SessionWorkspace.hostDir(
+                    context.filesDir, activeSessionId, "workspace",
+                )
+            },
+        )
     }
     return result
 }

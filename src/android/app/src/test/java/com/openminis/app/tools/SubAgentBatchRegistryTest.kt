@@ -1,16 +1,25 @@
 package com.openminis.app.tools
 
+import java.io.File
+import java.io.IOException
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 /**
  * [T-subagent-background] `unfinished` is the set the agent loop nudges about
  * before a turn ends, so every test here pins one way background work could be
  * lost — or, just as bad, nag the user forever after it was already picked up.
- * Runs memory-only (context = null).
+ * Runs memory-only (context = null), except the registry-corruption test which
+ * needs a real file (unit tests have no Context).
  */
 class SubAgentBatchRegistryTest {
+
+    @get:Rule
+    val tmp = TemporaryFolder()
 
     private val registry = SubAgentBatchRegistry
 
@@ -234,5 +243,96 @@ class SubAgentBatchRegistryTest {
     fun `unfinished on a blank session never touches the registry`() {
         seed("sess-reg-blank", background = true, lanes = 1)
         assertTrue(registry.unfinished("", null).isEmpty())
+    }
+
+    @Test
+    fun `a corrupt registry throws instead of silently starting an empty ledger`() {
+        val s = "sess-reg-corrupt"
+        val file = File(tmp.newFolder("batch-registry"), "batches.json")
+        // 有效的旧台账被写坏（跨版本 schema 变化 / 外部改动）
+        file.writeText("{ this is not a batch list ]")
+        registry.fileOverride = { file }
+        try {
+            val e = runCatching { seed(s, background = true, lanes = 1) }.exceptionOrNull()
+
+            // [T-batch-registry-corrupt] 静默解成空表才是最坏结果：下一次 saveLocked
+            // 会把文件覆盖掉，所有 wave 台账一起消失。
+            assertTrue("a corrupt registry must surface; got $e", e is IOException)
+            assertTrue(
+                "the error must name the file to inspect: ${e?.message}",
+                e!!.message.orEmpty().contains("batches.json"),
+            )
+            // 现场留证：坏文件改名保留，内容一字未改
+            assertFalse("the corrupt file must be moved aside", file.exists())
+            val kept = File(file.parentFile, "batches.json.corrupt")
+            assertTrue("the bad bytes are the evidence and must survive", kept.isFile)
+            assertEquals("{ this is not a batch list ]", kept.readText())
+            // 且不永久卡死：坏文件挪走后，下一次调用从一张新表开始
+            val batch = seed(s, background = true, lanes = 1)
+            assertEquals(listOf(batch.id), registry.list(s, null).map { it.id })
+        } finally {
+            registry.fileOverride = null
+        }
+    }
+
+    @Test
+    fun `reconcileAfterRestart fails the plan item a dead process left active`() {
+        val s = "sess-reg-plan-reset"
+        val plan = AgentPlanStore.add(s, null, "sub-agent 1/1 · scout", status = "active")
+        val b = registry.begin(
+            sessionId = s,
+            context = null,
+            toolId = "tool-1",
+            assistantId = "asst-1",
+            background = true,
+            seeds = listOf(
+                SubAgentBatchRegistry.LaneSeed(1, "worker", "lane 1", "do 1", planId = plan.id),
+            ),
+        )
+        registry.markRunning(s, null, b.id, 1, "tracker-1", "gpt-x", 1)
+
+        val real = registry.processStartedAt
+        registry.processStartedAt = System.currentTimeMillis() + 60_000
+        try {
+            assertEquals(1, registry.reconcileAfterRestart(s, null))
+
+            assertEquals(
+                SubAgentBatchRegistry.STATE_STOPPED,
+                requireNotNull(registry.get(s, null, b.id)).lanes.single().state,
+            )
+            // [T-subagent-plan-restale] 看板必须跟着收尾：留 active 的话
+            // renderPlanPromptFragment 每轮都把它当"进行中"重新注入。
+            assertEquals("failed", AgentPlanStore.list(s, null).single().status)
+        } finally {
+            registry.processStartedAt = real
+        }
+    }
+
+    @Test
+    fun `reconcileAfterRestart leaves a plan item the model already finished alone`() {
+        val s = "sess-reg-plan-keep"
+        val plan = AgentPlanStore.add(s, null, "sub-agent 1/1 · scout", status = "done")
+        val b = registry.begin(
+            sessionId = s,
+            context = null,
+            toolId = "tool-1",
+            assistantId = "asst-1",
+            background = true,
+            seeds = listOf(
+                SubAgentBatchRegistry.LaneSeed(1, "worker", "lane 1", "do 1", planId = plan.id),
+            ),
+        )
+        registry.markRunning(s, null, b.id, 1, "tracker-1", "gpt-x", 1)
+
+        val real = registry.processStartedAt
+        registry.processStartedAt = System.currentTimeMillis() + 60_000
+        try {
+            registry.reconcileAfterRestart(s, null)
+
+            // 复位只认自动建板留下的 active 项，不能覆盖模型对同一步的最终判断。
+            assertEquals("done", AgentPlanStore.list(s, null).single().status)
+        } finally {
+            registry.processStartedAt = real
+        }
     }
 }

@@ -1,6 +1,7 @@
 package com.openminis.app.security
 
 import com.openminis.app.sandbox.GuestWorkloadPolicy
+import com.openminis.app.sandbox.SessionWorkspace
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.concurrent.CopyOnWriteArrayList
@@ -103,6 +104,26 @@ class SecurityGateImpl : SecurityGate {
         val SAFE_GIT_SUB = setOf(
             "status", "log", "diff", "show", "branch", "rev-parse",
             "remote", "ls-files", "blame",
+        )
+        /**
+         * [T-gate-readonly-whole-line] 让"只读"判据失效的词。argv 里只要出现任何一个，
+         * 这条命令就不再算只读，于是不自动放行、落到确认路径（ASK 下 NeedConfirm，
+         * 不是 Denied——用户仍有放行的机会）。两类：
+         *   1) 删除/覆写程序：与 classifySegment 的破坏性程序判据同一份名单；
+         *   2) `find` 里"执行程序"与"删除命中"的参数。
+         * 存在的理由：只读判据原先只锚定 argv[0]，命中 SAFE_COMMANDS 就整条放行，
+         * 命令里捎带的破坏性词一概不看。实测（ASK 模式，无任何 allow 规则）：
+         *   `echo rm -rf /tmp/x`            → 审批：低风险自动放行
+         *   `env rm -rf /tmp/x`             → 审批：低风险自动放行
+         *   `find /tmp -delete`             → 审批：低风险自动放行（真的删）
+         *   `find /tmp -exec rm -rf {} +`   → 审批：低风险自动放行（真的删）
+         * 即"提到 rm"就能把整条命令洗成只读，且 find 的 `+` 形式不含 `\;`，绕开了
+         * [containsShellExpansionSyntax] 的 `;` 判据。改判据锚定整条命令：这些写法
+         * 一律不自动放行。
+         */
+        private val NON_READ_ONLY_TOKENS = setOf(
+            "rm", "dd", "wipe", "format", "shred", "mkfs",
+            "-exec", "-execdir", "-delete",
         )
     }
 
@@ -280,7 +301,17 @@ class SecurityGateImpl : SecurityGate {
         if (cmd.toolName in SHELL_TOOLS) {
             val command = extractCommand(cmd)
             if (mode != PermissionMode.ALLOW_ALL) {
-                SuPathPolicy.denial(command, callerSession.get())
+                // [T-supath-caller-folder] “自己的项目目录”这一参数必须真的接线：
+                // SuPathPolicy 的 projectTree 分支只有拿到 callerFolderId 才放行
+                // 自己的 minis-workspaces/<id>，而这里此前从不传第三个参数 ⇒ 任何
+                // 提到该目录的 shell 命令一律 hard deny，连本会话自有目录也被拒，
+                // 文案还把它说成“其他项目目录”。folderId 与会话树分支同源，由
+                // caller session 解析（SessionWorkspace.folderIdFor，已含 draft id
+                // 与 owner 归一）。解析不到（未归档 / 映射未预热）仍传 null，保持
+                // fail-closed：拿不准就不放行。
+                val caller = callerSession.get()
+                val callerFolder = caller?.let { SessionWorkspace.folderIdFor(it) }
+                SuPathPolicy.denial(command, caller, callerFolder)
                     ?.let { return Decision.Denied(it, hard = true) }
             }
             // Not mode-gated: this refusal is about CORRECTNESS, not permission.
@@ -583,10 +614,16 @@ class SecurityGateImpl : SecurityGate {
             append("$")
         }
         return try {
-            Regex(regex).containsMatchIn(target) || Regex(regex).matches(target) ||
-                target.contains(pattern.trim('*'))
+            // [T-b1-rule-anchor] 只认锚定正则：pattern 的全部正则元字符已在上面
+            // 转义，'*' / '?' 就是通配符。原先还并了
+            // `target.contains(pattern.trim('*'))`（catch 分支又退回
+            // `target.contains(pattern)`）——无锚点子串兜底能把任意命令"洗"成规则
+            // 放行，且规则层位于 FATAL / 块设备 / GuestMountPolicy / SuPathPolicy
+            // 之前，命中即 Allow 并跳过其后全部硬拒绝。删掉，不匹配就是不匹配。
+            Regex(regex).matches(target)
         } catch (_: Exception) {
-            target.contains(pattern)
+            // 构造不出正则时失败关闭（不放行）。
+            false
         }
     }
 
@@ -717,6 +754,14 @@ class SecurityGateImpl : SecurityGate {
         if (containsShellExpansionSyntax(command)) return false
         val argv = tokenizeCommand(command)
         if (argv.isEmpty()) return false
+        // [T-gate-readonly-whole-line] 只读判据锚定整条命令，不是只看 argv[0]。
+        // 每个词再按空白切开比较（引号被 tokenize 吃掉后 `echo "rm -rf /"` 是一个
+        // 含空白的词），比较的是"词"，所以 `*rm*`、`rm.txt` 这类参数不受影响。
+        // 规则 pattern 的锚定在 [patternMatches]，这里是同一原则的另一半：命中的
+        // 必须是整条命令本身，不是命令里捎带的某个词。
+        if (argv.any { tok -> tok.split(' ', '\t').any { it.substringAfterLast('/') in NON_READ_ONLY_TOKENS } }) {
+            return false
+        }
         val bin = argv[0].substringAfterLast('/')
         if (bin == "git") {
             val sub = argv.getOrNull(1) ?: return false

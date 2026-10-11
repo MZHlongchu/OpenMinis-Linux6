@@ -72,6 +72,7 @@
     <string name="resume_action">Reia</string>
     <string name="search_chats_placeholder">Caută în conversații…</string>
     <string name="search_no_results">Niciun rezultat pentru „%1$s”</string>
+    <string name="search_truncated_notice">Se afișează doar cele mai recente %1$d potriviri — restrânge căutarea pentru a vedea mai multe.</string>
     <string name="stop_tool">Oprește instrumentul</string>
     <string name="mic_permission_title">Este necesară permisiunea pentru microfon</string>
     <string name="mic_permission_message">Introducerea vocală necesită permisiunea pentru microfon. Atinge Deschide setările pentru a o acorda aplicației Minis Ultra.</string>

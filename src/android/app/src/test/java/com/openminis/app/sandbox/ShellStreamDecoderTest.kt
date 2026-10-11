@@ -183,6 +183,86 @@ class ShellStreamDecoderTest {
         assertEquals(0, real.exitCode)
     }
 
+    // ——— [T-p1-3-shell-auth-frames] guest 侧派生标签的帧 ———
+
+    @Test
+    fun taggedFrameOnlyCompletesWithGuestComputedTag() {
+        // 宿主只把 nonce 写进命令文本；DONE 的标签由 guest 现算。偷读 stdin
+        // 的进程知道 nonce，但没有标签：无标签 / 错标签的帧都不得完成。
+        val nonce = "abcd1234"
+        val tag = "3724315497"
+        val framer = MarkerFramer(nonce, tag)
+        framer.push("__MINIS_GO_${nonce}__\n")
+        val tagless = framer.push("out\n__MINIS_DONE_${nonce}_EXIT_0__\n")
+        assertFalse("无标签帧不得完成", tagless.completed)
+        val wrongTag = framer.push("__MINIS_DONE_${nonce}_EXIT_0_1111111111__\n")
+        assertFalse("错标签帧不得完成", wrongTag.completed)
+        val real = framer.push("__MINIS_DONE_${nonce}_EXIT_7_${tag}__\n")
+        assertTrue(real.completed)
+        assertEquals(7, real.exitCode)
+    }
+
+    @Test
+    fun taggedDoneFrameSplitAcrossChunksStillCompletes() {
+        val nonce = "abcd1234"
+        val tag = "3724315497"
+        val line = "__MINIS_DONE_${nonce}_EXIT_0_${tag}__"
+        val payload = "hello 中文\n$line\n"
+        val bytes = payload.toByteArray(StandardCharsets.UTF_8)
+        val broken = (0 until line.length - 1).count { splitAt ->
+            val cut = "hello 中文\n".toByteArray(StandardCharsets.UTF_8).size + splitAt
+            !taggedFramed(nonce, tag, bytes, cut).completed
+        }
+        assertEquals(0, broken)
+    }
+
+    @Test
+    fun tagProbeAndAuthBothCapturedAndStrippedFromPreBeginWindow() {
+        val nonce = "abcd1234"
+        val framer = MarkerFramer(nonce, "3724315497")
+        val step = framer.push(
+            "__MINIS_AUTH_04213031404213031404__\n" +
+                "__MINIS_TAGPROBE_930766865__\n" +
+                "__MINIS_GO_${nonce}__\nreal out\n__MINIS_DONE_${nonce}_EXIT_0_3724315497__\n"
+        )
+        assertEquals("04213031404213031404", framer.authTag)
+        assertEquals("930766865", framer.tagProbe)
+        assertEquals("real out\n", step.output)
+        assertTrue(step.completed)
+        assertFalse(framer.preBeginDroppedSample().contains("__MINIS_TAGPROBE_"))
+    }
+
+    @Test
+    fun partialTagProbeSuffixHeldAcrossChunks() {
+        val nonce = "abcd1234"
+        val framer = MarkerFramer(nonce, "3724315497")
+        // 半个 TAGPROBE 前缀必须在 pre-BEGIN hold 里存活到下一块，否则探针
+        // 永远配不齐、带标签的帧被永久降级。
+        framer.push("__MINIS_TAGPRO")
+        val step = framer.push(
+            "BE_930766865__\n__MINIS_GO_${nonce}__\nout\n__MINIS_DONE_${nonce}_EXIT_0_3724315497__\n"
+        )
+        assertEquals("930766865", framer.tagProbe)
+        assertEquals("out\n", step.output)
+        assertTrue(step.completed)
+    }
+
+    private fun taggedFramed(nonce: String, tag: String, bytes: ByteArray, cut: Int): MarkerFramer.Step {
+        val decoder = Utf8ChunkDecoder()
+        val framer = MarkerFramer(nonce, tag)
+        framer.push("__MINIS_GO_${nonce}__\n")
+        val first = decoder.decode(bytes.copyOfRange(0, cut.coerceIn(0, bytes.size)))
+        val step1 = framer.push(first)
+        if (step1.completed) return step1
+        val second = decoder.decode(bytes.copyOfRange(cut.coerceIn(0, bytes.size), bytes.size))
+        val step2 = framer.push(second)
+        if (step2.completed) {
+            return step2.copy(output = step1.output + step2.output)
+        }
+        val tail = framer.push(decoder.finish(), endOfInput = true)
+        return tail.copy(output = step1.output + step2.output + tail.output)
+    }
+
     private fun armedFramer(marker: String): MarkerFramer {
         val framer = MarkerFramer(marker)
         framer.push("__MINIS_GO_${marker}__\n")

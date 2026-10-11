@@ -126,8 +126,16 @@ object AgentPlanStore {
         require(status in STATUSES) { "status must be pending, active, done, or failed" }
         return lock(sessionId).withLock {
             val plans = loadLocked(sessionId, context)
+            // [T-plan-duplicate-id] 显式 id 必须唯一。add 直通调用方传入的 id，
+            // 一旦出现两条同 id 条目，resolvePlanIndex 的精确匹配永远只命中第一条，
+            // 第二条永久停在 pending 并占掉 MAX_PLANS 配额（且 remove 也删不掉）。
+            // 显式拒绝并指路 op=update，而不是静默取第一条。
+            val requestedId = id?.takeIf { it.isNotBlank() }
+            require(requestedId == null || plans.none { it.id == requestedId }) {
+                "plan item $requestedId already exists; use op=update to change it"
+            }
             require(plans.size < MAX_PLANS) { "plan list is full" }
-            val p = Plan(id = id?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString(), title = title.trim(), description = description.trim(), status = status, position = plans.size, startedAt = if (status == "active") System.currentTimeMillis() else 0)
+            val p = Plan(id = requestedId ?: UUID.randomUUID().toString(), title = title.trim(), description = description.trim(), status = status, position = plans.size, startedAt = if (status == "active") System.currentTimeMillis() else 0)
             saveLocked(sessionId, context, plans + p)
             p
         }
@@ -165,7 +173,13 @@ object AgentPlanStore {
      */
     private fun resolvePlanIndex(plans: List<Plan>, id: String): Int {
         if (id.isBlank()) return -1
-        plans.indexOfFirst { it.id == id }.takeIf { it >= 0 }?.let { return it }
+        val exact = plans.indices.filter { plans[it].id == id }
+        // [T-plan-duplicate-id] 旧版本 add 不校验 id 时可能已落盘多条同 id 条目；
+        // 静默取第一条会让其余条目永远无法 update/remove，改为显式报错。
+        if (exact.size > 1) {
+            throw IOException("plan id $id is duplicated in the board; remove the extra item first")
+        }
+        exact.firstOrNull()?.let { return it }
         if (id.length >= 8) plans.indexOfFirst { it.id.startsWith(id) }.takeIf { it >= 0 }?.let { return it }
         return -1
     }

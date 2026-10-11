@@ -115,6 +115,25 @@ class ModelUseOffloadHandler(
     }
 
     private fun cmdRun(args: OffloadArgs, request: NativeOffloadRequest): NativeOffloadResult {
+        // [T-android-model-use-provider-pollution] run 的 per-call provider 卫生：
+        // cmdRunInner 会在 provider 上写"每次调用"的请求参数（extra_body /
+        // extra_headers / endpoint 覆写 / 图像透传），而请求构造器在发送时才读它们。
+        // 该 provider 由 ProviderFactory.createEphemeral 单独构建、不进 memo，正常情况
+        // 下随本调用一起被丢弃；这里仍在 finally 里复位一遍，保证任何提前返回/抛异常的
+        // 出口都不会把一个带着覆写（例如被替换的 Authorization）的 provider 留在原地。
+        var perCallProvider: com.openminis.app.provider.openai.OpenAIProvider? = null
+        return try {
+            cmdRunInner(args, request) { perCallProvider = it }
+        } finally {
+            perCallProvider?.clearPerCallOverrides()
+        }
+    }
+
+    private fun cmdRunInner(
+        args: OffloadArgs,
+        request: NativeOffloadRequest,
+        onProviderReady: (com.openminis.app.provider.openai.OpenAIProvider?) -> Unit,
+    ): NativeOffloadResult {
         val modelArg = args.get("model")
             ?: return NativeOffloadResult(2, "--model is required. Usage: minis-model-use run --model <id_or_name>\n")
 
@@ -276,7 +295,13 @@ class ModelUseOffloadHandler(
             )
         val instance = providerRepository.instance(entry.providerInstanceId)
             ?: return NativeOffloadResult(2, "minis-model-use run: provider instance not found\n")
-        val provider = ProviderFactory.create(instance, apiKey, entry.model, context)
+        // [T-android-model-use-provider-pollution] Ephemeral, NOT the memoized
+        // instance: this call mutates per-call request knobs below and in
+        // tryImageGenerationRoute, and ProviderFactory.create hands back the very
+        // object the UI's chat turns send through — one passthrough call used to
+        // poison every later chat request of that instance.
+        val provider = ProviderFactory.createEphemeral(instance, apiKey, entry.model, context)
+        onProviderReady(provider as? com.openminis.app.provider.openai.OpenAIProvider)
 
         // [GH#67] input_audio serialization is implemented for the OpenAI
         // chat/completions + responses paths only. Other provider types would
@@ -1348,8 +1373,12 @@ class ModelUseOffloadHandler(
         // callers drive models our fixed schema never modeled (e.g. Volcengine
         // Seedream image-to-image via the `image` body field) with no persisted
         // config. Set on the per-call provider so every generateImage call site
-        // below picks them up; nothing leaks across runs (the provider is built
-        // fresh per model-use invocation).
+        // below picks them up; nothing leaks across runs.
+        // [T-android-model-use-provider-pollution] That "nothing leaks" claim is now
+        // structurally true: this provider comes from ProviderFactory.createEphemeral
+        // (one object per model-use invocation, never memoized), so the memoized chat
+        // provider can never observe these fields. cmdRun additionally resets them in
+        // its finally.
         val passthrough = parseImagePassthrough(inputJson, callWarnings)
         openAI.imageExtraBody = passthrough.body
         openAI.imagePathOverride = passthrough.path

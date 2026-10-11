@@ -62,8 +62,12 @@ fun MCPToolsSheet(
         // shell 存活与 25s 超时，任何一环断了工具列表就是空（「获取不到工具列表」）。
         val result = runCatching {
             withContext(Dispatchers.IO) {
+                // [T-mcp-preview-scope] 合成作用域走 McpStdioScopePolicy.PREVIEW_SCOPE
+                // 这一个常量：桥接层按它决定"不缓存、不挂会话目录、用完即回收"，字面量各写
+                // 一份的话两边一漂移就是进程/空目录泄漏。
                 com.openminis.app.mcp.client.McpNativeBridge.listTools(
-                    context, mcpRepository, "mcp-tools-ui", server.id,
+                    context, mcpRepository,
+                    com.openminis.app.mcp.client.McpStdioScopePolicy.PREVIEW_SCOPE, server.id,
                 )
             }
         }
@@ -179,7 +183,8 @@ fun MCPToolsScreen(
         val result = runCatching {
             withContext(Dispatchers.IO) {
                 com.openminis.app.mcp.client.McpNativeBridge.listTools(
-                    context, mcpRepository, "mcp-tools-ui", current.id,
+                    context, mcpRepository,
+                    com.openminis.app.mcp.client.McpStdioScopePolicy.PREVIEW_SCOPE, current.id,
                 )
             }
         }

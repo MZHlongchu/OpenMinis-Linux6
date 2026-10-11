@@ -25,9 +25,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.openminis.app.offload.AndroidPermissionDialogBridge
 import com.openminis.app.offload.OffloadPermissionManager
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
@@ -55,6 +54,9 @@ import com.openminis.app.ui.settings.keepScreenAwakeEnabled
 import com.openminis.app.ui.theme.MinisTheme
 
 private const val KEY_CURRENT_CHAT_SESSION_ID = "minis.current_chat_session_id"
+
+// [T-android-prompt-launch-ledger] Activity 重建时把"在飞的系统权限对话框替哪张提示弹的"带回来。
+private const val KEY_PERMISSION_IN_FLIGHT_ID = "minis.permission_in_flight_prompt_id"
 
 class MainActivity : ComponentActivity() {
 
@@ -87,12 +89,10 @@ class MainActivity : ComponentActivity() {
      */
     private var hasResumedFromBackground = false
 
-    /**
-     * Bridges [OffloadPermissionManager.requestAndroidPermission] to the system
-     * runtime-permission dialog. Background offload handlers suspend while
-     * this launcher's callback resolves the request.
-     */
-    private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
+    // [T-android-prompt-launch-ledger] 系统运行时权限对话框的唯一驱动方（按 launch 记账：
+    // 一次只有一个在飞，其余排队；应答按在飞身份回传）。这里只留引用，供
+    // onSaveInstanceState 记下在飞身份，Activity 重建时由账本与金库核对后认领。
+    private var permissionDialogBridge: AndroidPermissionDialogBridge? = null
 
     /**
      * Used by the "go to settings" gate to open e.g. the app-details or
@@ -338,52 +338,23 @@ class MainActivity : ComponentActivity() {
                 com.openminis.app.crash.CrashFrequencyDetector.shouldForceHomeOnLaunch(this)
             }
 
-        permissionLauncher = registerForActivityResult(
-            ActivityResultContracts.RequestMultiplePermissions()
-        ) { results ->
-            val allGranted = results.isNotEmpty() && results.values.all { it }
-            OffloadPermissionManager.respondToAndroidPermission(allGranted)
+        // [T-android-prompt-launch-ledger] 系统运行时权限对话框：launcher 注册与提示收集都在
+        // bridge 里（唯一驱动方）。它按 launch 记账 —— 同一时刻只允许一个在飞的系统对话框，
+        // 其余排队；回调带的是**在飞那次**的身份，回传之后再派发下一张。判定口径统一为 all
+        // （多权限只要缺一就是未授予），见 AndroidPermissionOutcome。
+        permissionDialogBridge = AndroidPermissionDialogBridge(this).also {
+            it.register(savedInstanceState?.getLong(KEY_PERMISSION_IN_FLIGHT_ID, 0L))
         }
         settingsLauncher = registerForActivityResult(
             ActivityResultContracts.StartActivityForResult()
         ) { /* polled by OffloadPermissionManager.requestSettingsGate */ }
 
-        // Bridge: system permission dialog (first ask / can-ask-again).
-        // If the permission has already been permanently denied (dialog
-        // would no-op), report DENIED so the handler can fall back to the
-        // in-app settings gate.
-        lifecycleScope.launch {
-            OffloadPermissionManager.pendingAndroidPermission
-                .filterNotNull()
-                .collect { req ->
-                    val permanentlyDenied = req.permissions.any { permission ->
-                        ContextCompat.checkSelfPermission(this@MainActivity, permission) !=
-                            android.content.pm.PackageManager.PERMISSION_GRANTED &&
-                            !ActivityCompat.shouldShowRequestPermissionRationale(
-                                this@MainActivity, permission
-                            ) &&
-                            OffloadPermissionManager.hasAskedForPermission(this@MainActivity, permission)
-                    }
-                    if (permanentlyDenied) {
-                        OffloadPermissionManager.respondToAndroidPermission(
-                            OffloadPermissionManager.AndroidPermissionResult.DENIED
-                        )
-                    } else {
-                        for (p in req.permissions) {
-                            OffloadPermissionManager.markPermissionAsked(this@MainActivity, p)
-                        }
-                        permissionLauncher.launch(req.permissions.toTypedArray())
-                    }
-                }
-        }
-
         // Bridge: in-app "open settings" dialog. Used for already-denied
         // runtime permissions AND for special-access capabilities like
         // Notification Access.
         lifecycleScope.launch {
-            OffloadPermissionManager.pendingSettingsGate
-                .filterNotNull()
-                .collect { gate ->
+            OffloadPermissionManager.pendingSettingsGate.filterNotNull()
+                .collect { (gateId, gate) ->
                     AlertDialog.Builder(this@MainActivity)
                         .setTitle(gate.title)
                         .setMessage(gate.message)
@@ -403,14 +374,12 @@ class MainActivity : ComponentActivity() {
                                 // Fall through — the polling loop will time out.
                             }
                             OffloadPermissionManager.respondToSettingsGate(
-                                OffloadPermissionManager.SettingsGateDecision.OPEN
-                            )
+                                gateId, OffloadPermissionManager.SettingsGateDecision.OPEN)
                         }
                         .setNegativeButton(gate.negativeLabel) { d, _ ->
                             d.dismiss()
                             OffloadPermissionManager.respondToSettingsGate(
-                                OffloadPermissionManager.SettingsGateDecision.CANCEL
-                            )
+                                gateId, OffloadPermissionManager.SettingsGateDecision.CANCEL)
                         }
                         .show()
                 }
@@ -548,7 +517,7 @@ class MainActivity : ComponentActivity() {
             // normal content is — and let the user keep or delete the copy.
             var pendingDbReport by remember {
                 mutableStateOf(
-                    com.openminis.app.data.db.DatabaseHealthCheck.pendingReport(this@MainActivity)
+                    com.openminis.app.data.db.pendingQuarantineReport(this@MainActivity) // [T-db-gate-probe-unavailable] 只认「已隔离」类报告
                 )
             }
             pendingDbReport?.let { report ->
@@ -670,6 +639,11 @@ class MainActivity : ComponentActivity() {
         super.onSaveInstanceState(outState)
         currentChatSessionId?.let {
             outState.putString(KEY_CURRENT_CHAT_SESSION_ID, it)
+        }
+        // [T-android-prompt-launch-ledger] 配置变更会撤掉在屏的系统对话框，结果由系统补投给
+        // 新的回调 —— 带上在飞身份，账本核对金库后认领，这次应答才不会白丢。
+        permissionDialogBridge?.let {
+            outState.putLong(KEY_PERMISSION_IN_FLIGHT_ID, it.inFlightPromptId)
         }
     }
 

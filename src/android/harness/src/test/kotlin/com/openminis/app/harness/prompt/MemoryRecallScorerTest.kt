@@ -24,6 +24,22 @@ class MemoryRecallScorerTest {
     }
 
     @Test
+    fun `single char generic entries do not swallow two char queries`() {
+        // [T-b15-generic-substring] 「运行 / 执行 / 银行 / 不行」曾因含单字「行」被
+        // contains 整体判成泛化轮次 → 召回静默不触发；拉丁短词同理（"book" 含 "ok"）。
+        val candidates = listOf(Candidate("k", "运行 执行 银行 记录", "global", 0))
+        assertTrue(MemoryRecallScorer.effectiveQueryTerms("运行").isNotEmpty())
+        assertTrue(MemoryRecallScorer.selectRecall("运行一下", candidates).isNotEmpty())
+        assertTrue(MemoryRecallScorer.effectiveQueryTerms("book").isNotEmpty())
+        // 单字/整词泛化条目本身仍被抑制
+        assertTrue(MemoryRecallScorer.selectRecall("行", candidates).isEmpty())
+        assertTrue(MemoryRecallScorer.effectiveQueryTerms("嗯").isEmpty())
+        assertTrue(MemoryRecallScorer.effectiveQueryTerms("ok").isEmpty())
+        // 多字 CJK 短语保留「包含即命中」
+        assertTrue(MemoryRecallScorer.effectiveQueryTerms("继续吧").isEmpty())
+    }
+
+    @Test
     fun `cjk bigram lets word overlap hit while scattered chars do not`() {
         val tokens = MemoryRecallScorer.tokenize("调用链路分析")
         assertTrue(tokens.contains("调用"))

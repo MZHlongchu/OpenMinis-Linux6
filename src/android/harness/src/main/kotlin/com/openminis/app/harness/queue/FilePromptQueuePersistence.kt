@@ -1,5 +1,6 @@
 package com.openminis.app.harness.queue
 
+import com.openminis.app.harness.fs.SessionPath
 import java.io.File
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -26,22 +27,11 @@ class FilePromptQueuePersistence(private val root: File) : PromptQueuePersistenc
 
     private fun fileFor(sessionId: String): File {
         // 会话 id 可能含路径分隔符（lane 会话 id 形如 lane:<owner>:<name>），
-        // 也可能来自 deep link（不可信）。统一按 UTF-8 字节做百分号式转义：
+        // 也可能来自 deep link（不可信）。转义规则与单射性理由见 [SessionPath]：
         //   安全字符（字母数字与 . - ）原样；'_' → "__"；其余字节 → "_" + 两位 hex。
         // 转义 '_' 自身是单射性的关键——否则原始 id "_2f" 会与 '/' 的转义
         // 结果 "_2f" 撞同一个文件，两个会话共享一份队列（串味 + 误删）。
-        // 顺带把 '/' 挡在文件名之外，id 再怪也逃不出 root。
-        val safe = buildString(sessionId.length + 8) {
-            for (b in sessionId.toByteArray(Charsets.UTF_8)) {
-                val c = b.toInt().toChar()
-                when {
-                    c == '_' -> append("__")
-                    c.isLetterOrDigit() || c == '.' || c == '-' -> append(c)
-                    else -> append('_').append("%02x".format(b))
-                }
-            }
-        }
-        return File(root, "$safe.json")
+        return File(root, "${SessionPath.segment(sessionId)}.json")
     }
 
     /** root 下的全部会话文件（`.tmp` 兄弟文件被后缀天然过滤掉）。 */

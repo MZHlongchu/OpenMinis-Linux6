@@ -70,6 +70,34 @@ interface LLMProvider : ModelProvider {
     val callGateKey: String get() = ""
 
     /**
+     * [T-stream-watchdog-budget-parity / #188] Upper bound (ms) between "request
+     * sent" and the first chunk this provider can emit on its own streaming
+     * path — connect + request-body upload + time-to-first-byte, i.e. the
+     * pre-first-chunk budget the provider already enforces internally. 0 = the
+     * provider has no internal bound.
+     *
+     * It exists so the OUTER [streamStallWatchdog] can share the budget instead
+     * of pre-empting it: the agent loop used to arm phase 1 with a flat
+     * 45s/90s from subscription time, which fired first on every OpenAI path
+     * and made its internal 120s TTFB + 120s upload-cap pair unreachable — a
+     * slow-but-healthy relay (large multimodal upload on a slow proxy) was
+     * cancelled, from scratch, on every attempt.
+     */
+    val streamFirstChunkBudgetMs: Long get() = 0L
+
+    /**
+     * Phase-1 budget for the outer [streamStallWatchdog] on this provider's live
+     * stream: [baseMs] (the caller's 45s/90s) widened to
+     * [streamFirstChunkBudgetMs] when the provider declares one. Phase 2 is NOT
+     * derived from this — it must stay keyed on the caller's base so mid-stream
+     * stall detection is not slowed down by a generous connect budget.
+     */
+    fun streamFirstEventBudgetMs(baseMs: Long): Long {
+        val own = streamFirstChunkBudgetMs
+        return if (own <= 0L) baseMs else maxOf(baseMs, own + STREAM_FIRST_EVENT_SLACK_MS)
+    }
+
+    /**
      * [T-llm-error-401-model-scope] [callGateKey] minus its model segment: the
      * host + credential fingerprint alone. Lets an error mapper ask
      * [CredentialAcceptance] "was this credential accepted by this host?" even
@@ -293,6 +321,15 @@ interface LLMProvider : ModelProvider {
         return if (level.rank > ceiling.rank) ceiling else level
     }
 }
+
+/**
+ * [T-stream-watchdog-budget-parity] Margin added to a provider's own
+ * pre-first-chunk budget when deriving the outer watchdog's phase-1 window:
+ * the provider's watch starts after the request body is serialised and knows
+ * when the upload finished, so this keeps the more precise internal error
+ * (and its targeted connection eviction) the one that fires first.
+ */
+private const val STREAM_FIRST_EVENT_SLACK_MS = 15_000L
 
 /**
  * [T-android-empty-stream-retry] Detect a silently-truncated stream.

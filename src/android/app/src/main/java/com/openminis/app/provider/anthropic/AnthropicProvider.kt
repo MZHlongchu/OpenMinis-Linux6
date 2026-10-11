@@ -206,6 +206,9 @@ class AnthropicProvider(
         var currentToolName: String? = null
         val toolInputBuffer = StringBuilder()
         var lastSentToolInputLen = 0
+        // [T-anthropic-usage-merge] message_start 的 usage 留底：旧形状中转的
+        // message_delta 只带 output_tokens，合并时用它补齐 input/cache。
+        var streamUsage: LLMUsage? = null
 
         try {
             var line: String?
@@ -228,7 +231,9 @@ class AnthropicProvider(
                     "message_start" -> {
                         send(LLMStreamChunk.Started)
                         event.optJSONObject("message")?.optJSONObject("usage")?.let { usage ->
-                            send(LLMStreamChunk.Usage(parseUsage(usage)))
+                            val parsed = parseUsage(usage)
+                            streamUsage = parsed
+                            send(LLMStreamChunk.Usage(parsed))
                         }
                     }
                     "content_block_start" -> {
@@ -286,7 +291,13 @@ class AnthropicProvider(
                     }
                     "message_delta" -> {
                         event.optJSONObject("usage")?.let { usage ->
-                            send(LLMStreamChunk.Usage(parseUsage(usage)))
+                            // [T-anthropic-usage-merge] 合并而非覆盖：官方端点的
+                            // delta usage 是累计量（合并等价于原样发出），旧形状
+                            // 中转只带 output_tokens（缺 input/cache，合并后由
+                            // message_start 补齐）。消费侧 lastUsage 是整对象覆盖。
+                            val merged = mergeUsage(streamUsage, parseUsage(usage))
+                            streamUsage = merged
+                            send(LLMStreamChunk.Usage(merged))
                         }
                         val stopReason = event.optJSONObject("delta")
                             ?.safeOptString("stop_reason", "")?.ifEmpty { null }
@@ -1120,12 +1131,44 @@ class AnthropicProvider(
 
     private fun parseUsage(json: JSONObject): LLMUsage {
         val inputTokens = json.optInt("input_tokens", 0)
+        val cacheCreationInputTokens = json.optInt("cache_creation_input_tokens").takeIf { it > 0 }
+        val cacheReadInputTokens = json.optInt("cache_read_input_tokens").takeIf { it > 0 }
         return LLMUsage(
             inputTokens = inputTokens,
             outputTokens = json.optInt("output_tokens", 0),
-            cacheCreationInputTokens = json.optInt("cache_creation_input_tokens").takeIf { it > 0 },
-            cacheReadInputTokens = json.optInt("cache_read_input_tokens").takeIf { it > 0 },
-            latestContextTokens = inputTokens,
+            cacheCreationInputTokens = cacheCreationInputTokens,
+            cacheReadInputTokens = cacheReadInputTokens,
+            // [T-anthropic-cache-context] 官方语义里 input_tokens 是 fresh-only
+            // （最后一个 cache breakpoint 之后的增量），被缓存的前缀单独计在
+            // cache_read/cache_creation 里。而本类无条件打 cache 断点（system
+            // 稳定段 / 最后一个 tool / 最后两条 user），所以第二轮起
+            // latestContextTokens = inputTokens 会系统性低估真实上下文——system
+            // prompt 与 tools schema 恰好都在被缓存的那块里，且
+            // estimateAgentHistoryTokens() 不覆盖这两项，无兜底。上下文压力
+            // 提示（contextTokensForPolicy）与 dynamicMaxTokens 的 remaining
+            // 因此双双偏松。inputTokens 保持 fresh-only（SubAgentRunner 的共享
+            // 预算按这个口径注释），只把 context 口径补回缓存部分。
+            latestContextTokens = inputTokens + (cacheReadInputTokens ?: 0) + (cacheCreationInputTokens ?: 0),
+        )
+    }
+
+    /**
+     * [T-anthropic-usage-merge] 合并 message_start 与 message_delta 两次 usage。
+     *
+     * 官方端点的 message_delta usage 是**累计量**（含 input/cache），此时合并是
+     * 恒等操作。但本 app 支持 customBaseURL 中转，部分 Anthropic 兼容端点沿用旧
+     * 形状（message_delta 只带 output_tokens）；消费侧是纯字段覆盖赋值
+     * （ChatViewModelAgentLoopExt `lastUsage = chunk.usage`），旧代码直接
+     * `send(parseUsage(delta))` 会把 input/cache 清零。按"非零字段补齐"合并后两种
+     * 形状都得到完整口径，官方端点行为不变。
+     */
+    private fun mergeUsage(base: LLMUsage?, delta: LLMUsage): LLMUsage {
+        if (base == null) return delta
+        return delta.copy(
+            inputTokens = if (delta.inputTokens > 0) delta.inputTokens else base.inputTokens,
+            cacheCreationInputTokens = delta.cacheCreationInputTokens ?: base.cacheCreationInputTokens,
+            cacheReadInputTokens = delta.cacheReadInputTokens ?: base.cacheReadInputTokens,
+            latestContextTokens = if (delta.latestContextTokens > 0) delta.latestContextTokens else base.latestContextTokens,
         )
     }
 

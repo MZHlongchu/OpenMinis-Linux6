@@ -564,9 +564,11 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     ?.enhancedCache = _enhancedCacheEnabled.value
                 try {
                 // Route through effectiveAgentHistory() so a populated
-                // [_compactSummary] is prepended as a `<context-summary>`
-                // user message. Falls through to the raw agentHistory when
-                // no compact has happened, so the common path stays zero-copy.
+                // [_compactSummary] is injected as a `<context-summary>` part
+                // on the first surviving user turn (v1/detached markers use a
+                // standalone user message instead). Falls through to the raw
+                // agentHistory when no compact has happened, so the common path
+                // stays zero-copy.
                 val requestGoalState = if (goalRunRequested) {
                     withContext(Dispatchers.IO) { goalManager.get(goalSessionId) }
                 } else null
@@ -601,14 +603,24 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // [T-first-event-watchdog] A hung relay below the provider
                 // never throws — the stream below will cancel itself and surface
                 // a TransientError, letting the existing retry chain take over.
-                val firstEventTimeoutMs = if ((if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF).isEnabled) 90_000L else 45_000L
+                val baseFirstEventTimeoutMs = if ((if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF).isEnabled) 90_000L else 45_000L
+                // [T-stream-watchdog-budget-parity / #188] Phase 1 shares the
+                // provider's own pre-first-chunk budget when it declares one
+                // (OpenAI: 120s upload cap + 120s TTFB). The flat 45s/90s window
+                // used to fire first on every OpenAI path, so the provider's
+                // internal 120s TTFB — raised for slow relays — and its separate
+                // upload budget could never take effect.
+                val firstEventTimeoutMs = currentProvider.streamFirstEventBudgetMs(baseFirstEventTimeoutMs)
                 // [T-stream-stall-watchdog] Phase 2: once the stream is alive,
                 // silence longer than twice the first-event budget means
                 // progress stopped, not that it is slow to start. Derived from
                 // the existing constant so there is no second number to tune
                 // per vendor, and it replaces a 600s transport read timeout as
-                // the only bound on a mid-stream stall.
-                val streamIdleTimeoutMs = firstEventTimeoutMs * 2
+                // the only bound on a mid-stream stall. Deliberately keyed on the
+                // BASE budget, not on the provider-widened phase 1: after the
+                // first chunk the connect budget is irrelevant and a stall must
+                // keep surfacing at 90s/180s.
+                val streamIdleTimeoutMs = baseFirstEventTimeoutMs * 2
                 // [T-android-seam-extraction] 片段三：流入口走接缝一（ProviderStreamClient）
                 // ——循环体自此不直接攥 provider 对象；请求形状搬运即适配。
                 com.openminis.app.provider.LlmProviderStreamClient(currentProvider).streamRound(
@@ -1713,25 +1725,94 @@ internal suspend fun ChatViewModel.runAgentLoop(
         // continue 进新轮，排队消息在本轮 API 调用就到达模型（10 分钟的构建
         // 命令不再吞掉排队延迟）。注入失败（异常/空内容）不堆 [interrupted]：
         // 队列保留，本回合照常执行工具，回合末尾边界与 loop 末尾 drain 会重试。
+        //
+        // [T-queue-inject-atomic] 「失败」只可能是提交点之前的失败：注入函数把
+        // 钩子（先构造后落库）当成最后一次可失败的操作，之后的构造/落库/UI 收尾
+        // 全部在内部吸收并显式记录。所以这里的 catch 分支 = 一行未落、内存状态
+        // 未动，跑真工具是安全的；反之若提交点之后还上抛，就会再落一条
+        // assistant + 真 tool_result（本回归的重复源）。
         // [T-queue-shelved] 搁置消息不参与自动注入——只有 pending 态才触发。
         if (_promptQueue.value.any { !it.shelved }) {
             AppLogger.info(
                 ChatViewModel.TAG_STREAM,
                 "📨[QueueInterrupt] turn=$turn pre-dispatch: ${_promptQueue.value.size} queued prompt(s) — interrupting before tool execution",
             )
+            // [T-queue-pre-dispatch-persist] interrupted 结果先只构造纯数据：注入
+            // 失败时本回合仍要真跑工具，不能提前把块标成 FAILED 或写进 resultParts。
+            val interruptedMsg = "[interrupted] Not executed — the user sent a new message while this call was pending. Handle the user's message first; re-issue this call afterwards if it is still needed."
+            val interruptedParts = toolCalls.map { (id, name, _) ->
+                AgentContentPart.ToolResult(
+                    id = id, name = name,
+                    content = interruptedMsg,
+                    isError = true,
+                )
+            }
             val handled = try {
                 injectQueuedPromptsAsNewTurn(
                     finishedAssistantId = assistantId,
                     finishedAccumulatedText = accumulatedText,
                     finishedAllToolBlocks = allToolBlocks,
+                    // [T-queue-pre-dispatch-persist] 注入成立后的落库（与下方
+                    // post-result 边界的正常路径同形）：先落 assistant 轮——旧代码走
+                    // 短路分支时整轮漏落，DB 里只剩一条孤儿 tool_result；再落
+                    // interrupted 的 tool_result 行。两行都在 inject 追加
+                    // bridge/queued user 之前写完，wire 与 DB 同时恢复成
+                    // assistant(tool_use) → user(toolResult) → assistant(bridge) → user(queued)。
+                    commitPendingToolResult = {
+                        // [T-queue-inject-atomic] 先构造后落库：TurnParts / blockMeta 都是
+                        // 纯计算，排在第一次写之前。写之前的任何抛出都等价于「一行未落」，
+                        // 注入函数据此才敢把控制权交回真工具路径（零副作用）。
+                        val commitRun = checkNotNull(activeRun) { "Agent loop has no persistence owner" }
+                        val turnParts = buildTurnParts(allToolBlocks, turnStartBlockIndex, toolInputMap)
+                        val blockMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
+                        val assistantDbId = persistAssistantTurnForRun(
+                            commitRun, turnParts, lastUsage, turnReasoningContent, blockMeta, accumulatedText,
+                        )
+                        // 与 post-result 路径同理：回填 agentHistory 尾条 assistant 的
+                        // DB id，compact 标记边界解析依赖它。
+                        if (assistantDbId != null) {
+                            val lastIdx = agentHistory.indexOfLast { it.role == LLMMessage.Role.ASSISTANT && it.dbMessageId == null }
+                            if (lastIdx >= 0) {
+                                agentHistory[lastIdx] = agentHistory[lastIdx].copy(dbMessageId = assistantDbId)
+                            }
+                        }
+                        // [T-queue-inject-atomic] tool_result 行落库失败**不再上抛**：此刻
+                        // assistant 行已在库，上抛会被注入函数当成「提交点之前失败」，把
+                        // 控制权交回真工具路径 → post-result 再落一条 assistant + 真
+                        // tool_result（重复/不一致）。改为显式记录，并让 interrupted 结果
+                        // 照常进 wire：重载时这条孤儿 tool_use 由既有 orphan 修复补占位，
+                        // 是仓库本来就自愈的形态。
+                        val toolResultDbId: String? = try {
+                            persistToolResultMessageForRun(
+                                commitRun,
+                                interruptedParts,
+                                uiMessageId = assistantId,
+                            )
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            AppLogger.error(
+                                ChatViewModel.TAG_STREAM,
+                                "pre-dispatch interrupted tool_result 落库失败（assistant 行已在库，不再上抛以免重复落库）: ${e.message}",
+                            )
+                            null
+                        }
+                        ToolRoundOutcome.toolResultMessage(interruptedParts, toolResultDbId)
+                    },
                 )
+            } catch (e: CancellationException) {
+                // [T-queue-inject-atomic] 取消不是「注入失败」：吞掉它会让真工具在已取消
+                // 的协程里被启动（直到下一处 ensureActive 才炸），也让调用方对「库里已
+                // 提交的行」的认知分叉。原样上抛，交给 run/loop 的取消路径。
+                throw e
             } catch (e: Exception) {
+                // 走到这里只可能是「提交点之前」的失败（构造阶段或钩子先构造后落库的
+                // 第一步）：一行未落、内存状态未动，真工具照跑是安全的。
                 Log.e(ChatViewModel.TAG, "pre-dispatch injectQueuedPromptsAsNewTurn failed", e)
                 null
             }
             if (handled != null) {
-                for ((id, name, _) in toolCalls) {
-                    val interruptedMsg = "[interrupted] Not executed — the user sent a new message while this call was pending. Handle the user's message first; re-issue this call afterwards if it is still needed."
+                for ((id, _, _) in toolCalls) {
                     val blockIdx = allToolBlocks.indexOfFirst { it.id == id }
                     if (blockIdx >= 0) {
                         val elapsed = System.currentTimeMillis() - allToolBlocks[blockIdx].startTimeMs
@@ -1743,23 +1824,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     }
                     uiEventSink(allToolBlocks, assistantId, accumulatedText)
                         .onToolCallRejected(id, "Interrupted by a new user message")
-                    resultParts.add(AgentContentPart.ToolResult(
-                        id = id, name = name,
-                        content = interruptedMsg,
-                        isError = true,
-                    ))
                     toolInputChunkRings.remove(id)
                 }
-                // [T-queue-pre-dispatch-inject] 结果落库 + continue：排队消息
-                // 已经在本轮请求之前的 agentHistory 里（inject 追加），这里把
-                // interrupted 配对补上并立即进入新轮（跳过 post-result 边界的
-                // 重复注入——队列已被清空，边界检查自然跳过）。
-                val toolResultDbId = persistToolResultMessageForRun(
-                    checkNotNull(activeRun) { "Agent loop has no persistence owner" },
-                    resultParts,
-                    uiMessageId = assistantId,
-                )
-                conversationPort().append(ToolRoundOutcome.toolResultMessage(resultParts, toolResultDbId))
+                // [T-queue-pre-dispatch-inject] continue：assistant 轮与 interrupted
+                // 结果已在 commitPendingToolResult 钩子里按序落库（见上），这里只切换
+                // 到新轮——跳过 post-result 边界的重复注入（队列已被清空，边界检查
+                // 自然跳过）。
                 assistantId = handled.newAssistantId
                 accumulatedText = ""
                 allToolBlocks.clear()
@@ -1799,6 +1869,11 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 name, args, toolInputChunkRings[id]?.lastOrNull(), agentTools,
             )
             if (repairs.isNotEmpty()) {
+                // [T-b1-tooluse-json-length] 这轮 assistant 的 ToolUse 部件早在
+                // 回合边界就构造过（inputJsonLength 是构造期快照），而 repair 是
+                // 就地改 args：不重封一次，保留窗口的字节记账会少算这次修复新增的
+                // 体积。重封后的部件与 provider 实际序列化的 args 一致。
+                resealToolInputInHistory(id, args)
                 AppLogger.warning(
                     "ToolPreflight",
                     "[ToolRepair] REPAIRED tool=$name id=$id strategies=[${repairs.joinToString(", ")}] " +
@@ -2178,6 +2253,10 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     finishedAccumulatedText = accumulatedText,
                     finishedAllToolBlocks = allToolBlocks,
                 )
+            } catch (e: CancellationException) {
+                // [T-queue-inject-atomic] 与 pre-dispatch 点同一条纪律：取消不是
+                // 「注入失败」，吞掉它会让循环带着已取消的协程继续跑一轮。
+                throw e
             } catch (e: Exception) {
                 Log.e(ChatViewModel.TAG, "injectQueuedPromptsAsNewTurn failed", e)
                 null

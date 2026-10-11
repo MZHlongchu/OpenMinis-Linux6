@@ -1,7 +1,6 @@
 package com.openminis.app.data.db
 
 import android.content.Context
-import android.database.sqlite.SQLiteDatabase
 import com.openminis.app.logging.AppLogger
 import java.io.File
 import java.io.FileOutputStream
@@ -68,6 +67,9 @@ object DatabaseHealthCheck {
     const val KIND_ROLLBACK_FAILED = "database_quarantine_rollback_failed"
     const val KIND_INCOMPLETE = "database_quarantine_incomplete"
 
+    /** [T-db-gate-probe-unavailable] 探针判不出来（不是损坏）时的诊断 kind；库没被搬走。 */
+    const val KIND_UNAVAILABLE = "database_probe_unavailable"
+
     /** Sidecar files SQLite may keep next to the main database file. */
     private val SIDECARS = listOf("-wal", "-shm", "-journal")
 
@@ -115,6 +117,14 @@ object DatabaseHealthCheck {
         data class QuarantineFailed(val reason: String) : Outcome()
 
         /**
+         * [T-db-gate-probe-unavailable] The probe could not DECIDE (see
+         * [IntegrityProbeResult.Unavailable]): opening the database failed for a
+         * reason that does not prove corruption. Deliberately not a quarantine —
+         * the bytes stay where they are and Room opens the file as usual.
+         */
+        data class Unavailable(val reason: String) : Outcome()
+
+        /**
          * An EARLIER launch left the database half-quarantined: the main file
          * is missing from its normal path, but a copy survives inside
          * [quarantineDirName].
@@ -130,40 +140,6 @@ object DatabaseHealthCheck {
             val quarantineDirName: String,
             val reason: String,
         ) : Outcome()
-    }
-
-    /** Runs `PRAGMA quick_check`. Returns null when healthy, detail otherwise. */
-    fun interface IntegrityChecker {
-        /** @return null when the file passes; a short detail string otherwise. */
-        fun quickCheck(dbFile: File): String?
-    }
-
-    /** Production checker backed by the platform SQLite. */
-    class AndroidIntegrityChecker : IntegrityChecker {
-        override fun quickCheck(dbFile: File): String? {
-            var db: SQLiteDatabase? = null
-            return try {
-                db = SQLiteDatabase.openDatabase(
-                    dbFile.absolutePath, null,
-                    SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
-                )
-                val rows = mutableListOf<String>()
-                db.rawQuery("PRAGMA quick_check", null)?.use { c ->
-                    while (c.moveToNext() && rows.size < 8) {
-                        rows.add(c.getString(0) ?: "")
-                    }
-                }
-                if (rows.isEmpty() || rows.all { it.equals("ok", ignoreCase = true) }) {
-                    null
-                } else {
-                    rows.joinToString("; ").take(500)
-                }
-            } catch (e: Exception) {
-                "open/quick_check threw ${e.javaClass.simpleName}: ${e.message}".take(500)
-            } finally {
-                runCatching { db?.close() }
-            }
-        }
     }
 
     // -- Thin Context adapters --------------------------------------------
@@ -217,9 +193,21 @@ object DatabaseHealthCheck {
             return recoverOrphanedQuarantine(dbFile, filesDir, nowMs) ?: Outcome.FreshInstall
         }
 
-        val detail = runCatching { checker.quickCheck(dbFile) }
-            .getOrElse { "checker crashed: ${it.javaClass.simpleName}" }
-        if (detail == null) return Outcome.Healthy
+        // [T-db-gate-probe-unavailable] 三态判定（详见 DatabaseIntegrityProbe）：只有
+        // 「真的查出损坏」才隔离。打不开库（WAL 待 recovery、IO/权限抖动、探针自身
+        // 抛错）不等于损坏，把这种库整体 rename 走会让用户在健康数据上开机进空库。
+        val check = runCatching { checker.probe(dbFile) }
+            .getOrElse { IntegrityProbeResult.Unavailable("checker crashed: ${it.javaClass.simpleName}") }
+        val detail = when (check) {
+            is IntegrityProbeResult.Ok -> return Outcome.Healthy
+            is IntegrityProbeResult.Unavailable -> {
+                AppLogger.error(TAG, "[T-db-gate] integrity probe UNAVAILABLE for ${dbFile.name}: " +
+                    "${check.reason} - opening as-is, NOT quarantining")
+                reportUnavailableProbe(filesDir, dbFile.name, check.reason, nowMs)
+                return Outcome.Unavailable(check.reason)
+            }
+            is IntegrityProbeResult.Corrupt -> check.detail
+        }
 
         AppLogger.error(TAG, "[T-db-gate] quick_check FAILED for ${dbFile.name}: $detail")
         val stamp = SimpleDateFormat(STAMP_PATTERN, Locale.US).format(Date(nowMs))

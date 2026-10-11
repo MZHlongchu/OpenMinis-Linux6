@@ -71,6 +71,58 @@ object ImageBudget {
         640 to 45,
     )
 
+    // ─── [T-imgsize-recompress-cache] 压缩结果缓存 ───────────────────────────
+
+    /**
+     * 每个 agent iteration 都会用同一批历史图片重新构造请求体，而
+     * [compressUnderBudget] 之前没有任何记忆化：一张超过 5MB 的历史图（恢复会话读到
+     * 的是原始全尺寸字节、超大 PNG 工具结果）在每个请求里都要重跑两趟解码 + 缩放 +
+     * JPEG 编码。这里按"内容哈希 + 目标字节数"缓存结果，命中即返回同一 ByteArray，
+     * 跨 iteration / 跨并发子代理复用。
+     *
+     * 边界：
+     *  - 只缓存**重编码成功**的结果（返回值与输入不是同一实例）——provider 侧用
+     *    `safeBytes === part.data` 判断"是否被重编码"来决定 media_type，把原实例
+     *    缓存后回给另一个等值输入会让该判断失真（PNG 被标成 image/jpeg）。
+     *  - 有界：按条目数 + 总字节双上限做 LRU，最坏常驻 12MB。
+     */
+    private const val COMPRESS_CACHE_MAX_ENTRIES = 8
+    private const val COMPRESS_CACHE_MAX_BYTES = 12L * 1024 * 1024
+
+    /** accessOrder=true → 迭代顺序即 LRU 顺序（最久未用在前）。 */
+    private val compressCache = LinkedHashMap<String, ByteArray>(16, 0.75f, true)
+    private var compressCacheBytes = 0L
+
+    private fun compressCacheGet(key: String): ByteArray? = synchronized(compressCache) {
+        compressCache[key]
+    }
+
+    private fun compressCachePut(key: String, value: ByteArray) {
+        synchronized(compressCache) {
+            if (compressCache.containsKey(key)) return
+            compressCache[key] = value
+            compressCacheBytes += value.size.toLong()
+            val it = compressCache.entries.iterator()
+            while (it.hasNext() &&
+                (compressCache.size > COMPRESS_CACHE_MAX_ENTRIES ||
+                    compressCacheBytes > COMPRESS_CACHE_MAX_BYTES)
+            ) {
+                val eldest = it.next()
+                it.remove()
+                compressCacheBytes -= eldest.value.size.toLong()
+            }
+        }
+    }
+
+    /** null = 无法计算哈希（平台异常）→ 本次不参与缓存。 */
+    private fun compressCacheKey(input: ByteArray, targetMaxBytes: Long): String? = try {
+        val digest = java.security.MessageDigest.getInstance("SHA-1")
+        digest.update(input)
+        digest.digest().joinToString("") { "%02x".format(it) } + "|" + targetMaxBytes
+    } catch (_: Exception) {
+        null
+    }
+
     /**
      * Re-encode [input] to a JPEG with max longest edge [maxEdge] at JPEG
      * quality [q]. Returns the original bytes on decode/encode failure
@@ -127,6 +179,10 @@ object ImageBudget {
      */
     fun compressUnderBudget(input: ByteArray, targetMaxBytes: Long = MAX_PER_IMAGE_BYTES): ByteArray {
         if (input.size <= targetMaxBytes) return input
+        // [T-imgsize-recompress-cache] 同一张历史图在每个 iteration 都被重编码，
+        // 按内容哈希命中上一轮的结果。
+        val cacheKey = compressCacheKey(input, targetMaxBytes)
+        if (cacheKey != null) compressCacheGet(cacheKey)?.let { return it }
         var best: ByteArray = input
         var bestSize = input.size
         for ((edge, q) in LADDER) {
@@ -137,10 +193,13 @@ object ImageBudget {
             }
             if (candidate.size.toLong() <= targetMaxBytes) {
                 AppLogger.info(TAG, "compressUnderBudget hit: ${input.size}B → ${candidate.size}B (edge=$edge q=$q)")
+                if (cacheKey != null) compressCachePut(cacheKey, candidate)
                 return candidate
             }
         }
         AppLogger.warning(TAG, "compressUnderBudget exhausted ladder: ${input.size}B → ${best.size}B (target=${targetMaxBytes}B)")
+        // 压缩失败（compressBytes 原样返回）时不入缓存，保持 `===` 语义。
+        if (cacheKey != null && best !== input) compressCachePut(cacheKey, best)
         return best
     }
 

@@ -19,7 +19,26 @@ sealed class AgentContentPart {
         // functionCall part (required by gemini-3.x or the request 400s). Null
         // for non-Gemini providers and for pre-fix / migrated history.
         val thoughtSignature: String? = null,
-    ) : AgentContentPart()
+    ) : AgentContentPart() {
+        /**
+         * [T-b1-tooluse-json-length] Length of `input.toString()`, computed once
+         * at construction instead of on every byte-budget check.
+         *
+         * `ResidentWindow.bytesOf` used to serialize every tool_use input on
+         * every call, and `appendBoundedHistory` runs a budget trim on every
+         * appended message over a history capped at 4000 entries — so a long
+         * session re-serialized megabytes of JSON per append (and per candidate
+         * cut in `byteCut`).
+         *
+         * This is a snapshot of the JSON at construction time. Rewrites that go
+         * through `copy(input = …)` re-run this initializer and are therefore
+         * free; a caller that mutates the [JSONObject] IN PLACE must re-seal the
+         * part afterwards (see `ChatViewModel.resealToolInputInHistory`, used by
+         * the `ToolJsonRepair` path). Declared in the body, not the parameter
+         * list, so data-class equality/`toString` are unchanged.
+         */
+        val inputJsonLength: Int = input.toString().length
+    }
 
     data class ToolResult(
         val id: String,

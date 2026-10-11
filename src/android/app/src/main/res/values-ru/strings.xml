@@ -72,6 +72,7 @@
     <string name="resume_action">Продолжить</string>
     <string name="search_chats_placeholder">Поиск по чатам…</string>
     <string name="search_no_results">Нет результатов по запросу \"%1$s\"</string>
+    <string name="search_truncated_notice">Показаны только %1$d последних совпадений — уточните запрос, чтобы увидеть больше.</string>
     <string name="stop_tool">Остановить инструмент</string>
     <string name="mic_permission_title">Требуется разрешение на микрофон</string>
     <string name="mic_permission_message">Для голосового ввода нужно разрешение на микрофон. Нажмите «Открыть настройки», чтобы разрешить его для Minis Ultra.</string>

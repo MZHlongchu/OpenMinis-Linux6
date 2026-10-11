@@ -27,7 +27,7 @@ import org.junit.Test
  * Adapted from taixu OperationCoordinatorTest (GPL-3.0-or-later).
  * https://github.com/wkbin/taixu
  *
- * 与上游的差异：fake 只实现收窄后的 [OperationRuntimeRepository]（11 个方法），
+ * 与上游的差异：fake 只实现收窄后的 [OperationRuntimeRepository]（12 个方法），
  * 队列道具由 fake 自己持有（`seedQueueItem` / `queueItems`）——上游把队列操作
  * 也塞在同一个 god 接口里，我方队列已有独立的 PromptQueuePersistence 接缝，
  * 不在这里复刻。事件收集用 runBlocking 内的 Unconfined launch 替代 GlobalScope
@@ -230,6 +230,28 @@ class OperationCoordinatorTest {
         }
     }
 
+    // ─── [T-b18-op-lookup-session-domain] 会话域查找接线 ──────────────────
+
+    @Test
+    fun `transitions with a sessionId read the session domain, without it fall back`() = runBlocking {
+        val operationId = coordinator.acceptRun("s20", userMessage("hi"))
+
+        repository.sessionScopedLookups = 0
+        coordinator.providerIntent(operationId, "entry-1", 0, 1, 1, sessionId = "s20")
+        assertTrue(
+            "带 sessionId 的转移必须走会话域查询（单文件读），实际命中 ${repository.sessionScopedLookups} 次",
+            repository.sessionScopedLookups > 0,
+        )
+
+        repository.sessionScopedLookups = 0
+        coordinator.providerIntent(operationId, "entry-2", 1, 1, 1)
+        assertEquals(
+            "不带 sessionId 时保持跨会话扫描的老语义",
+            0,
+            repository.sessionScopedLookups,
+        )
+    }
+
     /** 全内存 fake：只实现 coordinator 依赖的事务语义，其余为简单存取。 */
     private class FakeOperationRepository : OperationRuntimeRepository {
         val lanes = LinkedHashMap<Pair<String, String>, HarnessLaneEntity>()
@@ -239,6 +261,9 @@ class OperationCoordinatorTest {
 
         /** [T-p1-6-finish-begin-race] 非空时 finishOperation 在其上挂起，制造收尾半途窗口。 */
         var finishGate: CompletableDeferred<Unit>? = null
+
+        /** [T-b18-op-lookup-session-domain] 会话域查询命中次数（测试用于钉住接线）。 */
+        var sessionScopedLookups = 0
 
         private val entryList = mutableListOf<HarnessEntryEntity>()
         private val usageList = mutableListOf<HarnessUsageEntity>()
@@ -267,6 +292,12 @@ class OperationCoordinatorTest {
         }
 
         override suspend fun findOperation(operationId: String) = operations[operationId]
+
+        /** [T-b18-op-lookup-session-domain] 会话域查询：只认本会话的行（内存 fake 里同义）。 */
+        override suspend fun findOperation(sessionId: String, operationId: String): HarnessOperationEntity? {
+            sessionScopedLookups++
+            return operations[operationId]?.takeIf { it.sessionId == sessionId }
+        }
 
         override suspend fun listActiveOperations(sessionId: String) = operations.values.filter {
             it.sessionId == sessionId && it.status in ACTIVE_STATUSES

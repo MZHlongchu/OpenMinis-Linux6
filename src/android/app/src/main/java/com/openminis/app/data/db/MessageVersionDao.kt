@@ -28,4 +28,16 @@ interface MessageVersionDao {
 
     @Query("DELETE FROM message_versions WHERE session_id = :sessionId")
     suspend fun deleteForSession(sessionId: String)
+
+    /**
+     * [T-bodies-gc] 归档版本同样引用正文文件（见 MessageVersionEntity 的 bodyRef
+     * 说明）：回收对账必须把版本表算进去，否则删掉一个会话会把另一处仍被归档
+     * 引用的正文文件删掉。
+     */
+    @Query("SELECT DISTINCT body_ref FROM message_versions WHERE session_id = :sessionId AND body_ref IS NOT NULL")
+    suspend fun bodyRefsForSession(sessionId: String): List<String>
+
+    /** [T-bodies-gc] 全库仍被归档版本引用的正文 ref（回收对账用）。 */
+    @Query("SELECT DISTINCT body_ref FROM message_versions WHERE body_ref IS NOT NULL")
+    suspend fun allBodyRefs(): List<String>
 }

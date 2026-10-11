@@ -1,11 +1,22 @@
 package com.openminis.app.tools
 
+import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 class ToolOutputPolicyTest {
 
+    @get:Rule
+    val tmp = TemporaryFolder()
+
     private val sensitive = listOf("sk-Ab12Cd34Ef56Gh78")
+
+    /** [T-tool-output-host-dir] 溢出目录改为宿主目录后，测试用真实目录钉住落盘。 */
+    private fun hostWorkspace(): File = tmp.newFolder("workspace")
 
     @Test
     fun plainTextReplace() {
@@ -60,15 +71,16 @@ class ToolOutputPolicyTest {
     @Test
     fun belowThresholdNoSpill() {
         val text = "a".repeat(11_999)
-        val out = ToolOutputPolicy.apply(text, "test1")
+        val out = ToolOutputPolicy.apply(text, "test1") { hostWorkspace() }
         assertEquals(11_999, out.length)
         assertEquals(text, out)
     }
 
     @Test
     fun overThresholdIncludesHeadTailAndMarker() {
+        val workspace = hostWorkspace()
         val text = "a".repeat(25_000)
-        val out = ToolOutputPolicy.apply(text, "test2")
+        val out = ToolOutputPolicy.apply(text, "test2") { workspace }
         // Should contain head (2000 chars)
         assert(out.startsWith("a".repeat(2000))) { "Should start with head" }
         // Should contain tail (last 2000 chars)
@@ -80,24 +92,43 @@ class ToolOutputPolicyTest {
         // Verify info in message about omitted chars
         val omitted = 25_000 - 2000 - 2000
         assert(out.contains("已省略中间 $omitted 字符")) { "Should show omitted char count" }
+        // [T-tool-output-host-dir] 落盘断言不再条件化：宿主目录存在就必须写成功，
+        // 并给回模型 guest 形式的绝对路径。
+        val file = File(workspace, "tool_outputs/test2.txt")
+        assertTrue("溢出文件必须落在宿主工作区: ${file.absolutePath}", file.isFile)
+        assertEquals(text, file.readText())
+        assertTrue("回给模型的必须是 guest 形式路径: $out", out.contains("/var/minis/workspace/tool_outputs/test2.txt"))
+    }
+
+    /**
+     * [T-tool-output-host-dir] 落盘失败时不得退回原文——旧实现在真机上就是这么做的
+     * （guest 路径写不进去），12 000 上限整条失效且无任何标注。
+     */
+    @Test
+    fun spillWriteFailureStillCapsAndLabels() {
+        val text = "a".repeat(25_000)
+        val out = ToolOutputPolicy.apply(text, "no-dir") { null }
+        assertTrue("上限必须恒定生效，实际 ${out.length}", out.length < ToolOutputPolicy.TOOL_OUTPUT_CHAR_LIMIT)
+        assertTrue("必须显式标注落盘失败: $out", out.contains("spill failed"))
+        assertTrue(out.contains(ToolOutputPolicy.OMISSION_MARKER))
+        assertFalse("不得原样返回全文", out.contains("a".repeat(20_000)))
     }
 
     @Test
     fun emojiBoundarySafe() {
         // Test with emojis that could be split if we use char-indexing incorrectly
+        val workspace = hostWorkspace()
         val emoji = "\uD83D\uDE00" // 😀 surrogate pair
         val text = (emoji + "prefix_").repeat(5000) + "suffix_" + (emoji + "end_").repeat(5000)
-        val out = ToolOutputPolicy.apply(text, "emoji-test")
+        val out = ToolOutputPolicy.apply(text, "emoji-test") { workspace }
         // Ensure we don't have orphaned surrogate halves in the preview.
         assert(!hasOrphanSurrogate(out)) { "Should not contain orphaned surrogate halves" }
         // Verify the spill file holds the complete text.
-        val file = java.io.File(ToolOutputPolicy.workspaceRoot, "tool_outputs/emoji-test.txt")
-        if (file.exists()) {
-            val content = file.readText()
-            assert(!hasOrphanSurrogate(content)) { "Spill should not have orphaned surrogates" }
-            assert(content.length == text.length) { "Spill should contain the full text" }
-            file.delete()
-        }
+        val file = File(workspace, "tool_outputs/emoji-test.txt")
+        assertTrue("溢出文件必须存在: ${file.absolutePath}", file.isFile)
+        val content = file.readText()
+        assert(!hasOrphanSurrogate(content)) { "Spill should not have orphaned surrogates" }
+        assert(content.length == text.length) { "Spill should contain the full text" }
     }
 
     private fun hasOrphanSurrogate(s: String): Boolean {
@@ -132,18 +163,17 @@ class ToolOutputPolicyTest {
         assert(!redacted.contains("sk-Ab12Cd34Ef56Gh78")) { "Should not contain original key" }
         
         // Now test apply with a simple text that triggers spill
+        val workspace = hostWorkspace()
         val spillText = "a".repeat(25_000)
-        val out = ToolOutputPolicy.apply(spillText, "spill-complete-test")
+        ToolOutputPolicy.apply(spillText, "spill-complete-test") { workspace }
         
-        // Check spill file exists
-        val file = java.io.File(ToolOutputPolicy.workspaceRoot, "tool_outputs/spill-complete-test.txt")
-        if (file.exists()) {
-            val content = file.readText()
-            // File should have full content (all 'a's in this case since no env var redaction)
-            assert(content.length == spillText.length) { "Spill should be complete redacted content" }
-            assert(content == spillText) { "Spill content should match" }
-            file.delete()
-        }
+        // Check spill file exists — 断言不再条件化，写失败就是缺陷
+        val file = File(workspace, "tool_outputs/spill-complete-test.txt")
+        assertTrue("溢出文件必须存在: ${file.absolutePath}", file.isFile)
+        val content = file.readText()
+        // File should have full content (all 'a's in this case since no env var redaction)
+        assert(content.length == spillText.length) { "Spill should be complete redacted content" }
+        assert(content == spillText) { "Spill content should match" }
     }
 
     @Test

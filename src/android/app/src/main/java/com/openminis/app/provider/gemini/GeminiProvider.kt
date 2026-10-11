@@ -519,9 +519,30 @@ class GeminiProvider(
 
     private fun extractUsage(json: JSONObject): LLMUsage? {
         val usage = json.optJSONObject("usageMetadata") ?: return null
+        // [T-gemini-usage-thoughts] 思考型模型（2.5/3.x，档位经
+        // buildThinkingConfig 真的下发）把思考 token 单独记在
+        // thoughtsTokenCount 里，candidatesTokenCount 只是可见输出。旧写法漏读
+        // 该项 → 输出用量被系统性低估，下游 noteRunUsage / goalManager
+        // .recordUsage / SubAgentRunner 的共享预算（注释明确是硬停）都按 output
+        // 计账，少算会让硬停偏晚。cachedContentTokenCount 是隐式缓存命中量，
+        // 补进 cacheReadInputTokens 让缓存命中率统计有数。
+        val cachedContentTokens = usage.optInt("cachedContentTokenCount", 0).takeIf { it > 0 }
+        val promptTokens = usage.optInt("promptTokenCount", 0)
+        // [T-b15-usage-fresh-input] inputTokens 必须是 fresh-only：Gemini 的
+        // promptTokenCount 是**完整**输入（官方语义已含 cachedContentTokenCount
+        // 那部分），直接写回会让下游按「fresh + cache 不相交」求和/求率时把缓存
+        // 前缀重复计入——100% 命中显示成 ~50%，与 OpenAIProviderUsage 的
+        // [T-b15-usage-fresh-input] 口径不一致。对齐 Chat Completions / Responses
+        // 两处：非负才减，无缓存字段则原样。latestContextTokens 仍是完整 prompt
+        // （那才是真实上下文占用，dynamicMaxTokens / ContextPolicy 依赖它）。
+        val freshInput = cachedContentTokens
+            ?.let { cached -> (promptTokens - cached).takeIf { it >= 0 } }
+            ?: promptTokens
         return LLMUsage(
-            inputTokens = usage.optInt("promptTokenCount", 0),
-            outputTokens = usage.optInt("candidatesTokenCount", 0),
+            inputTokens = freshInput,
+            outputTokens = usage.optInt("candidatesTokenCount", 0) + usage.optInt("thoughtsTokenCount", 0),
+            cacheReadInputTokens = cachedContentTokens,
+            latestContextTokens = promptTokens,
         )
     }
 

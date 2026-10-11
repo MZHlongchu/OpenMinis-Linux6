@@ -19,7 +19,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import com.openminis.app.R
@@ -99,6 +98,38 @@ class BrowserTabPool(private val context: Context) {
          */
         private const val IMPLICIT_TAB_WAIT_MS = 20_000L
         private const val IMPLICIT_TAB_WAIT_POLL_MS = 250L
+
+        /**
+         * [T-browser-tab-fanout-serial-exclusion-android] A fan-out action
+         * (no tab_id) claims its tab in [acquireTab] and holds `inUse` without
+         * taking that tab's serial Mutex. An explicit-tab-id action (or the
+         * follow-selected route) DOES take the Mutex, so the two are not
+         * mutually exclusive by themselves and could drive the same WebView at
+         * once. An explicit-id acquire therefore waits up to this long for a
+         * foreign action on that tab to finish (`runningActions[id] > 0`);
+         * after the window it refuses to trample and reports the busy error.
+         */
+        private const val EXPLICIT_TAB_BUSY_WAIT_MS = 20_000L
+        private const val EXPLICIT_TAB_BUSY_WAIT_POLL_MS = 250L
+
+        /**
+         * [T-browser-state-save-debounce-android] Tab state used to be
+         * serialized and written to disk synchronously on the caller's thread
+         * — and that caller is the Main thread on the hot path (every action's
+         * finally, removeTab, idle eviction). Writes are now coalesced behind
+         * this debounce and performed on Dispatchers.IO; dispose() still
+         * flushes once synchronously so the persisted snapshot is unchanged.
+         */
+        private const val STATE_SAVE_DEBOUNCE_MS = 500L
+
+        /**
+         * [T-browser-saved-urls-lru-android] Cap on remembered URLs of closed
+         * tabs. Tab ids are never reused, and without a cap [savedURLs] would
+         * only ever grow (an entry is consumed only when the same id is
+         * re-created, which never happens in-process) while the whole map is
+         * persisted into the session JSON on every write.
+         */
+        private const val MAX_SAVED_URLS = 8
     }
 
     /**
@@ -138,7 +169,7 @@ class BrowserTabPool(private val context: Context) {
     // suspended page operation has left its finally block.
     private fun removeTab(tab: Tab, rememberUrl: Boolean = false) {
         if (_tabs.value.none { it.manager === tab.manager }) return
-        if (rememberUrl) tab.manager.currentURL.value.takeIf { it.isNotBlank() }?.let { savedURLs[tab.id] = it }
+        if (rememberUrl) tab.manager.currentURL.value.takeIf { it.isNotBlank() }?.let { rememberSavedUrl(tab.id, it) }
         tab.inUseGraceJob?.cancel()
         tab.inUseGraceJob = null
         _tabs.value = _tabs.value.filterNot { it.manager === tab.manager }
@@ -163,10 +194,15 @@ class BrowserTabPool(private val context: Context) {
         }
         if (disposed) return
         _tabs.value.forEach { tab ->
-            tab.manager.currentURL.value.takeIf { it.isNotBlank() }?.let { savedURLs[tab.id] = it }
+            tab.manager.currentURL.value.takeIf { it.isNotBlank() }?.let { rememberSavedUrl(tab.id, it) }
         }
-        saveState()
+        // [T-browser-save-single-writer-android] 关闸 + 最终快照同步落盘：先置
+        // disposed，之后 saveState() 不再排新的落盘请求；在飞的 debounce 写者由
+        // flush() 串行等待（写锁），保证这份最终快照是最后一个写者、内容与旧实现
+        // 一致（仍含全部 tab 的 URL，因为此时 tab 还没被移除）。旧写法 cancel()
+        // 后就同步写 —— cancel 拦不住已进入 writeText 的写者 → 两个并发写者。
         disposed = true
+        stateSaveWriter.flush(Unit)
         evictionScope.cancel()
         downloadScope.cancel()
         onDownloadEvent = null
@@ -232,7 +268,40 @@ class BrowserTabPool(private val context: Context) {
 
     private var sessionId: String? = null
     private val activeRunJobs = ConcurrentHashMap<Int, Job>()
-    private val savedURLs = mutableMapOf<Int, String>()
+
+    /**
+     * [T-browser-saved-urls-lru-android] URLs of closed tabs, keyed by tab id,
+     * oldest first, capped at [MAX_SAVED_URLS] (LRU: re-remembering an id moves
+     * it to the newest slot). Written on Main (removeTab/dispose), read by the
+     * debounced state writer on another thread — hence the lock. Bounded so a
+     * long session can't grow the map (and the persisted JSON) forever.
+     */
+    private val savedURLs = LinkedHashMap<Int, String>()
+    private val savedURLsLock = Any()
+
+    private fun rememberSavedUrl(id: Int, url: String) = synchronized(savedURLsLock) {
+        rememberSavedUrlLocked(id, url)
+    }
+
+    private fun drainSavedUrl(id: Int): String? = synchronized(savedURLsLock) { savedURLs.remove(id) }
+
+    private fun savedUrlSnapshot(): Map<Int, String> =
+        synchronized(savedURLsLock) { savedURLs.toMap() }
+
+    private fun replaceSavedUrls(loaded: Map<Int, String>) = synchronized(savedURLsLock) {
+        savedURLs.clear()
+        loaded.forEach { (id, url) -> rememberSavedUrlLocked(id, url) }
+    }
+
+    /** 调用者必须已持有 [savedURLsLock]。 */
+    private fun rememberSavedUrlLocked(id: Int, url: String) {
+        savedURLs.remove(id)
+        savedURLs[id] = url
+        while (savedURLs.size > MAX_SAVED_URLS) {
+            val eldest = savedURLs.keys.firstOrNull() ?: break
+            savedURLs.remove(eldest)
+        }
+    }
 
     /**
      * Global custom viewport. `0` means "use the UA profile default".
@@ -260,6 +329,17 @@ class BrowserTabPool(private val context: Context) {
 
     private val evictionScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var evictionJob: Job? = null
+
+    /**
+     * [T-browser-save-single-writer-android] 状态落盘的单写者 debounce 队列。
+     * saveState() 可能从任意线程调用；旧实现用 `stateSavePending` + 裸
+     * `stateSaveJob` 排队（无锁、无可见性保证），两个并发调用会各起一个
+     * debounce job → 同一份 JSON 两个写者。载荷是 Unit：快照在写盘那一刻按
+     * 实时状态构建。声明在 [evictionScope] 之后，初始化顺序才有效。
+     */
+    private val stateSaveWriter = DebouncedSnapshotWriter<Unit>(
+        evictionScope, Dispatchers.IO, STATE_SAVE_DEBOUNCE_MS,
+    ) { persistStateNow() }
 
     /**
      * Current idle-eviction timeout in milliseconds. Read from SharedPreferences
@@ -658,33 +738,44 @@ class BrowserTabPool(private val context: Context) {
     /**
      * [T-browser-use-per-tab-serial-android] Run [input] against an existing
      * tab id under that tab's serial Mutex. Waits at most
-     * [TAB_SERIAL_WAIT_TIMEOUT_MS] to acquire the lock; on timeout returns a
+     * [TAB_SERIAL_WAIT_TIMEOUT_MS] to ACQUIRE the lock; on timeout returns a
      * guidance error telling the model to open a new tab and retry there
-     * (rather than keep contending the busy one). The wait timeout is purely
-     * the lock-acquisition wait — once the lock is held, the underlying page
-     * operation runs with its own existing timeout, unchanged.
+     * (rather than keep contending the busy one). The page operation itself
+     * runs AFTER the lock is held, outside that timeout window, with its own
+     * existing per-action budget (BrowserUseManager) — the wait timeout is
+     * purely the lock-acquisition wait, nothing else.
      */
     private suspend fun executeSerialized(tabId: Int, input: BrowserActionInput): BrowserActionResult {
         val mutex = lockForTab(tabId)
-        val result = withTimeoutOrNull(TAB_SERIAL_WAIT_TIMEOUT_MS) {
-            mutex.withLock {
-                // [T-browser-readaction-follow-tab-and-yolo-android] Pin
-                // acquisition to the locked tab id. The follow-selected and
-                // YOLO paths resolve a target tab id whose lock we hold here,
-                // but input.tabId may be null (tab-less call) — without this
-                // override acquireTab(null) would re-run the fan-out and could
-                // land on a DIFFERENT tab than the one we locked, defeating
-                // both the serialization and the follow-tab fix.
-                runAcquiredAction(input, implicitTab = false, acquireTabId = tabId)
-            }
+        // [T-browser-serial-wait-only-android] 只有"等锁"进超时窗口。旧实现把
+        // `mutex.withLock { runAcquiredAction(...) }` 整个包进 withTimeoutOrNull：
+        // 动作体一旦跑满 60s（wait_for_dom_stable 的预算上限正好 60s，CLI
+        // `--timeout <ms>` 也能要到 60s）就被这个上限误杀，还返回"tab 被占用"
+        // 的错误语义。lock() 可取消且超时时会自行出队，所以这里安全。
+        val acquired = withTimeoutOrNull(TAB_SERIAL_WAIT_TIMEOUT_MS) {
+            mutex.lock()
+            true
+        } ?: false
+        if (!acquired) {
+            return BrowserActionResult.error(
+                context.getString(
+                    R.string.browser_use_tab_busy_timeout,
+                    tabId,
+                    (TAB_SERIAL_WAIT_TIMEOUT_MS / 1000L).toInt(),
+                ),
+            )
         }
-        return result ?: BrowserActionResult.error(
-            context.getString(
-                R.string.browser_use_tab_busy_timeout,
-                tabId,
-                (TAB_SERIAL_WAIT_TIMEOUT_MS / 1000L).toInt(),
-            ),
-        )
+        return try {
+            // [T-browser-readaction-follow-tab-and-yolo-android] Pin acquisition
+            // to the locked tab id. The follow-selected and YOLO paths resolve a
+            // target tab id whose lock we hold here, but input.tabId may be null
+            // (tab-less call) — without this override acquireTab(null) would
+            // re-run the fan-out and could land on a DIFFERENT tab than the one
+            // we locked, defeating both the serialization and the follow-tab fix.
+            runAcquiredAction(input, implicitTab = false, acquireTabId = tabId)
+        } finally {
+            mutex.unlock()
+        }
     }
 
     /**
@@ -704,13 +795,25 @@ class BrowserTabPool(private val context: Context) {
     ): BrowserActionResult {
         var acquired: Tab? = null
         return try {
+            var busyTabId: Int? = null
             val tab = withContext(Dispatchers.Main) {
                 if (acquireTabId != null && _tabs.value.none { it.id == acquireTabId }) return@withContext null
-                acquireTab(acquireTabId ?: input.tabId)?.also {
+                acquireTab(acquireTabId ?: input.tabId, onBusyConflict = { busyTabId = it })?.also {
                     acquired = it
                     runningActions[it.id] = (runningActions[it.id] ?: 0) + 1
                 }
-            } ?: return BrowserActionResult.error("Browser tab closed or browser memory budget reached")
+            } ?: return BrowserActionResult.error(
+                busyTabId?.let {
+                    // [T-browser-tab-fanout-serial-exclusion-android] 该 tab 上仍有
+                    // 别的 action 在跑（不持锁的 fan-out 路径），等到窗口结束也不
+                    // 让出——宁可报忙，也不并发驱动同一个 WebView。
+                    context.getString(
+                        R.string.browser_use_tab_busy_timeout,
+                        it,
+                        (EXPLICIT_TAB_BUSY_WAIT_MS / 1000L).toInt(),
+                    )
+                } ?: "Browser tab closed or browser memory budget reached",
+            )
             withContext(Dispatchers.Main) {
                 if (tab.needsInitialBlankPage) {
                     tab.needsInitialBlankPage = false
@@ -781,8 +884,10 @@ class BrowserTabPool(private val context: Context) {
                 tab.inUse = false
             }
             updateTabs()
-            saveState()
             }
+            // [T-browser-state-save-debounce-android] 落盘请求放在 NonCancellable
+            // 块之外：它只置脏标记并按需起 debounce job，不需要不可取消语义。
+            saveState()
         }
     }
 
@@ -839,14 +944,44 @@ class BrowserTabPool(private val context: Context) {
      * browser tab" because the model can't know that tab 0 hasn't been
      * lazily created.
      */
-    private suspend fun acquireTab(requestedTabId: Int? = null): Tab? = withContext(Dispatchers.Main) {
+    private suspend fun acquireTab(
+        requestedTabId: Int? = null,
+        /** [T-browser-tab-fanout-serial-exclusion-android] 等不到空闲时回调冲突的 tab id。 */
+        onBusyConflict: ((Int) -> Unit)? = null,
+    ): Tab? = withContext(Dispatchers.Main) {
         if (disposed) return@withContext null
         var currentTabs = _tabs.value.toMutableList()
 
         // Find requested tab, falling back to default-or-create when the
         // requested id doesn't exist (covers `tab_id: 0` against an empty pool).
         val tab = if (requestedTabId != null && currentTabs.any { it.id == requestedTabId }) {
-            currentTabs.first { it.id == requestedTabId }
+            // [T-browser-tab-fanout-serial-exclusion-android] 显式命中一个已存在的
+            // tab 时，除了等它自己的 Mutex（executeSerialized），还必须尊重"它正
+            // 被某个不持锁的 action 驱动"这一事实：fan-out 路径（无 tab_id）在
+            // acquireTab 里 set inUse 后并不持有该 tab 的 Mutex，于是"lane A 无
+            // tab_id navigate + lane B 对同一 tab 的 get_text"会同时驱动同一个
+            // WebView。runningActions[id] > 0 才是"正在执行"（acquire 与自增在
+            // 同一个 Main 块里完成，观察不到中间态）；inUse 单独为 true 可能只是
+            // 动作后的 15s grace 保持，不构成冲突、不能等，否则每次 navigate 之后
+            // 的 follow-up 都会先白等一个 grace 窗口。
+            var waited = 0L
+            var owner = currentTabs.first { it.id == requestedTabId }
+            while ((runningActions[owner.id] ?: 0) > 0 && waited < EXPLICIT_TAB_BUSY_WAIT_MS) {
+                delay(EXPLICIT_TAB_BUSY_WAIT_POLL_MS)
+                waited += EXPLICIT_TAB_BUSY_WAIT_POLL_MS
+                if (disposed) return@withContext null
+                currentTabs = _tabs.value.toMutableList()
+                owner = currentTabs.firstOrNull { it.id == requestedTabId } ?: return@withContext null
+            }
+            if ((runningActions[owner.id] ?: 0) > 0) {
+                Log.w(
+                    TAG,
+                    "tab $requestedTabId still busy after ${waited}ms; refusing to drive it concurrently",
+                )
+                onBusyConflict?.invoke(requestedTabId)
+                return@withContext null
+            }
+            owner
         } else {
             // [T-browser-use-per-tab-serial-android] No explicit (existing)
             // tab id: prefer a tab that is NOT already in use, and create a new
@@ -938,7 +1073,7 @@ class BrowserTabPool(private val context: Context) {
         // back in a suspend context — a fresh tab with no page loaded
         // reports WebView's hardcoded 980px fallback, hiding the session
         // viewport override until the first real navigation.
-        val loadUrl = url ?: savedURLs.remove(id)
+        val loadUrl = url ?: drainSavedUrl(id)
         if (loadUrl != null) {
             manager.loadURL(loadUrl)
         } else {
@@ -1316,8 +1451,26 @@ class BrowserTabPool(private val context: Context) {
 
     // -- Disk Persistence --
 
+    /**
+     * [T-browser-state-save-debounce-android] Request a state persist. Cheap and
+     * thread-safe: it only hands "state is dirty" to the single-writer debounce
+     * queue ([stateSaveWriter]); the JSON build + `writeText` run off the caller's
+     * thread and never overlap another writer (it used to be a synchronous
+     * JSONObject-build + writeText on the Main thread on every action's finally).
+     */
     private fun saveState() {
         if (disposed) return
+        if (sessionId == null) return
+        stateSaveWriter.request(Unit)
+    }
+
+    /**
+     * Build the session tab JSON and write it. Safe to call from any thread: every
+     * input is an immutable StateFlow snapshot and [savedURLs] is taken under its
+     * own lock. Called on IO by [stateSaveWriter]'s debounce job and synchronously
+     * by [dispose]'s flush — [DebouncedSnapshotWriter] serializes the two writers.
+     */
+    private fun persistStateNow() {
         val sid = sessionId ?: return
         try {
             val dir = File(context.filesDir, "browser_tabs")
@@ -1329,7 +1482,8 @@ class BrowserTabPool(private val context: Context) {
                 val url = tab.manager.currentURL.value
                 if (url.isNotEmpty()) urlsJson.put(tab.id.toString(), url)
             }
-            for ((id, url) in savedURLs) {
+            // [T-browser-saved-urls-lru-android] 已按 MAX_SAVED_URLS 截断。
+            for ((id, url) in savedUrlSnapshot()) {
                 urlsJson.put(id.toString(), url)
             }
             json.put("tabURLs", urlsJson)
@@ -1353,14 +1507,21 @@ class BrowserTabPool(private val context: Context) {
             if (!file.exists()) return
             val json = JSONObject(file.readText())
             val urlsJson = json.optJSONObject("tabURLs")
+            // [T-browser-saved-urls-lru-android] 整表替换而不是并回旧内容：池子属于
+            // 一个会话，切会话时上一会话的扁平 map 会越积越多；文件里没有 tabURLs
+            // 就等价于"这个会话没有记住的 URL"。
+            val loaded = linkedMapOf<Int, String>()
             if (urlsJson != null) {
                 val keys = urlsJson.keys()
                 while (keys.hasNext()) {
                     val key = keys.next()
-                    savedURLs[key.toInt()] = urlsJson.getString(key)
+                    // 一个坏 key 不该让整次 restore 失败。
+                    val id = key.toIntOrNull() ?: continue
+                    loaded[id] = urlsJson.getString(key)
                 }
                 _selectedTabId.value = json.optInt("selectedTabId", 0)
             }
+            replaceSavedUrls(loaded)
             // Restore session viewport override. 0/missing = no override; fall
             // back to the global custom viewport / UA profile default.
             val w = json.optInt("sessionViewportWidth", 0)

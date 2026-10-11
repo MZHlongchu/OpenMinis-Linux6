@@ -2,7 +2,69 @@ package com.openminis.app.ui.chat
 
 import androidx.lifecycle.viewModelScope
 import com.openminis.app.logging.AppLogger
+import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+
+/**
+ * [T-truncation-critical-section] 会话历史行的**共享临界区**：一次「剪裁」
+ * （[ChatViewModel.deleteFromMessage] / CODE 撤回）在飞期间，其它入口按角色交错：
+ *
+ *  - **写入者**——凡是会 append / 重发 user 行的路径（`sendMessage`、`retryLast`、
+ *    [ChatViewModel.retryFromMessage]、[ChatViewModel.rerunFromToolBlock]、
+ *    [ChatViewModel.resume] 的 `<system-reminder>` 行）：先
+ *    [awaitIdle] 等剪裁收尾再动 DB（`sendMessage` 里是等价的 inline join：
+ *    `truncationJob?.takeIf { it.isActive }?.join()`）。剪裁的
+ *    `deleteMessagesAfter(sort_order >= cutoff)` 按行号删掉锚点之后的**一切**行，
+ *    不等就会把自己刚落库的那一行一并删掉：气泡消失、agentHistory 里没有这一行，
+ *    模型对着不在上下文里的问题作答（[T-delete-from-here-inflight] 的现场）。
+ *    放弃一次用户明明点过的重试比等几百毫秒更糟，所以写入者选择**等待**。
+ *  - **剪裁者**（[ChatViewModel.deleteFromMessage] / 撤回到此轮）：[cutterMayProceed]
+ *    为 false 时**拒绝并留痕**（[admitCutter]）——两次交叠的剪裁会各自锚在对方半
+ *    应用的中间态上（一次剪到一半的行号区间被另一次当成锚点）。
+ *
+ * 写入者等待是安全的、一次检查就够：所有写入口在调用 [awaitIdle] 之前都已经同步
+ * 置位 `_isStreaming`，而剪裁入口一律以 `_isStreaming == false` 为前置条件 ——
+ * 等待期间不可能冒出新的剪裁，因此不需要循环重试，也不会死锁（剪裁侧从不等待
+ * streamJob / 写入者）。实现只用 [Job]：登记沿用
+ * [ChatViewModel.truncationJob]（已完成的 Job 引用是惰性的，`isActive == false`），
+ * 单测见 `TruncationInterlockTest`。
+ *
+ * [D8][T-truncation-critical-section] **登记时机**是这套协议的第二个不变量：剪裁者
+ * 一律 `CoroutineStart.LAZY` + **先登记后 start**，登记因此早于本协程的任何挂起点。
+ * 对 CODE 撤回尤其关键 —— 它的文件回滚（`RewindController.commit`）是数秒级的，
+ * 登记若挪到回滚之后，整个窗口里第二个剪裁入口都拦不住，两次交叠的剪裁各自锚在
+ * 对方半应用的 sort_order 区间上（行会丢）。收尾一律按 identity 摘除
+ * （`if (truncationJob === coroutineContext[Job])`），别摘掉别人的剪裁。
+ */
+internal object TruncationInterlock {
+    /** 剪裁者准入：临界区空闲（无在飞剪裁）才放行。 */
+    fun cutterMayProceed(current: Job?): Boolean = current?.isActive != true
+
+    /**
+     * [T-truncation-critical-section] 剪裁者准入的**留痕**版本：拒绝是 fail-closed
+     * 的正确行为（两次交叠剪裁会各锚在对方半应用的 sort_order 区间上，行会丢），
+     * 但静默 `return` 让「点了没反应」既看不见也追不了因 —— 记下是哪个 [entry]
+     * 被哪个在飞剪裁 [current] 挡下（Job.toString 带状态与身份，可与另一条入口区分）。
+     */
+    fun admitCutter(entry: String, current: Job?): Boolean {
+        if (cutterMayProceed(current)) return true
+        AppLogger.warning(
+            ChatViewModel.TAG,
+            "[T-truncation-critical-section] $entry refused: cut already in flight " +
+                "(blocking truncationJob=$current); refusing is fail-closed, retry after it lands",
+        )
+        return false
+    }
+
+    /** 写入者准入：等在飞剪裁收尾；返回是否真的等过（无剪裁时立即返回 false）。 */
+    suspend fun awaitIdle(current: Job?): Boolean {
+        val inFlight = current?.takeIf { it.isActive } ?: return false
+        inFlight.join()
+        return true
+    }
+}
 
 /**
  * [T-android-delete-from-here] Delete [messageId] and every message after
@@ -27,9 +89,23 @@ import kotlinx.coroutines.launch
  * truncation. It is still refused while a turn is in flight, because
  * deleting rows out from under a live agent loop would leave
  * [agentHistory] describing messages that no longer exist.
+ *
+ * [T-delete-from-here-inflight] The DB half runs asynchronously, so the job
+ * is published as [ChatViewModel.truncationJob] for the whole critical
+ * section. Without that handshake a send issued in the same window persisted
+ * a user row with a HIGHER `sort_order` than the anchor, which the
+ * truncation's `deleteMessagesAfter(sort_order >= cutoff)` then removed: the
+ * bubble vanished and the model answered a question that was no longer in
+ * context. Every other history writer now joins the same section via
+ * [TruncationInterlock] (see its KDoc), and a second truncation is refused
+ * while one is in flight (two overlapping cuts would each anchor on the
+ * other's half-applied state).
  */
 fun ChatViewModel.deleteFromMessage(messageId: String) {
     if (_isStreaming.value) return
+    // [T-truncation-critical-section] admitCutter = 准入 + 被拒留痕（fail-closed，
+    // 但绝不静默：日志里能看出是哪个入口被哪个在飞剪裁挡下）。
+    if (!TruncationInterlock.admitCutter("deleteFromMessage", truncationJob)) return
     _canResume.value = false
     val messages = _messages.value
     val index = messages.indexOfFirst { it.id == messageId }
@@ -62,41 +138,58 @@ fun ChatViewModel.deleteFromMessage(messageId: String) {
     revokeMemoryWritesInDeletedMessages(deletedMessages)
 
     val sid = activeSessionId ?: return
-    viewModelScope.launch {
-        val target = messages[index]
-        // [T-retry-cutoff-row-anchor] 截断锚点 = 目标消息**自身的 DB 行**（用户
-        // 消息与 DB 行 1:1，id 全局唯一）。旧锚点用「UI 第 N 个用户消息」序号去
-        // DB 数「有可见文本的用户行」——纯图片/无文本头的用户消息让两侧序号
-        // 错位，visibleUserCutoff 返回 null/-1 → 不删任何行 → 下一轮从 DB 重建
-        // 出完整旧历史，模型接到的就是旧上下文。sortOrderOf 直接命中，永不错位。
-        val targetRowSort = runCatching { chatRepository.dao.sortOrderOf(messageId) }.getOrNull()
-        val cutoffSortOrder = when {
-            targetRowSort != null -> targetRowSort // delete removes the target too
-            else -> resolveDeleteCutoffSortOrder(sid, messages, index, target)
-        }
-        if (cutoffSortOrder >= 0) {
-            chatRepository.deleteMessagesAfter(sid, cutoffSortOrder)
-        }
+    // [T-delete-from-here-inflight] LAZY + 先登记后 start：`truncationJob` 在临界区
+    // 开始之前就一定可见，并发 sendMessage 的 join 不会漏掉这次截断。
+    // [T-truncation-critical-section] CoroutineName 只为诊断：admitCutter 的拒绝日志
+    // 打的是 Job.toString，带上名字就能一眼看出挡路的是「从此处删除」还是 CODE 回滚。
+    // （只加元素、不动 dispatcher：本协程原先就跑在 viewModelScope 默认的 Main.immediate 上。）
+    val job = viewModelScope.launch(
+        CoroutineName("truncation:delete-from-here"),
+        start = CoroutineStart.LAZY,
+    ) {
+        try {
+            val target = messages[index]
+            // [T-retry-cutoff-row-anchor] 截断锚点 = 目标消息**自身的 DB 行**（用户
+            // 消息与 DB 行 1:1，id 全局唯一）。旧锚点用「UI 第 N 个用户消息」序号去
+            // DB 数「有可见文本的用户行」——纯图片/无文本头的用户消息让两侧序号
+            // 错位，visibleUserCutoff 返回 null/-1 → 不删任何行 → 下一轮从 DB 重建
+            // 出完整旧历史，模型接到的就是旧上下文。sortOrderOf 直接命中，永不错位。
+            val targetRowSort = runCatching { chatRepository.dao.sortOrderOf(messageId) }.getOrNull()
+            val cutoffSortOrder = when {
+                targetRowSort != null -> targetRowSort // delete removes the target too
+                else -> resolveDeleteCutoffSortOrder(sid, messages, index, target)
+            }
+            if (cutoffSortOrder >= 0) {
+                chatRepository.deleteMessagesAfter(sid, cutoffSortOrder)
+            }
 
-        // Rebuild agentHistory from what survived, so the next turn is
-        // built on the truncated conversation rather than a stale list.
-        val tail = awaitBoundedHistoryRebuild(sid)
-        // [T-truncation-digest-clear] digest 摘录里是被裁掉行（含刚删除的轮次）
-        // 的痕迹，不清空会继续注入已删上下文。
-        clearHistoryDigestState()
-        reconcileCompactMarkerAfterTruncation()
-        // Refresh the session's last-message preview; otherwise the
-        // session list keeps quoting a message that no longer exists.
-        // An empty remainder clears it rather than leaving the stale text.
-        runCatching {
-            chatRepository.updateSessionPreview(sid, tail.lastOrNull()?.partsJson ?: "[]")
+            // Rebuild agentHistory from what survived, so the next turn is
+            // built on the truncated conversation rather than a stale list.
+            val tail = awaitBoundedHistoryRebuild(sid)
+            // [T-truncation-digest-clear] digest 摘录里是被裁掉行（含刚删除的轮次）
+            // 的痕迹，不清空会继续注入已删上下文。
+            clearHistoryDigestState()
+            reconcileCompactMarkerAfterTruncation()
+            // Refresh the session's last-message preview; otherwise the
+            // session list keeps quoting a message that no longer exists.
+            // An empty remainder clears it rather than leaving the stale text.
+            runCatching {
+                chatRepository.updateSessionPreview(sid, tail.lastOrNull()?.partsJson ?: "[]")
+            }
+            AppLogger.info(
+                ChatViewModel.TAG,
+                "deleteFromMessage: cut at sortOrder=$cutoffSortOrder, " +
+                    "${deletedMessages.size} message(s) removed, ${tail.size} remain",
+            )
+        } finally {
+            // [T-delete-from-here-inflight] 门必须复位（异常/取消也一样），否则
+            // 后续的 deleteFromMessage 会被永久拒绝。identity 守卫与 streamJob
+            // 同口径：只清自己那一份。
+            if (truncationJob === coroutineContext[Job]) truncationJob = null
         }
-        AppLogger.info(
-            ChatViewModel.TAG,
-            "deleteFromMessage: cut at sortOrder=$cutoffSortOrder, " +
-                "${deletedMessages.size} message(s) removed, ${tail.size} remain",
-        )
     }
+    truncationJob = job
+    job.start()
 }
 
 /**

@@ -17,13 +17,16 @@ import com.openminis.app.logging.AppLogger
  * destroy the user's entire chat history), so an unmatched downgrade means the
  * app throws at first database access and simply will not start.
  *
- * [AppDatabase.MIGRATION_12_11] handles the 12 → 11 case, and the same no-op
- * pattern extends to any future ADD COLUMN / ADD TABLE change. But it cannot
- * cover everything: renames, drops, type changes and — most dangerously —
- * changes to the MEANING of existing data have no safe automatic downgrade,
- * and a missing link anywhere in the chain (12 → 11 → 10) breaks the whole
- * path. This guard is the backstop for those, and for the plain human case of
- * forgetting to add the downgrade migration at all.
+ * [T-b11-no-downgrade-migrations] There used to be a `MIGRATION_12_11` and a
+ * whole chain of registered downgrade migrations, on the theory that
+ * registering a no-op path lets an older build open a newer database. It does
+ * not, and never could: the process that resolves a downgrade is the OLDER
+ * build, using the migration table compiled into IT — which was released
+ * before the newer migration existed. Every downgrade migration this build
+ * registers is therefore unreachable, and the guard's default deny below is
+ * what actually decides. They were removed (see AppDatabase's
+ * [T-b11-no-downgrade-migrations] block); this guard is the downgrade story,
+ * and it costs the user nothing but a screen: the file is never touched.
  *
  * ## Why a pre-check instead of catching Room's exception
  *
@@ -86,9 +89,9 @@ object DatabaseVersionGuard {
      * True when the on-disk database is newer than this build supports, i.e.
      * the user has downgraded and Room may be unable to open it.
      *
-     * Note this returns true even when a no-op downgrade migration WOULD have
-     * handled it. That is intentional for versions we cannot vouch for: see
-     * [isHandledDowngrade].
+     * Every such database is refused: no downgrade migration can ever be
+     * honored (see the class doc), so there is nothing to check for an
+     * exception here.
      */
     fun isFromNewerBuild(context: Context): Boolean {
         val onDisk = readOnDiskVersion(context) ?: return false
@@ -101,20 +104,6 @@ object DatabaseVersionGuard {
         }
         return newer
     }
-
-    /**
-     * Whether a registered downgrade migration covers this jump, in which case
-     * the app can open the database normally and the guidance screen is
-     * unnecessary.
-     *
-     * Only versions with an explicit, verified no-op downgrade belong here.
-     * Anything else falls through to the guidance screen rather than being
-     * optimistically opened — being wrong in that direction costs the user a
-     * screen they can dismiss by upgrading; being wrong the other way costs
-     * them a crash.
-     */
-    fun isHandledDowngrade(onDiskVersion: Int): Boolean =
-        onDiskVersion == 12 && CODE_DB_VERSION == 11
 
     /** Result of the launch-time check. */
     enum class Decision {
@@ -131,7 +120,6 @@ object DatabaseVersionGuard {
     fun evaluate(context: Context): Decision {
         val onDisk = readOnDiskVersion(context) ?: return Decision.PROCEED
         if (onDisk <= CODE_DB_VERSION) return Decision.PROCEED
-        if (isHandledDowngrade(onDisk)) return Decision.PROCEED
         return Decision.SHOW_NEWER_DB_GUIDANCE
     }
 }

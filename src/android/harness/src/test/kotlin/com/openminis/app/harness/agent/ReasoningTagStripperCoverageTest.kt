@@ -77,4 +77,21 @@ class ReasoningTagStripperCoverageTest {
         val text = "before\n```\n<think>demo <b>bold"
         assertEquals(text, apply(text))
     }
+
+    @Test
+    fun `closing fence without a trailing newline does not blow up`() {
+        // [T-fence-segments-bounds] 收尾围栏行无尾换行时 lineEnd == length，
+        // 区间右端曾被多算一格 → substring 越界抛 StringIndexOutOfBounds，
+        // 整轮发送失败。三种常见形状都必须逐字保留。
+        for (text in listOf("```\nx\n```", "~~~\nx\n~~~", "text\n```\ndone\n```")) {
+            assertEquals(text, apply(text))
+        }
+    }
+
+    @Test
+    fun `bare closing fence with content before it keeps text intact`() {
+        // 围栏正文 + 无尾换行的收尾行：正文与围栏标记都要原样留下。
+        val text = "prose\n```kotlin\nval a = 1\n```"
+        assertEquals(text, apply(text))
+    }
 }

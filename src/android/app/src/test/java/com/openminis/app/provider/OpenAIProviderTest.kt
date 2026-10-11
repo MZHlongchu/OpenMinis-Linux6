@@ -81,10 +81,33 @@ class OpenAIProviderTest {
         server.enqueue(MockResponse().setBody(responseBody))
         val response = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
 
-        assertEquals(100, response.usage?.inputTokens)
+        // [T-b15-usage-fresh-input] inputTokens 是 fresh-only（100 prompt - 50 cached）：
+        // 写回 prompt_tokens 会让 input + cacheRead 重复计入缓存前缀、命中率被腰斩。
+        assertEquals(50, response.usage?.inputTokens)
         assertEquals(10, response.usage?.outputTokens)
         assertEquals(50, response.usage?.cacheReadInputTokens)
         assertNull(response.usage?.cacheCreationInputTokens)
+    }
+
+    @Test
+    fun `sendMessage reports zero fresh input when the whole prompt is cached`() = runBlocking {
+        val responseBody = """
+        {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 80,
+                "completion_tokens": 5,
+                "prompt_tokens_details": {"cached_tokens": 80}
+            }
+        }
+        """.trimIndent()
+
+        server.enqueue(MockResponse().setBody(responseBody))
+        val response = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+
+        assertEquals(0, response.usage?.inputTokens)
+        assertEquals(80, response.usage?.cacheReadInputTokens)
+        assertEquals(80, response.usage?.latestContextTokens)
     }
 
     @Test
@@ -105,13 +128,15 @@ class OpenAIProviderTest {
         assertNull(response.usage?.cacheReadInputTokens)
     }
 
-    @Test
-    fun `sendMessage handles empty choices`() = runBlocking {
+    @Test(expected = LLMError.TransientError::class)
+    fun `sendMessage fails loudly on an empty-choices body with no finish reason`() = runBlocking {
+        // [T-android-sendmessage-stream-true] 200 + 空壳 body（没有正文、也没有
+        // finish_reason）是上游静默失败。旧实现返回 LLMResponse("", null, …)：model-use
+        // 把它当成功、写出空 --output 且 RC=0。非流式入口现在与流式入口同款兜底。
         server.enqueue(MockResponse().setBody("""{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":0}}"""))
 
-        val response = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
-        assertEquals("", response.text)
-        assertNull(response.stopReason)
+        provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+        Unit
     }
 
     // -- Request construction --
@@ -194,15 +219,21 @@ class OpenAIProviderTest {
     }
 
     @Test
-    fun `sendMessage sets stream false for non-streaming`() = runBlocking {
+    fun `sendMessage issues a streaming request internally`() = runBlocking {
+        // [T-android-sendmessage-stream-true] 非流式入口内部必须发流式请求（其 KDoc
+        // 的契约）：Codex/Responses 后端对 stream=false 直接 400 "Stream must be
+        // set to true"，Zen 免费车道同样拒绝。2f45981d 改成 stream=false 后还丢掉了
+        // 空流兜底——中转返回单 JSON 时静默产出空回复，调用方却当成成功。
         server.enqueue(MockResponse().setBody("""{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":0,"completion_tokens":0}}"""))
 
-        provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "test")), null, 100)
+        val response = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "test")), null, 100)
+        // 单 JSON 响应仍走 Chat Completions 的"非 SSE"兜底解析（与 stream 标志无关）
+        assertEquals("ok", response.text)
 
         val request = server.takeRequest()
         val body = JSONObject(request.body.readUtf8())
-        assertEquals(false, body.getBoolean("stream"))
-        assertTrue(!body.has("stream_options"))
+        assertTrue("非流式入口必须发流式请求", body.getBoolean("stream"))
+        assertTrue(body.getJSONObject("stream_options").getBoolean("include_usage"))
     }
 
     // -- Streaming --

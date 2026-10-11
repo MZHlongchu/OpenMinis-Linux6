@@ -2,6 +2,7 @@ package com.openminis.app.ui.chat
 
 import android.util.Log
 import androidx.lifecycle.viewModelScope
+import com.openminis.app.checkpoint.CheckpointBridge
 import com.openminis.app.data.db.MessageEntity
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
@@ -502,6 +503,11 @@ internal fun ChatViewModel.loadSession() {
             refreshContextUsage()
             restoreQueuedPromptsFromDisk(sid) // [T-queue-disk-persistence]
             replaySafeDanglingToolCalls() // [T-recovery-layer]
+            // [T-p2-checkpoint-restore-warmup] checkpoint 的磁盘恢复是懒加载：首个
+            // beginTurn/checkpoints 会在调用方线程上同步读全部快照（冷启动后首轮
+            // 可能是几十 MB）。装载时把它交给后台线程付掉，首轮发送不再等它；
+            // 放在装载尾部触发，避免与上面的会话读取抢同一个 IO 池。
+            viewModelScope.launch(Dispatchers.IO) { CheckpointBridge.prefetch(context, sid) }
         }
         } finally {
             // T201: open the gate even on early `return@launch` (draft path,

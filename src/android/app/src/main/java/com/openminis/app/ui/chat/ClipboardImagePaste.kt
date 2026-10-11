@@ -25,7 +25,7 @@ import java.util.UUID
  *  • The clip's content URI is only granted while it stays the primary clip.
  *    The moment the user copies anything else, the URI dangles. So paste
  *    copies the bytes into our private cache immediately (via
- *    [ChatViewModel.addAttachmentFromStagedShare], which re-stages into
+ *    [ChatViewModel.addAttachmentFromStagedShare], which moves them into
  *    `cache/share_inbound`), and the attachment then outlives the clipboard.
  */
 object ClipboardImagePaste {
@@ -78,6 +78,11 @@ object ClipboardImagePaste {
      * Copy the clipboard image into the composer's attachments.
      * Returns false (and toasts nothing — the chip simply stays) when the
      * clipboard no longer holds a readable image; the caller decides UX.
+     *
+     * [T-b1-paste-io] Blocking: it reads the whole image off the content
+     * provider and writes it to disk. Callers must run it off the UI thread —
+     * [ComposerImagePaste.toolbar] keeps only the description probe on the
+     * menu click and dispatches this to `Dispatchers.IO`.
      */
     fun paste(context: Context, viewModel: ChatViewModel): Boolean {
         val uri = currentImageUri(context) ?: return false
@@ -95,8 +100,9 @@ object ClipboardImagePaste {
                 tmp.delete()
                 return false
             }
-            // addAttachmentFromStagedShare re-copies into cache/share_inbound
-            // (the durable location), so the temp file can go immediately.
+            // addAttachmentFromStagedShare moves the temp file into
+            // cache/share_inbound (the durable location) — it is gone by now,
+            // so this delete is only a safety net for the failure path.
             val attached = viewModel.addAttachmentFromStagedShare(tmp) != null
             tmp.delete()
             attached

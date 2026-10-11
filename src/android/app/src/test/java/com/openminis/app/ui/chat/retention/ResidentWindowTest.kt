@@ -183,4 +183,39 @@ class ResidentWindowTest {
         assertEquals(0, ResidentWindow.byteCut(history))
         assertEquals(0, ResidentWindow.countCut(history, maxMessages = 400))
     }
+
+    // ─── [T-b1-bytesof-toolinput] 尺寸记账不再每次序列化 tool 输入 ──────────
+
+    @Test
+    fun `tool use input length is captured once and matches serialization`() {
+        val input = JSONObject().put("cmd", "run").put("n", 42)
+        val part = AgentContentPart.ToolUse("t1", "shell_execute", input)
+        assertEquals(input.toString().length, part.inputJsonLength)
+        // copy(input = …) builds a new instance → the cached length is recomputed.
+        val bigger = JSONObject().put("cmd", "run").put("padding", "x".repeat(500))
+        assertEquals(bigger.toString().length, part.copy(input = bigger).inputJsonLength)
+        // bytesOf still charges 2 bytes per JSON char for the input.
+        val msg = LLMMessage(
+            role = LLMMessage.Role.ASSISTANT,
+            content = "",
+            contentParts = listOf(part),
+        )
+        assertEquals(part.inputJsonLength.toLong() * 2, ResidentWindow.bytesOf(msg))
+    }
+
+    @Test
+    fun `the prefix-sum byte cut returns the earliest fitting boundary`() {
+        // 40 self-contained turns of ~2 MiB each. Budget for exactly the last
+        // three: the cut must land on 37 and nothing earlier, i.e. it is still
+        // the FIRST legal fit the old rescan-every-candidate loop computed.
+        val history = (0 until 40).map { toolTurn("t$it", 1024 * 1024) }
+        val threeTurns = ResidentWindow.bytesOf(history.subList(37, 40))
+        assertTrue("sanity: the fixture must exceed the tiny budget", threeTurns > 1L)
+        assertEquals(0, ResidentWindow.byteCut(history, budget = threeTurns * 100))
+        assertEquals(37, ResidentWindow.byteCut(history, budget = threeTurns))
+        assertTrue(
+            "one turn earlier must still be over budget",
+            ResidentWindow.bytesOf(history.subList(36, 40)) > threeTurns,
+        )
+    }
 }

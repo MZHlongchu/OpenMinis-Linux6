@@ -72,10 +72,19 @@ internal class Utf8ChunkDecoder {
  * bytes are framed. When the shell dies before BEGIN (proot never reached the
  * command), the buffered bytes are flushed instead of dropped so the death
  * path keeps proot's last words.
+ *
+ * [T-p1-3-shell-auth-frames] [frameTag] 非 null 时，DONE 帧必须携带 guest 侧
+ * 现算的标签：`__MINIS_DONE_<marker>_EXIT_<code>_<frameTag>__`。BEGIN 行只有
+ * marker（nonce），标签不出现在写给 stdin 的命令文本里，于是偷读 fd 0 的杂散
+ * 进程拿不到它，伪造不出合法 DONE。
  */
-internal class MarkerFramer(marker: String) {
+internal class MarkerFramer(marker: String, private val frameTag: String? = null) {
     private val prefix = "__MINIS_DONE_${marker}_EXIT_"
-    private val full = Regex("__MINIS_DONE_${Regex.escape(marker)}_EXIT_(\\d+)__")
+    private val full = if (frameTag == null) {
+        Regex("__MINIS_DONE_${Regex.escape(marker)}_EXIT_(\\d+)__")
+    } else {
+        Regex("__MINIS_DONE_${Regex.escape(marker)}_EXIT_(\\d+)_${Regex.escape(frameTag)}__")
+    }
     private val beginPrefix = "__MINIS_GO_${marker}__"
     private val carry = StringBuilder()
     private var armed = false
@@ -90,8 +99,22 @@ internal class MarkerFramer(marker: String) {
     private val authRegex = Regex("__MINIS_AUTH_([0-9A-Za-z]{8,80})__")
     private val authHoldPrefix = "__MINIS_AUTH_"
 
+    /**
+     * [T-p1-3-shell-auth-frames] 同一条 bootstrap 里 guest 用**真正会用到的
+     * 那条管道**（cksum|cut）算一次探针：`__MINIS_TAGPROBE_<crc>__`。宿主拿它
+     * 与自己的 PosixCksum 对照，只有对得上才启用带标签的帧——否则 guest 侧
+     * cksum 缺失时每条命令的 DONE 都配不上，命令会一路挂到墙钟预算（最坏
+     * 600s）才返回，这是本机制最危险的失效模式。
+     */
+    private val tagProbeRegex = Regex("__MINIS_TAGPROBE_([0-9]{1,12})__")
+    private val tagProbeHoldPrefix = "__MINIS_TAGPROBE_"
+
     /** 会话秘密（bootstrap 回显），未捕获时为 null。宿主只读。 */
     var authTag: String? = null
+        private set
+
+    /** guest 侧 cksum 探针结果（bootstrap 回显），未捕获时为 null。宿主只读。 */
+    var tagProbe: String? = null
         private set
 
     data class Step(val output: String, val completed: Boolean, val exitCode: Int)
@@ -105,7 +128,7 @@ internal class MarkerFramer(marker: String) {
     fun push(text: String, endOfInput: Boolean = false): Step {
         if (text.isNotEmpty()) carry.append(text)
         if (!armed) {
-            captureAuth()
+            captureHandshake()
             val beginIdx = carry.indexOf(beginPrefix)
             if (beginIdx < 0) {
                 if (endOfInput) {
@@ -124,12 +147,14 @@ internal class MarkerFramer(marker: String) {
                     carry.setLength(0)
                     return Step(rest, completed = false, exitCode = -1)
                 }
-                // [T-p1-3-shell-auth-frames] begin 与 AUTH 两个前缀的部分尾巴都要
-                // 保住：AUTH 行跨读分割时，若把半个 AUTH 前缀当噪声丢掉，握手就
-                // 永远配不齐（降级 legacy）。取两者更靠前的 hold 点。
+                // [T-p1-3-shell-auth-frames] begin 与两条握手协议行（AUTH /
+                // TAGPROBE）的部分尾巴都要保住：协议行跨读分割时，若把半个
+                // 前缀当噪声丢掉，握手就永远配不齐（降级 legacy）。取更靠前的
+                // hold 点。
                 val heldFrom = minOf(
                     holdIndex(carry.toString(), beginPrefix),
                     holdIndex(carry.toString(), authHoldPrefix),
+                    holdIndex(carry.toString(), tagProbeHoldPrefix),
                 )
                 noteDropped(heldFrom)
                 carry.delete(0, heldFrom)
@@ -160,23 +185,38 @@ internal class MarkerFramer(marker: String) {
     }
 
     /**
-     * [T-p1-3-shell-auth-frames] 从 pre-BEGIN 缓冲里捕获会话秘密并连同行尾删掉
-     * （不进丢弃样本、不进死亡缓冲）。每次 push 至多扫一次、命中一次后短路：
-     * pre-BEGIN 窗口的 carry 被持续裁剪，扫描成本有界。
+     * [T-p1-3-shell-auth-frames] 从 pre-BEGIN 缓冲里捕获两条 bootstrap 协议行
+     * （会话秘密 + cksum 探针）并连同行尾删掉（不进丢弃样本、不进死亡缓冲）。
+     * 每次 push 至多扫两次、命中后短路：pre-BEGIN 窗口的 carry 被持续裁剪，
+     * 扫描成本有界。
      */
-    private fun captureAuth() {
-        if (authTag != null) return
-        val text = carry.toString()
-        if (!text.contains("__MINIS_AUTH_")) return
-        val match = authRegex.find(text) ?: return
-        authTag = match.groupValues[1]
-        val delEnd = run {
-            var end = match.range.last + 1
-            if (carry.length >= end + 2 && carry.substring(end, end + 2) == "\r\n") end + 2
-            else if (carry.length >= end + 1 && carry[end] == '\n') end + 1
-            else end
+    private fun captureHandshake() {
+        if (authTag == null) {
+            val text = carry.toString()
+            if (text.contains("__MINIS_AUTH_")) {
+                authRegex.find(text)?.let {
+                    authTag = it.groupValues[1]
+                    stripProtocolLine(it.range)
+                }
+            }
         }
-        carry.delete(match.range.first, delEnd)
+        if (tagProbe == null) {
+            val text = carry.toString()
+            if (text.contains("__MINIS_TAGPROBE_")) {
+                tagProbeRegex.find(text)?.let {
+                    tagProbe = it.groupValues[1]
+                    stripProtocolLine(it.range)
+                }
+            }
+        }
+    }
+
+    /** 删除 carry 中 [range] 处的协议行及其行尾换行。 */
+    private fun stripProtocolLine(range: IntRange) {
+        var end = range.last + 1
+        if (carry.length >= end + 2 && carry.substring(end, end + 2) == "\r\n") end += 2
+        else if (carry.length >= end + 1 && carry[end] == '\n') end += 1
+        carry.delete(range.first, end)
     }
 
     private fun noteDropped(upto: Int) {

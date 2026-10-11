@@ -164,4 +164,112 @@ class CheckpointPersistenceTest {
         // 无凭据的路径返回 null（b.txt 只有 pre-image）
         assertNull(revived.latestAfterImage("s", "b.txt"))
     }
+
+    /** 落盘一轮 turn0（同步直执行，写入即刻可见）并返回磁盘目录。 */
+    private fun seedTurnOnDisk(name: String): File {
+        val root = temporaryFolder.newFolder(name)
+        val writer = CheckpointStore()
+        writer.persistence = FileCheckpointPersistence(root)
+        writer.diskWriteExecutor = java.util.concurrent.Executor { it.run() }
+        writer.beginTurn("s", "第一轮", "a1")
+        writer.capture("s", "a.txt", "v1")
+        writer.beginTurn("s", "第二轮") // 关闭 turn0 落盘
+        return root
+    }
+
+    /**
+     * [T-p2-checkpointstore-restore-gate] 旧实现先登记"已恢复"再读盘，并发调用者
+     * 直接跳过恢复、拿到空 SessionState（rewind 静默"无文件可回滚"，轮号从 0 重来）。
+     * 本用例把第一个调用者钉在读盘中间，断言第二个调用者必须等它完成并看到同一份
+     * 恢复结果，而不是立刻返回空表。
+     */
+    @Test
+    fun `concurrent callers wait for an in-flight restore instead of seeing empty state`() {
+        val root = seedTurnOnDisk("ckpt-race")
+        val real = FileCheckpointPersistence(root)
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val reads = java.util.concurrent.atomic.AtomicInteger(0)
+        val reader = CheckpointStore()
+        reader.persistence = object : CheckpointStore.Persistence {
+            override fun write(sessionId: String, checkpoint: Checkpoint) = real.write(sessionId, checkpoint)
+            override fun readAll(sessionId: String): List<Checkpoint> {
+                reads.incrementAndGet()
+                entered.countDown()
+                gate.await()
+                return real.readAll(sessionId)
+            }
+            override fun delete(sessionId: String) = real.delete(sessionId)
+        }
+
+        // daemon：断言失败提前退出时，被 gate 卡住的线程不得把测试 JVM 一起吊死。
+        val first = Thread { reader.checkpoints("s") }.apply { isDaemon = true; start() }
+        assertTrue("第一个调用者没有进入读盘", entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+
+        var secondSeen: List<CheckpointMeta>? = null
+        val second = Thread { secondSeen = reader.checkpoints("s") }.apply { isDaemon = true; start() }
+        second.join(300)
+        assertTrue(
+            "恢复尚未完成时第二个调用者不得提前返回（旧实现读到的就是空表）",
+            second.isAlive,
+        )
+
+        gate.countDown()
+        first.join(5_000)
+        second.join(5_000)
+        assertEquals("两个调用者必须复用同一次读盘", 1, reads.get())
+        assertEquals(listOf(0), secondSeen?.map { it.turn })
+        assertFalse("第一个调用者也不得拿到空表", first.isAlive)
+    }
+
+    /**
+     * [T-p2-checkpointstore-restore-gate] 恢复失败不登记"已恢复"：下一个调用者必须
+     * 重试并把磁盘态读回来（旧实现靠失败时移除标记保证同样语义，新实现不能丢）。
+     */
+    @Test
+    fun `failed restore is not registered and the next access retries`() {
+        val root = seedTurnOnDisk("ckpt-retry")
+        val real = FileCheckpointPersistence(root)
+        val attempts = java.util.concurrent.atomic.AtomicInteger(0)
+        val reader = CheckpointStore()
+        reader.persistence = object : CheckpointStore.Persistence {
+            override fun write(sessionId: String, checkpoint: Checkpoint) = real.write(sessionId, checkpoint)
+            override fun readAll(sessionId: String): List<Checkpoint> {
+                if (attempts.incrementAndGet() == 1) throw java.io.IOException("disk hiccup")
+                return real.readAll(sessionId)
+            }
+            override fun delete(sessionId: String) = real.delete(sessionId)
+        }
+
+        assertTrue("恢复失败时按原语义返回空态", reader.checkpoints("s").isEmpty())
+        assertEquals("第二次访问必须重试恢复", 1, reader.checkpoints("s").size)
+        assertEquals(2, attempts.get())
+    }
+
+    /**
+     * [T-p2-checkpoint-restore-warmup] 预热后（会话装载期的后台调用）后续访问不再
+     * 触发任何读盘——冷启动后首轮 beginTurn 不付恢复成本。
+     */
+    @Test
+    fun `prefetch restores eagerly so later access reads no disk`() {
+        val root = seedTurnOnDisk("ckpt-warmup")
+        val real = FileCheckpointPersistence(root)
+        val reads = java.util.concurrent.atomic.AtomicInteger(0)
+        val reader = CheckpointStore()
+        reader.persistence = object : CheckpointStore.Persistence {
+            override fun write(sessionId: String, checkpoint: Checkpoint) = real.write(sessionId, checkpoint)
+            override fun readAll(sessionId: String): List<Checkpoint> {
+                reads.incrementAndGet()
+                return real.readAll(sessionId)
+            }
+            override fun delete(sessionId: String) = real.delete(sessionId)
+        }
+
+        reader.prefetch("s")
+        assertEquals(1, reads.get())
+        assertEquals(1, reader.checkpoints("s").size)
+        assertEquals("预热后 beginTurn 不得再读盘", 1, reads.get())
+        reader.beginTurn("s", "第三轮")
+        assertEquals(1, reads.get())
+    }
 }

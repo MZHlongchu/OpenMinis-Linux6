@@ -72,6 +72,7 @@
     <string name="resume_action">Sürdür</string>
     <string name="search_chats_placeholder">Sohbetlerde ara…</string>
     <string name="search_no_results">\"%1$s\" için sonuç bulunamadı</string>
+    <string name="search_truncated_notice">Yalnızca en yeni %1$d eşleşme gösteriliyor — aramanızı daraltın.</string>
     <string name="stop_tool">Aracı durdur</string>
     <string name="mic_permission_title">Mikrofon izni gerekli</string>
     <string name="mic_permission_message">Sesli giriş için mikrofon izni gerekir. Minis Ultra\'e izin vermek üzere Ayarları Aç\'a dokunun.</string>

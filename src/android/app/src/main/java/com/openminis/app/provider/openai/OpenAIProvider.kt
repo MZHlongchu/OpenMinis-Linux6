@@ -333,6 +333,25 @@ class OpenAIProvider private constructor(
     var absoluteEndpointOverride: String? = null
 
     /**
+     * [T-android-model-use-provider-pollution] 复位上面六个"每次调用"的请求参数。
+     *
+     * 它们由请求构造器在**发送时**读取，而 `ProviderFactory.create` 会记忆化
+     * provider（[T-android-provider-memo]），聊天发送与 `minis-model-use` 拿到的是
+     * **同一个对象**：一次 passthrough 调用写下的 extra_header（可覆盖
+     * Authorization）/ endpoint 覆写 / extra_body 会污染该实例之后所有聊天请求。
+     * 因此写这些字段的调用方必须在 finally 里复位（ModelUseOffloadHandler 现状），
+     * 并且其 provider 由 `ProviderFactory.createEphemeral` 单独构建、不进 memo。
+     */
+    fun clearPerCallOverrides() {
+        imageExtraBody = emptyMap()
+        imageExtraHeaders = emptyMap()
+        imagePathOverride = null
+        chatExtraBody = emptyMap()
+        chatExtraHeaders = emptyMap()
+        absoluteEndpointOverride = null
+    }
+
+    /**
      * [T-android-model-use-passthrough-mode] Build a URL from the provider's
      * scheme+host(+port) ONLY, with [path] replacing the entire URL path.
      * [path] must start with "/" and may carry a query string. Credentials stay
@@ -425,6 +444,19 @@ class OpenAIProvider private constructor(
      * output items, so it keeps chronological reconstruction.
      */
     override val streamTextIsMonolithic: Boolean get() = usesChatCompletionsAPI
+
+    /**
+     * [T-stream-watchdog-budget-parity / #188] The streaming path already
+     * bounds its own pre-first-chunk window inside [rawStreamMessage]: the
+     * upload phase by [STREAM_UPLOAD_CAP_MS], then the TTFB phase by
+     * [STREAM_TTFB_TIMEOUT_MS] measured from upload completion — 240s worst
+     * case. Declaring that sum here lets the outer stream watchdog share the
+     * budget, so its phase 1 no longer cuts a slow-but-healthy relay off at
+     * 45s/90s before the provider's own (more precise, connection-evicting)
+     * watchdog can act.
+     */
+    override val streamFirstChunkBudgetMs: Long
+        get() = STREAM_UPLOAD_CAP_MS + STREAM_TTFB_TIMEOUT_MS
 
     /**
      * [T-codex-gpt-image2-oauth-android] gpt-image-2 is a special image-
@@ -653,16 +685,26 @@ class OpenAIProvider private constructor(
             imageParts = imageParts,
             tools = tools,
             thinkingLevel = thinkingLevel,
-            stream = false,
-        ).collect { chunk ->
-            when (chunk) {
-                is LLMStreamChunk.Text -> textBuf.append(chunk.text)
-                is LLMStreamChunk.Usage -> usage = chunk.usage
-                is LLMStreamChunk.Finished -> stopReason = chunk.stopReason
-                is LLMStreamChunk.MediaAttachment -> media.add(chunk.attachment)
-                else -> Unit
+            // [T-android-sendmessage-stream-true] 这里必须是流式请求 —— 正是本方法
+            // KDoc 承诺的 "we always issue a streaming request internally"。回归
+            // 2f45981d 把它改成 stream=false，代价是：Codex OAuth 后端（同一后端的
+            // 图像体硬编码 stream=true）直接 400 "Stream must be set to true"；
+            // 而 Responses 路径没有 Chat Completions 那条"非 SSE 单 JSON"兜底，
+            // 一个真返回 JSON 的中转会让整条流静默产出空回复（调用方把空文本当成功）。
+            stream = true,
+        ).failOnSilentEmptyCompletion(name)
+            // [T-android-sendmessage-stream-true] 与 streamMessageClamped 同款兜底：
+            // 既无内容又无 finish reason 的流是上游静默断流，非流式入口同样必须硬失败，
+            // 不能返回空 LLMResponse（model-use 曾把空文本当成成功写出 --output）。
+            .collect { chunk ->
+                when (chunk) {
+                    is LLMStreamChunk.Text -> textBuf.append(chunk.text)
+                    is LLMStreamChunk.Usage -> usage = chunk.usage
+                    is LLMStreamChunk.Finished -> stopReason = chunk.stopReason
+                    is LLMStreamChunk.MediaAttachment -> media.add(chunk.attachment)
+                    else -> Unit
+                }
             }
-        }
         LLMResponse(textBuf.toString(), stopReason, usage, media)
     }
 

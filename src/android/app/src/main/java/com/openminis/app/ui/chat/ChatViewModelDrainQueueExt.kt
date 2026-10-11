@@ -70,7 +70,8 @@ internal suspend fun ChatViewModel.materializeQueuedPromptsAsUserTurn(): Boolean
 
     // [T-truncation-digest-clear] drain 也是上下文重置点（打断后恢复/轮末
     // 消费）：digest 摘录里可能含已被用户删除/放弃的轮次，注入即串上下文。
-    clearHistoryDigestState()
+    // [T-queue-digest-clear-after-consume] 清空点已后移到下面的「消费确定」处：
+    // 上面那个空内容早退没有注入任何东西，抹掉摘录就是白丢窗口外上下文。
     Log.i(ChatViewModel.TAG, "📨[DRAIN] Draining ${queued.size} queued prompt(s): " +
         queued.joinToString(", ") { "${it.id}=\"${it.text.take(20)}...\"" })
 
@@ -111,6 +112,10 @@ internal suspend fun ChatViewModel.materializeQueuedPromptsAsUserTurn(): Boolean
     // —— 消费确定：清队（按 id 精确移除，不吃并发新入队）+ 气泡翻转 + 落盘 ——
     val queuedIds = queued.map { it.id }.toSet()
     _promptQueue.value = _promptQueue.value.filterNot { it.id in queuedIds }
+    // [T-truncation-digest-clear][T-queue-digest-clear-after-consume] 清空点必须在
+    // 「消费确定」之后：空内容早退与 prepare 异常都到不了这里，摘录因此不会在
+    // 「一行都没注入」的尝试里被白抹掉。
+    clearHistoryDigestState()
     _messages.value = _messages.value.map { m ->
         if (m.queuedPromptId != null && queuedIds.contains(m.queuedPromptId)) {
             m.copy(isQueued = false, queuedPromptId = null)

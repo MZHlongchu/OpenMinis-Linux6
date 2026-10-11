@@ -72,6 +72,7 @@
     <string name="resume_action">再開</string>
     <string name="search_chats_placeholder">会話を検索…</string>
     <string name="search_no_results">\"%1$s\" の結果はありません</string>
+    <string name="search_truncated_notice">最新の %1$d 件のみ表示しています。キーワードを絞り込むとさらに表示されます。</string>
     <string name="stop_tool">ツールを停止</string>
     <string name="mic_permission_title">マイクの権限が必要です</string>
     <string name="mic_permission_message">音声入力にはマイクの権限が必要です。「設定を開く」をタップして Minis Ultra に許可を与えてください。</string>

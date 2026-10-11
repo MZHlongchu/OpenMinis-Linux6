@@ -143,19 +143,21 @@ class SessionListViewModel(
     val searchResults = MutableStateFlow<List<ChatSessionEntity>>(emptyList())
 
     /**
-     * True while the user has typed something but the debounced search query
-     * has not yet finalised + run. Drives the trailing CircularProgressIndicator
-     * in the search field so a slow query (or fast typing) shows visible
-     * progress instead of a stale-results-then-snap transition. Cleared the
-     * moment a query resolves to results (or to empty when query is blank).
+     * [T-search-truncation-visible] 命中数超过仓库上限（`MAX_SEARCH_SESSIONS`）时为
+     * true：列表里只是最近的一批，不是全部命中。静默截断会让用户以为"历史里就这么多"。
+     */
+    val searchTruncated = MutableStateFlow(false)
+
+    /**
+     * True while the user has typed something but the debounced search has not
+     * finalised + run. Drives the trailing CircularProgressIndicator in the
+     * search field (instead of a stale-results-then-snap transition).
      */
     val isSearching = MutableStateFlow(false)
 
     /**
-     * Per-session content snippet centred on the search-query match. Only
-     * populated for sessions whose match is in message content (not just the
-     * title). Cleared whenever the search query goes blank. Keyed by
-     * session id; absent entries mean "title-only match — no snippet needed".
+     * Per-session snippet centred on the content match; absent entry = the match
+     * was in the title (no snippet needed). Cleared when the query goes blank.
      */
     val searchSnippets = MutableStateFlow<Map<String, String>>(emptyMap())
 
@@ -165,11 +167,9 @@ class SessionListViewModel(
      * Populated/cleared together with the snippets; absent entry = title-only
      * match, so the tap opens the session at the tail with no jump.
      *
-     * SessionListScreen stashes this into DeepLinkCoordinator right before
-     * opening the session; ChatScreen pages older history until the row is
-     * loaded, scrolls to it and pulses a highlight. The map is the ONLY
-     * bridge — the anchor never rides inside ChatSessionEntity (which the
-     * list also renders for non-search contexts).
+     * SessionListScreen stashes it into DeepLinkCoordinator before opening;
+     * ChatScreen pages old history to that row and pulses a highlight. It never
+     * rides inside ChatSessionEntity (which the list renders for non-search too).
      */
     val searchAnchors = MutableStateFlow<Map<String, String>>(emptyMap())
 
@@ -374,19 +374,19 @@ class SessionListViewModel(
                 .debounce(300)
                 .collect { (q, active) ->
                     if (active && q.isNotBlank()) {
-                        val results = chatRepository.searchSessions(q)
-                        searchResults.value = results
-                        // Compute per-session content snippets off the main
-                        // thread. Sessions whose title already matches don't
-                        // need a snippet — we only walk messages when the
-                        // title doesn't contain the query.
+                        val page = chatRepository.searchSessions(q)
+                        searchResults.value = page.sessions
+                        // [T-search-truncation-visible] 截断要让 UI 说得出"这只是最近的一批"。
+                        searchTruncated.value = page.truncated
+                        // Snippets walk messages only when the title doesn't match.
                         val snips = withContext(Dispatchers.IO) {
-                            buildContentHits(results, q)
+                            buildContentHits(page.sessions, q)
                         }
                         searchSnippets.value = snips.snippets
                         searchAnchors.value = snips.anchors
                     } else {
                         searchResults.value = emptyList()
+                        searchTruncated.value = false
                         searchSnippets.value = emptyMap()
                         searchAnchors.value = emptyMap()
                     }
@@ -685,24 +685,24 @@ class SessionListViewModel(
     }
 
     /**
-     * iOS requestDeleteFolderWithSessions parity: delete the folder AND every
-     * member session. Reuses the standard per-session delete path (repo
-     * delete + VM cache release + badge clear) rather than a bespoke one —
-     * that path owns the correctness. The folder row itself is dropped via
-     * dissolveFolder AFTER the members are gone (it is empty by then, so
-     * dissolve degenerates to deleting the row), mirroring iOS's
-     * pendingDeleteFolderId epilogue.
+     * iOS requestDeleteFolderWithSessions parity: delete the folder AND every member
+     * session, reusing the repository delete path (repo delete + VM cache release +
+     * badge clear) rather than a bespoke one — that path owns the correctness.
+     * [T-bodies-gc-batch] 成员走批量删除，孤儿正文回收只跑一轮。The folder row itself is
+     * dropped via dissolveFolder AFTER the members are gone (it is empty by then, so
+     * dissolve degenerates to deleting the row), mirroring iOS's epilogue.
      */
     fun deleteFolderWithSessions(folderId: String) {
         viewModelScope.launch {
             val memberIds = chatRepository.sessionIdsInFolder(folderId)
+            // [T-bodies-gc-batch] 逐个删会让每个会话各扫一遍全表 DISTINCT body_ref。
+            chatRepository.deleteSessions(memberIds)
             for (id in memberIds) {
-                chatRepository.deleteSession(id)
                 ChatViewModelStore.release(id)
                 com.openminis.app.service.SessionBadgeStore.clear(id)
             }
             chatRepository.dissolveFolder(folderId)
-            SessionWorkspace.deleteProject(context.filesDir, folderId)
+            withContext(Dispatchers.IO) { SessionWorkspace.deleteProject(context.filesDir, folderId) }
             // Just drop the dead id — do NOT use expandOnly here. The folder no
             // longer exists, so there is nothing to expand; re-deriving the set
             // from the surviving folders would leave one of them open purely

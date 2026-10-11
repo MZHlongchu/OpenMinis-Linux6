@@ -77,6 +77,7 @@
     <string name="resume_action">Lanjutkan</string>
     <string name="search_chats_placeholder">Cari obrolan…</string>
     <string name="search_no_results">Tidak ada hasil untuk \"%1$s\"</string>
+    <string name="search_truncated_notice">Hanya %1$d kecocokan terbaru yang ditampilkan — persempit pencarian untuk melihat lebih banyak.</string>
     <string name="stop_tool">Hentikan alat</string>
     <string name="mic_permission_title">Perlu izin mikrofon</string>
     <string name="mic_permission_message">Input suara memerlukan izin mikrofon. Ketuk Buka Pengaturan untuk mengizinkannya bagi Minis Ultra.</string>

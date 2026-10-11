@@ -2,9 +2,34 @@ name: PR Checks
 
 # Regression gate for every pull request. Modeled on cuplivo's pr-check.yml
 # (format + l10n + analyze + test on each PR), adapted to this repo:
-#   * compileReleaseKotlin — type-checks main sources (fast fail before tests)
-#   * testReleaseUnitTest — the full JVM suite (only variant; debug is
-#     disabled via androidComponents, see app/build.gradle.kts)
+#   * compileFullReleaseKotlin / compileSlimReleaseKotlin plus the matching
+#     compile<Variant>JavaWithJavac tasks — type-check main Kotlin *and* Java
+#     sources for both flavors (fast fail before tests)
+#   * testFullReleaseUnitTest / testSlimReleaseUnitTest / :harness:test — the
+#     full JVM suite. :harness:test carries the device-crash bytecode guard
+#     (OrgJsonMemberCallGuardTest), which scans the app's *device* variant
+#     outputs on both sides: Kotlin under app/build/tmp/kotlin-classes and javac
+#     under app/build/intermediates/javac (.java sources + annotation-processor
+#     generated Java — android.jar's org.json has toList()/toMap() too, so a Java
+#     source calling them compiles fine and crashes on device). Unit-test /
+#     test-fixture dirs are excluded: they run against desktop org.json and never
+#     enter the APK.
+#     [T-d8-guard-fresh] Those outputs are read at test runtime, so
+#     harness/build.gradle.kts declares both as a :harness:test input fingerprint
+#     and marks that task neither up-to-date nor cacheable — a PR that changes app
+#     bytecode can never be green-lit by a report restored from the build cache.
+#     [T-e9-guard-coverage] The guard is fail-closed in CI: OPENMINIS_ORGJSON_GUARD_STRICT=1
+#     below turns missing app outputs into a FAIL, never a skip (skipping is only
+#     for local/IDE runs where the app was never compiled). It also rejects a
+#     *partial* scan: every flavor compiled by the step above must be present with
+#     a non-zero class count, so a half-written variant (or a leftover output
+#     directory) cannot pass as "scanned". That is why compiling and testing stay
+#     two separate steps — inside a single invocation :harness:test has no ordering
+#     edge against app compilation and --parallel can hand it half-written outputs.
+#     The "guard must not have been skipped" step then fails the job unless the
+#     report also carries this run's one-shot nonce and the per-flavor class
+#     counts, which a restored (UP-TO-DATE / cached) report cannot contain.
+#     Debug is disabled via androidComponents, see app/build.gradle.kts
 #   * check_new_untranslated.py — rejects PRs that add a user-visible
 #     string without translating it into every shipped locale.
 # The heavy assemble/NDK/sandbox-assets path stays in android-apk.yml; this
@@ -27,6 +52,12 @@ env:
   ANDROID_PLATFORM: "android-36"
   ANDROID_BUILD_TOOLS: "35.0.0"
   GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
+  # [T-guard-app-root-skip] 工作流级（Gradle daemon 启动时就在环境里，测试 JVM
+  # 继承）：本机/IDE 单独跑 :harness:test 而 app 没编译时，字节码守卫显式跳过；
+  # CI 里 strict=1 把它升级为**失败**（不是跳过）——编译步骤失效时门禁不会靠一次
+  # 跳过悄悄变绿。就算它没穿透到测试 JVM，下面 "guard must not have been skipped"
+  # 那步也会读测试报告兜底（含本次 run 的随机数校验），门禁不会假绿。
+  OPENMINIS_ORGJSON_GUARD_STRICT: "1"
 
 jobs:
   checks:
@@ -59,7 +90,7 @@ jobs:
           /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager \
             "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}"
 
-      - name: Compile Kotlin (release variant)
+      - name: Compile Kotlin + Java (release variants)
         working-directory: src/android
         env:
           ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -72,15 +103,110 @@ jobs:
           chmod +x gradlew
           # [T-apk-flavors] With the engine flavor dimension the variant names
           # carry the flavor: full (ML Kit) / slim (no-ML-Kit stub).
-          ./gradlew :app:compileFullReleaseKotlin :app:compileSlimReleaseKotlin --parallel --stacktrace
+          # [T-e9-guard-javac] compile<Variant>JavaWithJavac is compiled here too:
+          # the guard also scans app/build/intermediates/javac/<variant>, and a
+          # .java source only ever shows up in javac output. :harness:test runs in
+          # the next step, so both flavors are fully on disk before it scans —
+          # inside one invocation there is no ordering edge between them and
+          # --parallel would hand the guard half-written outputs.
+          ./gradlew :app:compileFullReleaseKotlin :app:compileSlimReleaseKotlin \
+            :app:compileFullReleaseJavaWithJavac :app:compileSlimReleaseJavaWithJavac \
+            --parallel --stacktrace
 
-      - name: Unit tests (release variants)
+      - name: Unit tests (app flavors + harness)
         working-directory: src/android
         env:
           ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
         # [T-apk-flavors] Both flavors: the full suite against the real engine,
         # the slim suite against the same-API stub (pack state + cache behavior).
-        run: ./gradlew :app:testFullReleaseUnitTest :app:testSlimReleaseUnitTest --parallel --stacktrace
+        # [T-ci-harness-gate] :harness:test 原本没人跑（harness 全量单测零 CI 兜底，
+        # 只有 docs 里的人工约定），且其中的 OrgJsonMemberCallGuardTest 要扫 app 的
+        # 编译产物（app/build/tmp/kotlin-classes/<variant> 与
+        # app/build/intermediates/javac/<variant>）——所以它必须排在上面
+        # "Compile Kotlin + Java (release variants)" 之后：同一 invocation 内两个任务
+        # 无依赖关系，顺序不保证；分步则产物必然在场。
+        # [T-d8-guard-fresh] 顺序依旧只由这两步保证（harness/build.gradle.kts 只声明
+        # 字节码指纹，不硬绑 :app 的编译任务），但门禁不再依赖它"没被跳过"：
+        # :harness:test 既不 UP-TO-DATE 也不进 build cache，报告只对本 run 扫到的
+        # app 字节码负责。这里再把一次性随机数交给它（-P → systemProperty → 测试
+        # JVM），下一步用同一个值校验报告确实是本次运行的产物，而不是 UP-TO-DATE /
+        # 缓存里还原出来的旧结论（缓存产物不可能带上本 run 的随机数）。
+        run: |
+          nonce="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${RANDOM}${RANDOM}${RANDOM}"
+          echo "ORGJSON_GUARD_RUN_NONCE=$nonce" >> "$GITHUB_ENV"
+          ./gradlew :app:testFullReleaseUnitTest :app:testSlimReleaseUnitTest :harness:test \
+            --parallel --stacktrace -Popenminis.orgJsonGuard.runNonce="$nonce"
+
+      # [T-guard-app-root-skip] 不依赖环境变量是否穿透到测试 JVM 的兜底：守卫一旦
+      # 以「跳过」收场，就说明 app 设备变体产物没扫到，门禁不许变绿。判据都用
+      # ASCII：报告在（跑了）、skipped="0"（没跳过）、ORGJSON_GUARD_APP_ROOTS= 标记
+      # 在 <system-out> 里（app 侧真的扫过）。报告文件名是 Gradle 标准格式
+      # （TEST-<FQCN>.xml）；改名/挪测试任务会让这里直接红，而不是悄悄失效。
+      # [T-d8-guard-fresh] 再一条：报告里还必须出现**本 run 的一次性随机数**。
+      # :harness:test 已经被 build.gradle.kts 设成永不 UP-TO-DATE、永不进 build
+      # cache（否则缓存里还原的报告照样带着 skipped="0" 与扫描标记，门禁假绿）；
+      # 这条判据把"缓存产物"这条路彻底堵死：还原出来的报告是上一次运行的产物，
+      # 不可能带上本 run 的随机数。随机数缺失或为空同样判红（fail-closed）——
+      # 宁可红，也不放行一份没人确认过的新鲜度未知的报告。
+      # [T-e9-guard-coverage] 最后三条堵"扫了但没扫全"：
+      #   * 每个风味（fullRelease / slimRelease，与守卫的 expectedDeviceVariants
+      #     和上面的编译步骤三处同步）都必须在报告里留下**非零 class 数**的扫描
+      #     证据，Kotlin 侧与 javac 侧各一份：半成品/残留的空壳目录要么带 0、要么
+      #     干脆缺席，这里判红。
+      #   * 报告里的总 class 数（ORGJSON_GUARD_APP_CLASSES）必须 >= 1000
+      #     = 2 x 守卫的 minDeviceClassesPerVariant(500)：只扫到一个风味达不到。
+      #     这两个数字由 OrgJsonGuardGateWiringTest 交叉核对，只改一个会红。
+      # [T-e9-guard-javac] javac 侧同样要留下证据：Java 源（含注解处理器生成的
+      # Java）不产出 Kotlin 字节码，只扫 kotlin-classes 时写 JSONObject.toMap()
+      # 的 .java 源在 CI 全绿、真机闪退。
+      - name: Device-crash bytecode guard must not have been skipped
+        working-directory: src/android
+        run: |
+          f=harness/build/test-results/test/TEST-com.openminis.app.harness.agent.OrgJsonMemberCallGuardTest.xml
+          if [ -z "${ORGJSON_GUARD_RUN_NONCE:-}" ]; then
+            echo "::error::ORGJSON_GUARD_RUN_NONCE missing - the unit test step did not export this run's nonce"
+            exit 1
+          fi
+          if [ ! -f "$f" ]; then
+            echo "::error::$f missing - OrgJsonMemberCallGuardTest did not run"
+            exit 1
+          fi
+          if ! grep -q 'skipped="0"' "$f"; then
+            echo "::error::OrgJsonMemberCallGuardTest skipped a case - app device-variant classes were missing"
+            exit 1
+          fi
+          if ! grep -q 'ORGJSON_GUARD_APP_ROOTS=' "$f"; then
+            echo "::error::no ORGJSON_GUARD_APP_ROOTS marker in the report - the app side of the guard never ran"
+            exit 1
+          fi
+          if ! grep -q "ORGJSON_GUARD_RUN_NONCE=${ORGJSON_GUARD_RUN_NONCE}" "$f"; then
+            echo "::error::report does not carry this run's nonce - it was reused from UP-TO-DATE/build cache instead of scanning the current app bytecode"
+            exit 1
+          fi
+          # [T-e9-guard-coverage] 逐个风味核对扫描证据（Kotlin + javac 两侧），
+          # 清单必须与 OrgJsonMemberCallGuardTest.expectedDeviceVariants 和编译步骤一致。
+          for v in fullRelease slimRelease; do
+            if ! grep -Eq "ORGJSON_GUARD_APP_ROOTS=.*${v}\([1-9][0-9]*\)" "$f"; then
+              echo "::error::${v} has no non-zero Kotlin class count in the report - the app bytecode scan was partial (half-written or leftover outputs?)"
+              exit 1
+            fi
+            if ! grep -Eq "ORGJSON_GUARD_APP_JAVAC_ROOTS=.*${v}\([1-9][0-9]*\)" "$f"; then
+              echo "::error::${v} has no javac output in the report - its .java sources were never scanned"
+              exit 1
+            fi
+          done
+          # [T-e9-guard-coverage] 总 class 数下限 = 2 x 守卫的 minDeviceClassesPerVariant
+          # （改这个数字要同时改 OrgJsonMemberCallGuardTest，接线测试会交叉核对）。
+          total=$(grep -o 'ORGJSON_GUARD_APP_CLASSES=[0-9]*' "$f" | head -n1 | cut -d= -f2)
+          case "${total:-}" in
+            ''|*[!0-9]*)
+              echo "::error::no usable ORGJSON_GUARD_APP_CLASSES marker in the report - cannot prove the scan covered every flavor"
+              exit 1 ;;
+          esac
+          if [ "$total" -lt 1000 ]; then
+            echo "::error::only $total app classes were scanned (< 1000) - a variant was half-written or missing"
+            exit 1
+          fi
 
       - name: No new untranslated strings
         if: github.event_name == 'pull_request'

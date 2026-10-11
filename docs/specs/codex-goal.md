@@ -187,7 +187,7 @@ Turn 结束后若 Goal 仍为 `Active`，系统自动开新 Turn。需同时满�
 
 ### MVP（行为已像 Codex，可测）
 
-1. `SessionGoal` 实体 + Room **16** 迁移（含 downgrade，现有链有这个传统；`DatabaseVersionGuard.CODE_DB_VERSION` 同步）。
+1. `SessionGoal` 实体 + Room **16** 迁移（只加升级迁移；**不要**加 downgrade——评审 data-db#6 已确认注册降级迁移永不执行，见 `AppDatabase` 的 `[T-b11-no-downgrade-migrations]` 策略块。`DatabaseVersionGuard.CODE_DB_VERSION` 同步）。
 2. `create_goal` / `update_goal` / `get_goal` + `/goal` slash。
 3. 每轮从 DB 注入 `<goal_context>`。
 4. `runAgentLoop` 正常结束后 `maybeContinueGoal()`，带无活动抑制 + 单次续跑互斥。

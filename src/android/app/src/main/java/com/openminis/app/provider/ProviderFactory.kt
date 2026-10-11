@@ -66,6 +66,31 @@ object ProviderFactory {
     }
 
     /**
+     * [T-android-model-use-provider-pollution] Build a provider that is NEVER
+     * entered into the memo, for callers that mutate per-call state on the
+     * instance before sending.
+     *
+     * `OpenAIProvider` carries per-call request knobs (`imageExtraBody` /
+     * `imagePathOverride` / `imageExtraHeaders` / `chatExtraBody` /
+     * `chatExtraHeaders` / `absoluteEndpointOverride`) that the request builders
+     * read at send time. `ModelUseOffloadHandler` writes them before every
+     * passthrough call and its own comment always assumed a fresh provider per
+     * invocation — but [create] returns the memoized object ([T-android-provider-memo]),
+     * the very same one the UI's chat turns go through. One `minis-model-use`
+     * call therefore leaked its override into every later chat request of that
+     * instance, including a rewritten Authorization header and a replaced URL
+     * path. Handing the mutating caller an uncached instance removes the sharing
+     * at the root; one extra OkHttpClient on that cold (CLI-invoked) path is the
+     * accepted cost. Never cached, so it can never be shared again.
+     */
+    fun createEphemeral(
+        instance: ProviderInstance,
+        apiKey: String,
+        model: LLMModel,
+        context: Context? = null,
+    ): LLMProvider = createUncached(instance, apiKey, model, context)
+
+    /**
      * Drop only one instance's memoized providers. Keys start with the
      * instance id followed by `|`, so the prefix match cannot bleed into
      * another instance (ids are UUID-shaped; the delimiter ends the match).

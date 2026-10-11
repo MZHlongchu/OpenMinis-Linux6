@@ -1,5 +1,6 @@
 package com.openminis.app.harness.checkpoint
 
+import com.openminis.app.harness.fs.SessionPath
 import java.io.File
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -10,6 +11,8 @@ import kotlinx.serialization.json.Json
  * https://github.com/wkbin/taixu
  *
  * 默认文件系统持久化：`<root>/<sessionId>/<turn>.index.json` + `<root>/<sessionId>/<turn>/<seq>.snap`。
+ * sessionId 先经 [SessionPath] 单射转义再当目录名（UUID 会话 id 转义后原样，
+ * 磁盘布局不变；含分隔符/`_` 的 id 才改名，正是它以前能越出 root 的那部分）。
  * 根目录由宿主指定（应用私有目录，不经 SAF；不会出现在 PRoot 工作区中，模型不可见）。
  */
 class FileCheckpointPersistence(
@@ -36,8 +39,24 @@ class FileCheckpointPersistence(
 
     private val json = Json { ignoreUnknownKeys = true }
 
+    /**
+     * [T-checkpoint-safe-session-dir] 与 `FilePromptQueuePersistence` /
+     * `FileHarnessRuntimePersistence` 统一口径：sessionId 是不可信输入，先做单射
+     * 转义再当目录名，只有转义后确实落在 [root] 之内才返回。旧实现直接
+     * `File(root, sessionId)`，而 [delete] 是 `deleteRecursively()` ——一个含
+     * `..` 或分隔符的 id（deep link 侧将来若放开建行）就能删掉 root 之外的东西，
+     * 两个不同 id 也能撞进同一份快照。null = 拒绝该 id（不静默降级成 root）。
+     */
+    private fun dirFor(sessionId: String): File? {
+        val dir = SessionPath.resolve(root, sessionId)
+        if (dir == null) {
+            System.err.println("checkpoint: refusing unsafe session id segment (len=${sessionId.length})")
+        }
+        return dir
+    }
+
     override fun write(sessionId: String, checkpoint: Checkpoint) {
-        val sessionDir = File(root, sessionId)
+        val sessionDir = dirFor(sessionId) ?: return
         val turnDir = File(sessionDir, checkpoint.turn.toString())
         turnDir.mkdirs()
         val entries = mutableMapOf<Int, String>()
@@ -112,7 +131,7 @@ class FileCheckpointPersistence(
     }
 
     override fun readAll(sessionId: String): List<Checkpoint> {
-        val sessionDir = File(root, sessionId)
+        val sessionDir = dirFor(sessionId) ?: return emptyList()
         val indexFiles = sessionDir.listFiles { file -> file.name.endsWith(".index.json") } ?: return emptyList()
         return indexFiles.mapNotNull { indexFile ->
             runCatching {
@@ -148,7 +167,15 @@ class FileCheckpointPersistence(
     }
 
     override fun delete(sessionId: String) {
-        File(root, sessionId).deleteRecursively()
+        // [T-checkpoint-safe-session-dir] 删除是 deleteRecursively，越界代价最高：
+        // 目录由 [dirFor] 构造、已经过 staysInside 断言，这里在真正动手前再挡一道
+        // ——断言放在破坏性调用点，将来谁把路径构造搬走也删不到 root 之外。
+        val dir = dirFor(sessionId) ?: return
+        if (!SessionPath.staysInside(root, dir)) {
+            System.err.println("checkpoint: refusing to delete outside the checkpoint root")
+            return
+        }
+        dir.deleteRecursively()
     }
 
     private companion object {

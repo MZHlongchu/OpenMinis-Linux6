@@ -172,6 +172,13 @@ internal fun ChatViewModel.sendMessage(
     viewModelScope.launch {
         var streamLaunched = false
         try {
+        // [T-delete-from-here-inflight] 「从此处删除」的 DB 截断是异步的，而它
+        // 的 deleteMessagesAfter 按 `sort_order >= cutoff` 删行：本函数此前会在这
+        // 段窗口里把新 user 行落库，落库的 sort_order 大于锚点 → 刚发出的消息连
+        // 同气泡一起被删掉，且不进 agentHistory（模型对着不在上下文里的问题作答）。
+        // 先等截断 Job 收尾（历史已按截断后的内容重建）再动 DB，发送既不丢也不
+        // 会落到旧上下文里。截断任务本身不需要等待 streamJob，无死锁。
+        truncationJob?.takeIf { it.isActive }?.join()
         // Ensure session exists in DB (creates on first message for draft sessions)
         val activeSessionId = ensureSession()
 

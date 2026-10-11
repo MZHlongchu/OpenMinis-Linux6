@@ -62,17 +62,37 @@ internal fun RenderTable(block: MdBlock.Table) {
     // streaming re-parses / the live→frozen branch move don't reset the user's
     // horizontal offset (see TableHScrollStates). Falls back to an anonymous
     // state when no shard id is available (non-chat contexts).
-    val tableHScroll = if (shardIdForTable != null) {
-        val hScrollKey = "${shardIdForTable.messageId}/${shardIdForTable.shardId}" +
-            "/tbl:${block.headers.joinToString("|")}"
-        remember(hScrollKey) { TableHScrollStates.stateFor(hScrollKey) }
+    //
+    // [T-b10-table-actions-per-table] This same key is the table's identity in
+    // the SelectionController registry: one reply can hold several tables, and
+    // registering them under the messageId alone made them overwrite each other
+    // (wrong table copied; a button disappearing when the other table scrolled
+    // out of view).
+    val tableKey = shardIdForTable?.let {
+        "${it.messageId}/${it.shardId}/tbl:${block.headers.joinToString("|")}"
+    }
+    val tableHScroll = if (tableKey != null) {
+        remember(tableKey) { TableHScrollStates.stateFor(tableKey) }
     } else {
         rememberScrollState()
     }
-    if (selectionController != null && messageId != null) {
+    // [T-b10-table-actions-per-table] Rendered text of this table's cells — the
+    // exact strings the cell MdTexts register as TextShard.plainText, since
+    // MarkdownParseCaches returns the same object for the same cell source. A
+    // frozen message coalesces its markdown fragments, so two tables CAN share
+    // one shardId; this is what tells them apart at selection time.
+    val tableCellTexts: Set<String> = remember(block.raw, colors) {
+        allRows.asSequence()
+            .flatMap { it.asSequence() }
+            .map { MarkdownParseCaches.inline(it, colors).text }
+            .filter { it.isNotEmpty() }
+            .toSet()
+    }
+    if (selectionController != null && messageId != null && tableKey != null) {
         // Re-register whenever the inputs that the actions close over change.
-        androidx.compose.runtime.DisposableEffect(selectionController, messageId, block.raw) {
+        androidx.compose.runtime.DisposableEffect(selectionController, tableKey, block.raw) {
             val actions = SelectionController.TableActions(
+                cellTexts = tableCellTexts,
                 copyTableMarkdown = {
                     val md = block.raw
                     if (md.isNotEmpty()) {
@@ -118,8 +138,8 @@ internal fun RenderTable(block: MdBlock.Table) {
                     Unit
                 },
             )
-            selectionController.rememberTableActions(messageId, actions)
-            onDispose { selectionController.forgetTableActions(messageId) }
+            selectionController.rememberTableActions(messageId, tableKey, actions)
+            onDispose { selectionController.forgetTableActions(messageId, tableKey) }
         }
     }
 

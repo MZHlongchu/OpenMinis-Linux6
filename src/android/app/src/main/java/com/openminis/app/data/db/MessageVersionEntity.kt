@@ -19,8 +19,13 @@ import androidx.room.PrimaryKey
  * still reclaims its archives.
  *
  * `bodyRef`/`bodySha` reference the same BodyStore file the live row used.
- * Safe because BodyStore never garbage-collects committed bodies (only
- * `discardTemps` runs, on uncommitted tmp files).
+ * [T-bodies-gc-fork-retain] They also *keep that body alive*: the reclaimer
+ * (`ChatRepository.collectOrphanBodies`) uses `messages.body_ref ∪ message_versions.body_ref`
+ * as its live set and unlinks anything outside it once the grace window has
+ * passed, so an archive row is often the last reference to its body — drop the
+ * row and the body goes with it (the message falls back to the
+ * `body stored (N bytes)` stub for good). That is exactly why
+ * `MessageVersionDao.allBodyRefs()` is part of the reference query.
  */
 @Entity(
     tableName = "message_versions",

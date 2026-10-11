@@ -74,6 +74,20 @@ object McpServerManager {
         // Stop existing instance first
         stopInternal()
 
+        // [T-b1-mcp-token-failclosed] Token before socket. A blank token makes
+        // McpServerCore skip authentication entirely, and `enabled` lives in
+        // PLAIN prefs while the token lives in encrypted prefs — so a wipe of
+        // the encrypted store (EncryptedPrefsFactory.onCorrupt / Tink keyset
+        // loss, observed on Samsung One UI after a backup restore) leaves
+        // enabled=true with token=null. Re-seed here so every start path
+        // (bootIfEnabled / restart / settings toggle) is authenticated; if the
+        // store cannot produce one, McpHttpServer.start() refuses to bind
+        // rather than serving unauthenticated shell access.
+        if (store.currentToken().isNullOrBlank()) {
+            Log.w(TAG, "built-in MCP server had no bearer token — generating one before start")
+            store.regenerateToken()
+        }
+
         // shell policy (auto/strict) maps onto the gate's PermissionMode; read
         // live per request so a settings toggle takes effect without restarting.
         val d = McpToolDispatcher(

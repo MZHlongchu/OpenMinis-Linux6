@@ -72,6 +72,7 @@
     <string name="resume_action">Reprendre</string>
     <string name="search_chats_placeholder">Rechercher des conversations…</string>
     <string name="search_no_results">Aucun résultat pour « %1$s »</string>
+    <string name="search_truncated_notice">Seuls les %1$d résultats les plus récents sont affichés — affinez votre recherche.</string>
     <string name="stop_tool">Arrêter l\'outil</string>
     <string name="mic_permission_title">Autorisation du microphone requise</string>
     <string name="mic_permission_message">L\'entrée vocale nécessite l\'autorisation du microphone. Appuyez sur Ouvrir les paramètres pour l\'accorder à Minis Ultra.</string>

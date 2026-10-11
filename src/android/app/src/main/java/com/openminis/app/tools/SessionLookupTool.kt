@@ -5,6 +5,7 @@ import com.openminis.app.MinisApp
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.AgentToolParam
 import com.openminis.app.data.repository.ChatRepository
+import com.openminis.app.offload.PromptDecision
 import com.openminis.app.sandbox.SessionAccessAudit
 import com.openminis.app.sandbox.SessionAccessPolicy
 import com.openminis.app.util.IsoTime
@@ -69,10 +70,15 @@ object SessionLookupTool {
         // tool only sees the session it runs in. Both branches below already take an
         // explicit id filter, so the restriction is an argument rather than a second
         // code path that could drift away from the granted one.
-        val granted = SessionAccessPolicy.isCrossSessionGranted(currentSessionId)
+        // [T-android-prompt-identity] 三值判定：「没人应答」不是策略拒绝 —— 审计要打
+        // prompt_unanswered，回给模型的 scope_reason 也要分得开（见 searchScopeReason）。
+        val decision = SessionAccessPolicy.crossSessionDecision(currentSessionId)
+        val granted = decision.isAllowed
+        val scopeReason = searchScopeReason(decision)
         val scopeIds = if (granted) null else listOf(currentSessionId)
         SessionAccessAudit.record(
             currentSessionId, SEARCH, if (granted) "(all sessions)" else currentSessionId, true, granted,
+            promptUnanswered = decision.isUnanswered,
         )
         val limit = args.optInt("limit", SEARCH_LIMIT_DEFAULT).coerceIn(1, SEARCH_LIMIT_MAX)
         val keywords = splitQuery(query)
@@ -85,6 +91,7 @@ object SessionLookupTool {
                     JSONObject()
                         .put("count", rows.size)
                         .put("scope", if (granted) "all_sessions" else "current_session")
+                        .putOpt("scope_reason", scopeReason)
                         .put("sessions", JSONArray().also { arr ->
                             rows.forEach { s ->
                                 arr.put(
@@ -111,6 +118,7 @@ object SessionLookupTool {
                     JSONObject()
                         .put("count", hits.size)
                         .put("scope", if (granted) "all_sessions" else "current_session")
+                        .putOpt("scope_reason", scopeReason)
                         .put("query", query)
                         .put("hits", JSONArray().also { arr ->
                             hits.forEach { h ->
@@ -146,14 +154,19 @@ object SessionLookupTool {
         // [T-android-session-read-boundary] Reading another chat's transcript is
         // exactly what this boundary exists for: it needs the user's `session_read`
         // grant. The attempt is audited either way, granted or not.
+        // [T-android-prompt-identity] 三值判定：「没人应答」和「用户拒绝」在审计
+        // （prompt_unanswered）与文案上都要分开 —— 让 agent 去"请用户批准"还是去
+        // "改设置"是两件不同的事，判错会让它对着设置页反复重试。
         if (SessionAccessPolicy.isForeign(currentSessionId, sessionId)) {
-            val granted = SessionAccessPolicy.isCrossSessionGranted(currentSessionId)
-            SessionAccessAudit.record(currentSessionId, READ, sessionId, granted, granted)
+            val decision = SessionAccessPolicy.crossSessionDecision(currentSessionId)
+            val granted = decision.isAllowed
+            SessionAccessAudit.record(
+                currentSessionId, READ, sessionId, granted, granted,
+                promptUnanswered = decision.isUnanswered,
+            )
             if (!granted) {
                 return ToolExecutionResult(
-                    "Error: session $sessionId belongs to another chat. Reading it needs the user " +
-                        "to grant `session_read` (Settings > Permissions > Read other chats). Ask " +
-                        "the user first, then retry.",
+                    foreignReadRefusal(sessionId, decision),
                     false,
                     toolTitle = toolTitle,
                 )
@@ -197,6 +210,39 @@ object SessionLookupTool {
 
     fun splitQuery(raw: String): List<String> =
         raw.trim().split(Regex("\\s+")).map { it.trim() }.filter { it.length >= 2 }.take(8)
+
+    /**
+     * [T-android-prompt-identity] 读别的会话被拦下时的文案：**没人应答 ≠ 策略拒绝**。
+     *
+     * 判据同 `SessionsOffloadHandler` 的 `prompt_unanswered` 先例（[PromptDecision.isUnanswered]）。
+     * 两种都 fail-closed，但下一步动作完全不同：没人应答要请用户批准那张提示再重试；被拒绝
+     * 才需要用户去设置里改。说错了 agent 会对着设置页反复重试（或反过来一直问用户）。
+     *
+     * 抽成纯函数是为了让这两句文案能被单测钉住（`executeRead` 要 Room 的 ChatRepository
+     * 才能跑，本模块没有 Robolectric）。
+     */
+    internal fun foreignReadRefusal(sessionId: String, decision: PromptDecision): String =
+        if (decision.isUnanswered) {
+            "Error: nobody answered the `session_read` permission prompt for session $sessionId " +
+                "(it timed out or never reached the screen), so the transcript was not read. " +
+                "Ask the user to approve the `session_read` prompt, then retry."
+        } else {
+            "Error: session $sessionId belongs to another chat. Reading it needs the user " +
+                "to grant `session_read` (Settings > Permissions > Read other chats). Ask " +
+                "the user first, then retry."
+        }
+
+    /**
+     * [T-android-prompt-identity] `search_sessions` 降级到当前会话时，为什么降级。
+     *
+     * null = 已授权（JSON 形状与授权时的一模一样）；否则回给模型一个显式原因，让它能说清
+     * "没人应答，请批准"还是"用户在设置里拒绝了"。
+     */
+    internal fun searchScopeReason(decision: PromptDecision): String? = when {
+        decision.isAllowed -> null
+        decision.isUnanswered -> "prompt_unanswered"
+        else -> "permission_denied"
+    }
 
     private fun parseArgs(argsJson: String): JSONObject =
         try { JSONObject(argsJson) } catch (_: Exception) { JSONObject() }

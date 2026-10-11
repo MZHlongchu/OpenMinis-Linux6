@@ -72,6 +72,7 @@
     <string name="resume_action">Wznów</string>
     <string name="search_chats_placeholder">Szukaj w czatach…</string>
     <string name="search_no_results">Brak wyników dla „%1$s”</string>
+    <string name="search_truncated_notice">Wyświetlane jest tylko %1$d najnowszych wyników — zawęź wyszukiwanie, aby zobaczyć więcej.</string>
     <string name="stop_tool">Zatrzymaj narzędzie</string>
     <string name="mic_permission_title">Wymagane uprawnienie do mikrofonu</string>
     <string name="mic_permission_message">Wprowadzanie głosowe wymaga uprawnienia do mikrofonu. Dotknij Otwórz ustawienia, aby przyznać je aplikacji Minis Ultra.</string>

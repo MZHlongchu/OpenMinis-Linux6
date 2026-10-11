@@ -79,8 +79,13 @@ import com.openminis.app.provider.failOnSilentEmptyCompletion
  * budget cancelled those healthy requests as false timeouts. readTimeout
  * is 600s, so 120s stays comfortably inside it while still catching a
  * genuinely dead connection.
+ *
+ * [T-stream-watchdog-budget-parity] `internal` (not file-private) so
+ * [OpenAIProvider.streamFirstChunkBudgetMs] can declare this pair as the
+ * provider's pre-first-chunk budget and keep the OUTER stream watchdog
+ * from pre-empting it with its flat 45s/90s phase 1.
  */
-private const val STREAM_TTFB_TIMEOUT_MS = 120_000L
+internal const val STREAM_TTFB_TIMEOUT_MS = 120_000L
 
 /**
  * [T-android-ttfb-upload-split / #188] Overall ceiling for the UPLOAD
@@ -91,8 +96,13 @@ private const val STREAM_TTFB_TIMEOUT_MS = 120_000L
  * the writeTimeout(30s) already bounds a fully-stalled socket; this only
  * catches the slow-but-never-idle case. Once upload completes the tighter
  * [STREAM_TTFB_TIMEOUT_MS] takes over.
+ *
+ * [T-stream-watchdog-budget-parity] `internal` so
+ * [OpenAIProvider.streamFirstChunkBudgetMs] can add it to the TTFB budget
+ * above — together they are the longest "no chunk yet" window a healthy
+ * OpenAI request may legitimately need.
  */
-private const val STREAM_UPLOAD_CAP_MS = 120_000L
+internal const val STREAM_UPLOAD_CAP_MS = 120_000L
 
 /**
  * [T-android-body-idle-watchdog] Post-header body watches. The TTFB watchdog
@@ -115,6 +125,59 @@ private const val STREAM_UPLOAD_CAP_MS = 120_000L
  */
 private const val STREAM_BODY_IDLE_MS = 240_000L
 private const val STREAM_CONTENT_IDLE_MS = 600_000L
+
+/**
+ * [T-openai-terminal-drain] How long a stream that ALREADY reached its
+ * terminal event (Chat `finish_reason` / Responses `response.completed`) may
+ * stay open without further content before we hang up.
+ *
+ * The `finish_reason` and `response.completed` handlers only recorded state —
+ * they did not stop the read loop — so a relay that reports completion and
+ * then leaves the socket open (some keep it warm with SSE comments) kept the
+ * turn alive until the CONTENT-idle watch fired at 600s and classified a
+ * COMPLETE response as a mid-stream stall: the retry ladder stall-resumed and
+ * the turn was re-run / duplicated. Once the terminal event is in, silence
+ * means "the relay is done talking", so the window shrinks to a trailing
+ * usage-block drain (Chat Completions sends `usage` in the chunk AFTER the
+ * `finish_reason` chunk under stream_options.include_usage). Any content
+ * chunk still resets this window, so a relay that flushes trailing content
+ * late is not cut off; `[DONE]` / EOF end the loop immediately as before.
+ *
+ * [T-openai-terminal-drain-anchor] The window is measured from the TERMINAL
+ * EVENT (or a later content chunk) — see [terminalDrainExpired]. Measuring it
+ * from `lastContentNanos` instead made the deadline already expired at the
+ * instant a silent reasoning phase (minutes with no content chunk) ended in
+ * `finish_reason`, so the trailing usage chunk was cut off. That is the
+ * opposite of what this constant exists for.
+ */
+private const val STREAM_TERMINAL_DRAIN_MS = 15_000L
+
+/**
+ * [T-openai-terminal-drain-anchor] Has the trailing drain window expired?
+ *
+ * Anchor = the LATER of the terminal event and the last content chunk:
+ *  - **terminal event** (not the last content chunk): a model that reasons
+ *    silently for minutes and then emits `finish_reason` leaves the content
+ *    timestamp far in the past, so anchoring on it tripped the drain the moment
+ *    the terminal event arrived — cutting the very usage/tail `data:` lines the
+ *    window exists to collect, i.e. the opposite of [StreamTerminalDrainTest]'s
+ *    intent ("the trailing usage block must not be lost").
+ *  - **content chunk after the terminal event** still pushes the anchor forward,
+ *    preserving the documented "a relay flushing trailing content late is not
+ *    cut off" behaviour.
+ *
+ * Pure, so the arithmetic is testable without a 15s wall clock.
+ */
+internal fun terminalDrainExpired(
+    nowNanos: Long,
+    terminalEventAtNanos: Long,
+    lastContentNanos: Long,
+    drainMs: Long = STREAM_TERMINAL_DRAIN_MS,
+): Boolean {
+    if (terminalEventAtNanos == 0L) return false
+    val anchor = maxOf(terminalEventAtNanos, lastContentNanos)
+    return (nowNanos - anchor) / 1_000_000L >= drainMs
+}
 
 /**
  * [T-stream-content-type-sniff] How many leading bytes are peeked (and pushed
@@ -358,6 +421,17 @@ internal fun OpenAIProvider.rawStreamMessage(
         // by the read loop's catch to map the socket failure to a
         // stall-resume-carrying TransientError.
         val bodyIdlePhase = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        // [T-openai-terminal-drain] Nonzero once the stream reached its terminal
+        // event (Chat `finish_reason`, Responses `response.completed`). From
+        // then on the response is complete and only the short
+        // [STREAM_TERMINAL_DRAIN_MS] trailing drain applies — see the constant.
+        val terminalEventAtNanos = java.util.concurrent.atomic.AtomicLong(0L)
+        // [T-openai-terminal-drain] drain 自己把 socket 关掉时置位（区别于 relay 主动
+        // 关闭）：读取循环无论把这次关闭读成 IOException 还是干净的 EOF，尾部冲刷
+        // 都要能报出「尾部是被我们砍断的」，而不是把可能丢掉的事件当正常收尾。
+        // Set when the terminal drain ITSELF tore the socket down (rather than the relay
+        // closing it) — the stream tail reports whatever that cut off.
+        val terminalDrainClosedSocket = java.util.concurrent.atomic.AtomicBoolean(false)
         val callStartNanos = System.nanoTime()
         val ttfbWatchdog = launch {
             val pollMs = 250L
@@ -406,8 +480,50 @@ internal fun OpenAIProvider.rawStreamMessage(
                 val sinceByteMs = (now - lastByteNanos.get()) / 1_000_000L
                 val sinceContentMs = (now - lastContentNanos.get()) / 1_000_000L
                 if (sinceByteMs >= STREAM_BODY_IDLE_MS) { timedOutPhase = "body-idle"; break }
-                if (sinceContentMs >= STREAM_CONTENT_IDLE_MS) { timedOutPhase = "content-idle"; break }
+                // [T-openai-terminal-drain] After the terminal event silence is
+                // no longer "alive but silent" — the response is finished, the
+                // relay is just holding the socket. Bound the trailing drain
+                // instead of waiting out the 600s content-idle (which killed a
+                // complete turn as a stall and made the retry ladder re-run it).
+                //
+                // [T-openai-terminal-drain-anchor] The window is counted from the
+                // TERMINAL EVENT, not from `lastContentNanos`: a turn that spent
+                // minutes reasoning silently and then emitted `finish_reason` had
+                // its content timestamp already older than the window, so the
+                // drain tripped on the first poll and every trailing `data:` line
+                // (the Chat Completions usage chunk, a late tool-call item) was
+                // cut off. See [terminalDrainExpired].
+                val terminalAt = terminalEventAtNanos.get()
+                if (terminalAt != 0L) {
+                    if (terminalDrainExpired(now, terminalAt, lastContentNanos.get())) {
+                        timedOutPhase = "terminal-drain"; break
+                    }
+                } else if (sinceContentMs >= STREAM_CONTENT_IDLE_MS) {
+                    timedOutPhase = "content-idle"; break
+                }
                 delay(pollMs)
+            }
+            if (timedOutPhase == "terminal-drain") {
+                // [T-openai-terminal-drain] The turn's terminal event already
+                // arrived, so this is NOT a stall: close the idle socket without
+                // setting [bodyIdlePhase], which keeps the read loop's catch from
+                // mapping it to a stall-resume TransientError (it ends the turn
+                // cleanly on the finish reason it already has).
+                com.openminis.app.logging.AppLogger.info(
+                    "OpenAIProvider",
+                    "[T-openai-terminal-drain] terminal event seen, no further content for " +
+                        "${STREAM_TERMINAL_DRAIN_MS / 1000}s — closing the idle connection",
+                )
+                // [T-openai-terminal-drain] 先置位再 cancel：读取循环随后无论收到
+                // IOException 还是 EOF，都能从这条标记知道尾部是自己砍断的。
+                terminalDrainClosedSocket.set(true)
+                call.cancel()
+                try {
+                    watchState.connection.get()?.socket()?.close()
+                } catch (_: Throwable) {
+                    // Best-effort; call.cancel() already unblocks the read.
+                }
+                return@launch
             }
             bodyIdlePhase.set(timedOutPhase)
             com.openminis.app.logging.AppLogger.warning(
@@ -601,6 +717,30 @@ internal fun OpenAIProvider.rawStreamMessage(
         // emit a combined "callId|fcId" identifier that splitResponsesAPIIds() unpacks.
         data class ResponsesToolCallAccumulator(var callId: String = "", var name: String = "", val args: StringBuilder = StringBuilder(), var started: Boolean = false, var lastSentArgsLen: Int = 0)
         val responsesToolCalls = mutableMapOf<String, ResponsesToolCallAccumulator>()
+        // [T-d4-one-card-per-call 一条逻辑调用只宣告一次] 下游只在 ToolUseStart 分支
+        // 建卡片，而 ToolCallIdDedupe 会把第二次同 id 宣告改名成 "<id>-2" **另建一张
+        // 卡**；ToolCallComplete 只会为宣告时的身份发一次，那张多出来的卡片就永远停在
+        // STREAMING（转圈不结束）。同一个 call_id 被 `output_item.added` 宣告两次（两个
+        // item_id），或同一个 item_id 被重复宣告，都会踩到。所以累加器只按「已宣告的
+        // item_id」存一份，其余 item_id 记为别名（别名 → 已宣告 id），参数增量与 done
+        // 都落到已宣告的身份上。
+        // Alias table: item_id → the item_id this logical call was actually announced
+        // under. Never a second card, never a second dispatch.
+        val responsesToolCallAliases = mutableMapOf<String, String>()
+        // [T-d4-one-card-per-call] 消费掉一个已宣告身份，连同指向它的全部别名。
+        fun consumeResponsesToolCall(key: String): ResponsesToolCallAccumulator? {
+            val acc = responsesToolCalls.remove(key) ?: return null
+            for (alias in responsesToolCallAliases.filterValues { it == key }.keys.toList()) {
+                responsesToolCallAliases.remove(alias)
+            }
+            return acc
+        }
+        // [T-openai-terminal-drain] Responses 工具调用的可观测计数：`response.completed`
+        // 的 output 里声明了几条 function_call、我们真正发了几条 ToolCallComplete。
+        // 尾部被砍断时这两个数与冲刷数一起进 warn —— 从未 `added` 过的 done 丢掉时
+        // declared=1 / completed=0，日志里一眼可见。
+        var declaredFunctionCallItems = 0
+        var responsesToolCallsCompleted = 0
         // One-shot info log the first time the Responses API streams a reasoning
         // delta — useful for confirming the Thinking pipeline is wired up when
         // diagnosing "I set thinking high but see nothing" reports.
@@ -630,6 +770,33 @@ internal fun OpenAIProvider.rawStreamMessage(
         var toolCallEventCount = 0
         var sawFinishReason = false
         var sawUsageBlock = false
+        // [T-d4-terminal-break-narrowing 收窄终态后的注释行 break] 终态事件之后
+        // 见到的 SSE 注释行计数（任何真正的 `data:` 事件行都会清零），读取循环里
+        // 收窄后的收尾 break 就看它。
+        // Comment lines seen since the terminal event, reset by any real `data:`
+        // event — the counter behind the narrowed end-of-tail break below.
+        var postTerminalCommentLines = 0
+        // [T-d4-terminal-tail-structural 结构性收尾判据] 这里曾用一个布尔标记记录
+        // 「usage 是否落在终态事件之后的独立 chunk 里」并拿它当「Chat 形状」的代理，
+        // 好让 Chat 形状一条注释行即收尾。这个代理是错的：
+        // 判据挂在 usage 的**位置**上，relay 把 usage 放进第二个
+        // `response.completed`（第一个不带）时形状即被误判，第一条 keep-alive 就会
+        // 收尾，而 relay 随后补发的 `response.output_item.done`（整条工具调用）就此
+        // 丢掉 —— 正是这条收尾规则要防的事故。现在判据纯结构：终态事件 + 尾部核算
+        // （sawUsageBlock，只看「有没有」不看「在哪」）之后，**第二条连续注释行**才
+        // 收尾；`[DONE]` 与空的 `data:` 行各自照旧。任何真实事件行都把注释计数清零，
+        // 所以 `data:` 行永不因这条规则被截断。
+        // The end-of-tail break is structural — TWO consecutive comment lines after the
+        // terminal event, never "the usage block happened to land after the terminal
+        // event" (see the read loop).
+        // [T-openai-terminal-drain] 终态后的 socket 关闭属于预期收尾，但「尾部就此被
+        // 切断」必须可观测：relay 还没来得及补发的 output_item.done（尤其是从未
+        // `added` 宣告过的调用，连累加器都没有）会在这里丢失，此前只有一条 info
+        // 日志，事后完全查不出工具调用为何没执行。
+        // Set when a post-terminal read failed outright (as opposed to the relay closing
+        // the body cleanly) — together with [terminalDrainClosedSocket] it drives the
+        // tail-cut warning after the flush below.
+        var postTerminalIoError = false
         // [T-android-responses-missing-finished] Hoisted out of the try block so
         // the stream tail can emit Finished for streams that end WITHOUT a
         // `data: [DONE]` sentinel — see the emission site after the read loop.
@@ -640,13 +807,60 @@ internal fun OpenAIProvider.rawStreamMessage(
 
         try {
             sendTracked(LLMStreamChunk.Started)
-            var line: String?
 
             // Branch streaming parser based on API format
             val isResponsesAPI = !usesChatCompletionsAPI
 
-            while (reader.readLine().also { line = it } != null) {
-                val l = line ?: continue
+            // [T-openai-terminal-drain] The read is wrapped so the terminal-drain
+            // socket teardown (see the watchdog) reads as EOF instead of an error:
+            // once the terminal event is in, a closed socket is the expected end of
+            // an already-complete turn. A genuine body-idle trip still propagates
+            // (bodyIdlePhase != null) so the stall-resume mapping below is intact.
+            while (true) {
+                val l = try {
+                    reader.readLine()
+                } catch (e: IOException) {
+                    if (terminalEventAtNanos.get() == 0L || bodyIdlePhase.get() != null) throw e
+                    // [T-openai-terminal-drain] 终态后的读取失败不是「正常 EOF」：relay
+                    // 可能还没来得及补发 output_item.done（甚至是从未 added 过的调用，
+                    // 连累加器都没有）。此前这里只有一条 info，事后查不出工具调用为何
+                    // 静默消失，所以升到 warn 并把「尾巴被切断」的现场写清楚。
+                    // A post-terminal read failure is NOT a clean EOF — say so at warn
+                    // and name what was still owed.
+                    postTerminalIoError = true
+                    com.openminis.app.logging.AppLogger.warning(
+                        "OpenAIProvider",
+                        "[T-openai-terminal-drain] connection failed after the terminal event — " +
+                            "ending the turn with finishReason=$finishReason " +
+                            "cutByDrain=${terminalDrainClosedSocket.get()} " +
+                            "pendingResponsesToolCalls=${responsesToolCalls.size} " +
+                            "declaredFunctionCalls=$declaredFunctionCallItems " +
+                            "completedFunctionCalls=$responsesToolCallsCompleted " +
+                            "error=${e.javaClass.simpleName}: ${e.message} — an output_item.done " +
+                            "the relay had not flushed yet (incl. a call it never announced) is lost",
+                    )
+                    null
+                } ?: break
+                // [T-d4-terminal-tail-structural 结构性收尾判据] 终态后的收尾只认两
+                // 条**连续**注释行：以前按「usage 落在终态事件之后的独立 chunk」推断
+                // Chat 形状，好让 Chat 一条注释行就收尾，但这是拿 usage 的**位置**当
+                // 形状代理 —— relay 发两次 `response.completed`（第一次不带 usage、
+                // 第二次带）时终态后的 usage 让判据误判成 Chat 形状，第一条 keep-alive
+                // 即收尾，relay 随后补发的 `response.output_item.done`（整条工具调用）
+                // 被丢掉，正是这条收尾规则要防的事故。现在两个形状统一按结构收尾：
+                // 终态事件 + 尾部核算（sawUsageBlock）之后，第一条注释行永远容错，第二
+                // 条连续注释行才 break；任何 `data:` 事件行（含空载荷）都会清零计数，
+                // 所以真正的 data 行永不因这条规则被截断。
+                // ONE comment line is always tolerated after the terminal event; the
+                // SECOND consecutive one ends the tail. Never conditioned on where the
+                // usage block landed.
+                if (l.startsWith(":")) {
+                    if (terminalEventAtNanos.get() != 0L && sawUsageBlock) {
+                        postTerminalCommentLines++
+                        if (postTerminalCommentLines >= 2) break
+                    }
+                    continue
+                }
                 // Tolerate `data:` with or without the optional space — the
                 // HTML5 SSE spec only treats one leading space as ignorable,
                 // and some OpenAI-compatible servers (e.g. China Telecom's
@@ -657,6 +871,21 @@ internal fun OpenAIProvider.rawStreamMessage(
                 val payload = l.removePrefix("data:").let {
                     if (it.startsWith(" ")) it.removePrefix(" ") else it
                 }
+                // [T-d4-terminal-break-narrowing] 空的 `data:` 载荷里没有任何事件
+                // （JSONObject 会直接拒绝空串，此前只是打一条解析告警后丢弃），
+                // 终态 + usage 之后它就是中转「没有别的要说了」的标记，直接收尾。
+                // [T-d4-terminal-tail-structural] 这里的 sawUsageBlock 只是「尾部核算
+                // 到位了没有」的**存在性**门槛，不再区分 usage 落在哪个事件之后（那是
+                // 已删除的形状代理）；两个 API 形状的收尾判据完全一致。
+                // An empty `data:` payload carries no event at all, so after the
+                // terminal event and its usage it is the relay's "nothing left to
+                // say" marker. Any real event line proves the relay is still
+                // talking, so the comment counter restarts there.
+                if (payload.isBlank()) {
+                    if (terminalEventAtNanos.get() != 0L && sawUsageBlock) break
+                    continue
+                }
+                postTerminalCommentLines = 0
                 if (payload == "[DONE]") {
                     // [T-android-think-prefix-stream] Flush whatever the parser
                     // still holds (a cross-chunk tag tail, or an unterminated
@@ -721,9 +950,19 @@ internal fun OpenAIProvider.rawStreamMessage(
                         reasoningLen += rcLen + rLen
                         if (tcLen > 0) toolCallEventCount += tcLen
                     } else if (type.isNotEmpty()) {
-                        // Responses API event-typed diagnostics
+                        // Responses API event-typed diagnostics.
+                        // [T-android-responses-delta-log-noise] Responses events
+                        // carry no `choices`, so EVERY delta lands in this branch:
+                        // unconditional AppLogger.debug wrote one line per
+                        // streamed token — each paying two IsoTime formats plus,
+                        // with file logging on, an @Synchronized flush — from the
+                        // very coroutine that reads the SSE socket. Gate it with
+                        // the same Log.isLoggable(VERBOSE) as the Chat Completions
+                        // delta log above.
                         val dLen = ev.optString("delta", "").length
-                        if (type.contains("delta") || type == "response.completed" || type == "response.output_item.added" || type == "response.output_item.done") {
+                        if ((type.contains("delta") || type == "response.completed" || type == "response.output_item.added" || type == "response.output_item.done") &&
+                            android.util.Log.isLoggable("OpenAIProvider", android.util.Log.VERBOSE)
+                        ) {
                             com.openminis.app.logging.AppLogger.debug(
                                 "OpenAIProvider",
                                 "[T321] SSE responses type=$type deltaLen=$dLen"
@@ -782,24 +1021,58 @@ internal fun OpenAIProvider.rawStreamMessage(
                                 val callId = item.optString("call_id", "")
                                 val name = item.optString("name", "")
                                 if (itemId.isNotEmpty() && callId.isNotEmpty() && name.isNotEmpty()) {
-                                    responsesToolCalls[itemId] = ResponsesToolCallAccumulator(callId = callId, name = name)
-                                    val combined = combineResponsesAPIIds(callId, itemId)
-                                    android.util.Log.d("ToolChain[Provider]", "→ ToolUseStart (Responses) id=$combined name=$name")
-                                    sendTracked(LLMStreamChunk.ToolUseStart(combined, name))
-                                    responsesToolCalls[itemId]?.started = true
+                                    // [T-d4-one-card-per-call] 一条逻辑调用（call_id）只能
+                                    // 宣告一次：下游在 ToolUseStart 分支建卡片，第二次同
+                                    // id 的宣告会被 ToolCallIdDedupe 改名成 "<id>-2" 另建
+                                    // 一张 —— 而 ToolCallComplete 只会为宣告时的身份发一次，
+                                    // 那张多出来的卡片就永远停在 STREAMING。所以这里先看
+                                    // 这条调用是否已经宣告过（同一个 item_id 重复 added，
+                                    // 或同一个 call_id 换个 item_id 再 added），已宣告过就
+                                    // 只登记别名、不再发 start。
+                                    // One announcement per logical call — a second one would
+                                    // create a card nobody ever completes.
+                                    val announcedKey = if (responsesToolCalls.containsKey(itemId)) {
+                                        itemId
+                                    } else {
+                                        responsesToolCalls.entries
+                                            .firstOrNull { it.value.callId == callId }?.key
+                                    }
+                                    if (announcedKey != null) {
+                                        if (itemId != announcedKey) {
+                                            responsesToolCallAliases[itemId] = announcedKey
+                                        }
+                                        val acc = responsesToolCalls.getValue(announcedKey)
+                                        if (acc.name.isEmpty()) acc.name = name
+                                        com.openminis.app.logging.AppLogger.warning(
+                                            "OpenAIProvider",
+                                            "Responses API: function_call announced twice — item_id=$itemId " +
+                                                "call_id=$callId is already announced as $announcedKey; " +
+                                                "reusing that identity and NOT opening a second card (T-d4)"
+                                        )
+                                    } else {
+                                        responsesToolCalls[itemId] = ResponsesToolCallAccumulator(callId = callId, name = name)
+                                        val combined = combineResponsesAPIIds(callId, itemId)
+                                        android.util.Log.d("ToolChain[Provider]", "→ ToolUseStart (Responses) id=$combined name=$name")
+                                        sendTracked(LLMStreamChunk.ToolUseStart(combined, name))
+                                        responsesToolCalls[itemId]?.started = true
+                                    }
                                 }
                             }
                         }
                         type == "response.function_call_arguments.delta" -> {
                             val itemId = event.optString("item_id", "")
                             val delta = event.optString("delta", "")
-                            val acc = responsesToolCalls[itemId]
+                            // [T-d4-one-card-per-call] 别名 item_id 归到已宣告的身份上，
+                            // 否则参数增量会带着一个下游没有卡片的 id（ToolInputDelta 就
+                            // 找不到对应块，实时参数预览丢失）。
+                            val announcedKey = responsesToolCallAliases[itemId] ?: itemId
+                            val acc = responsesToolCalls[announcedKey]
                             if (acc != null && delta.isNotEmpty()) {
                                 acc.args.append(delta)
                                 val n = acc.args.length
                                 if (com.openminis.app.text.BoundedText.shouldCommitLengthStride(n, acc.lastSentArgsLen)) {
                                     acc.lastSentArgsLen = n
-                                    val combined = combineResponsesAPIIds(acc.callId, itemId)
+                                    val combined = combineResponsesAPIIds(acc.callId, announcedKey)
                                     sendTracked(LLMStreamChunk.ToolInputDelta(combined, acc.args.toString()))
                                 }
                             } else if (acc == null) {
@@ -823,12 +1096,121 @@ internal fun OpenAIProvider.rawStreamMessage(
                             val itemType = item.optString("type", "")
                             if (itemType == "function_call") {
                                 val itemId = item.optString("id", "")
-                                val acc = responsesToolCalls.remove(itemId) ?: continue
-                                val argsStr = item.optString("arguments", acc.args.toString())
+                                // [T-d4-responses-done-id-drift 按 call_id 消费残留累加器]
+                                // 中转可能 `added` 用 id=fc_A 建累加器、`done` 却报
+                                // id=fc_B（call_id 相同）：只按 raw item_id 取会取不到，
+                                // 重建路径便为 fc_B 发 start+complete，而流尾冲刷又为残留
+                                // 的 fc_A 再发一个 complete —— 下游去重按 raw id
+                                // （`call_1|fc_A` ≠ `call_1|fc_B`），同一条逻辑调用于是被
+                                // 派发两次。所以先按 item_id 取，取不到再按 call_id 反查并
+                                // 消费掉残留累加器，并沿用**它**的 item_id：那是这条调用已经
+                                // 宣告过的身份（ToolUseStart / UI 卡片 / 参数增量都挂在它上面）。
+                                // Resolve the accumulator by item_id first, then by
+                                // call_id, and CONSUME what is found — the call is
+                                // finished under the id it was announced with.
+                                var announcedItemId = itemId
+                                // [T-d4-one-card-per-call] 这个 item_id 可能只是同一调用的
+                                // 第二个身份（别名），真正的累加器挂在已宣告的 id 上。
+                                val aliasedKey = responsesToolCallAliases[itemId]
+                                if (aliasedKey != null) announcedItemId = aliasedKey
+                                var acc = consumeResponsesToolCall(announcedItemId)
+                                if (acc == null) {
+                                    val doneCallId = item.optString("call_id", "")
+                                    val residualKey = if (doneCallId.isEmpty()) {
+                                        null
+                                    } else {
+                                        responsesToolCalls.entries
+                                            .firstOrNull { it.value.callId == doneCallId }?.key
+                                    }
+                                    if (residualKey != null) {
+                                        acc = consumeResponsesToolCall(residualKey)
+                                        announcedItemId = residualKey
+                                        com.openminis.app.logging.AppLogger.warning(
+                                            "OpenAIProvider",
+                                            "Responses API: output_item.done item_id drift — done reports " +
+                                                "item_id=$itemId but the accumulator is $residualKey " +
+                                                "(call_id=$doneCallId); finishing the announced call and " +
+                                                "consuming the residual (T-d4)"
+                                        )
+                                    }
+                                }
+                                // [T-android-responses-done-without-accumulator]
+                                // The accumulator is only created at
+                                // `response.output_item.added` (and only when
+                                // id+call_id+name are all present), so a relay that
+                                // skips `added`, or announces it with a missing
+                                // field, reached this branch with nothing to remove
+                                // and the whole function_call was dropped WITHOUT a
+                                // trace: `response.completed` still reports
+                                // finish_reason=tool_use, the agent loop sees
+                                // toolCalls.isEmpty() and ends the turn — a blank
+                                // reply and no inline error. The `done` item is the
+                                // authoritative copy (it carries id/call_id/name/
+                                // arguments), so rebuild from it instead of
+                                // discarding. Mirrors the warn-only handling of the
+                                // same relay deviation on the delta branch above.
+                                val callId = acc?.callId?.takeIf { it.isNotEmpty() }
+                                    ?: item.optString("call_id", "")
+                                val name = acc?.name?.takeIf { it.isNotEmpty() }
+                                    ?: item.optString("name", "")
+                                if (acc == null) {
+                                    com.openminis.app.logging.AppLogger.warning(
+                                        "OpenAIProvider",
+                                        "Responses API: output_item.done for function_call without an accumulator " +
+                                            "(item_id=$itemId call_id=$callId name=$name) — rebuilding from the done item"
+                                    )
+                                }
+                                if (callId.isEmpty() || name.isEmpty()) {
+                                    // Nothing to correlate a tool result with (and no
+                                    // name to dispatch): dropping is the only option,
+                                    // but it must not be silent.
+                                    com.openminis.app.logging.AppLogger.warning(
+                                        "OpenAIProvider",
+                                        "Responses API: dropping function_call at output_item.done — " +
+                                            "item_id=$itemId call_id='$callId' name='$name' (missing required id/name)"
+                                    )
+                                    continue
+                                }
+                                // [T-d4-responses-done-id-drift] 同一个 call_id 下的其它
+                                // 残留累加器都是这条调用的第二个身份（id 漂移、或同一个
+                                // 调用被 `added` 宣告了两次）：现在就消费掉，流尾冲刷才不
+                                // 会为它再发一个 complete。call_id 每条调用唯一，因此不会
+                                // 误删真正并行的兄弟调用。
+                                // Any other accumulator sharing this call_id is the same
+                                // logical call under a second item_id — drop it now so
+                                // the stream-tail flush cannot dispatch it twice.
+                                val strays = responsesToolCalls.filterValues { it.callId == callId }.keys.toList()
+                                if (strays.isNotEmpty()) {
+                                    for (stray in strays) consumeResponsesToolCall(stray)
+                                    com.openminis.app.logging.AppLogger.warning(
+                                        "OpenAIProvider",
+                                        "Responses API: consuming stale function_call accumulator(s) $strays " +
+                                            "sharing call_id=$callId — the call completes once, as $announcedItemId"
+                                    )
+                                }
+                                val argsStr = item.optString("arguments", acc?.args?.toString() ?: "")
                                 val args = try { JSONObject(argsStr) } catch (_: Exception) { JSONObject() }
-                                val combined = combineResponsesAPIIds(acc.callId, itemId)
-                                android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=${acc.name} args=${args.toString().take(300)}")
-                                sendTracked(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
+                                val combined = combineResponsesAPIIds(callId, announcedItemId)
+                                // [T-android-responses-done-without-accumulator] A
+                                // rebuilt call never went through `output_item.added`,
+                                // and ToolUseStart is emitted ONLY there. Downstream
+                                // creates a tool block exclusively in its ToolUseStart
+                                // branch (ChatViewModelAgentLoopExt) — a
+                                // ToolCallComplete for an unknown id updates nothing
+                                // (`idx < 0`) — so the tool dispatched from the
+                                // completed call had no card at all: it ran silently
+                                // and the persisted blocks disagreed with the dispatch
+                                // list. Backfill the start first, exactly once, so the
+                                // recovered call is indistinguishable from a normal one.
+                                if (acc?.started != true) {
+                                    android.util.Log.d("ToolChain[Provider]", "→ ToolUseStart (Responses, rebuilt from done) id=$combined name=$name")
+                                    sendTracked(LLMStreamChunk.ToolUseStart(combined, name))
+                                    acc?.started = true
+                                }
+                                android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=$name args=${args.toString().take(300)}")
+                                // [T-openai-terminal-drain] 计数供尾部「被砍断了什么」诊断。
+                                responsesToolCallsCompleted++
+                                sendTracked(LLMStreamChunk.ToolCallComplete(combined, name, args))
                             }
                         }
                         type == "response.failed" -> {
@@ -938,14 +1320,19 @@ internal fun OpenAIProvider.rawStreamMessage(
                             // When the model emitted tool calls the API returns status=completed
                             // with no stop_reason; surface "tool_use" so the agent loop knows to
                             // dispatch the calls instead of treating the turn as final.
-                            val sawToolCalls = responsesToolCalls.isNotEmpty() ||
-                                (resp?.optJSONArray("output")?.let { out ->
-                                    var found = false
-                                    for (i in 0 until out.length()) {
-                                        if (out.optJSONObject(i)?.optString("type") == "function_call") { found = true; break }
-                                    }
-                                    found
-                                } ?: false)
+                            // [T-openai-terminal-drain] 顺手数清楚 completed 的 output 里声明了
+                            // 几条 function_call：尾部被砍断时 declared≠completed 就是「relay
+                            // 还没来得及补发 done」的直接证据（从未 added 过的调用 declared=1、
+                            // completed=0）。多次 completed 取最大值，别被后一个覆盖成 0。
+                            val declaredCalls = resp?.optJSONArray("output")?.let { out ->
+                                var found = 0
+                                for (i in 0 until out.length()) {
+                                    if (out.optJSONObject(i)?.optString("type") == "function_call") found++
+                                }
+                                found
+                            } ?: 0
+                            if (declaredCalls > declaredFunctionCallItems) declaredFunctionCallItems = declaredCalls
+                            val sawToolCalls = responsesToolCalls.isNotEmpty() || declaredCalls > 0
                             finishReason = when {
                                 sawToolCalls -> "tool_use"
                                 status == "completed" -> "stop"
@@ -975,6 +1362,12 @@ internal fun OpenAIProvider.rawStreamMessage(
                                 )
                                 sendTracked(LLMStreamChunk.Usage(parseResponsesAPIUsage(usage)))
                             }
+                            // [T-openai-terminal-drain] `response.completed` IS the
+                            // Responses terminal event (usage above is the last
+                            // thing the turn needs). Mark it so the body watch stops
+                            // treating a relay that leaves the socket open as
+                            // "alive but silent" and stall-resuming a finished turn.
+                            terminalEventAtNanos.compareAndSet(0L, System.nanoTime())
                         }
                         type == "response.output_text.done" -> {
                             // Text output complete, no action needed
@@ -1077,6 +1470,14 @@ internal fun OpenAIProvider.rawStreamMessage(
                         choice.safeOptString("finish_reason", "").let {
                             if (it.isNotEmpty()) {
                                 finishReason = it
+                                // [T-openai-terminal-drain] The choice is finished:
+                                // from here on the stream only owes the trailing
+                                // usage chunk (stream_options.include_usage) and a
+                                // `[DONE]` the relay may never send. Mark the
+                                // terminal event so a socket left open afterwards
+                                // is drained and closed instead of being classified
+                                // as a mid-stream stall.
+                                terminalEventAtNanos.compareAndSet(0L, System.nanoTime())
                                 if (!sawFinishReason) {
                                     sawFinishReason = true
                                     com.openminis.app.logging.AppLogger.info(
@@ -1132,10 +1533,32 @@ internal fun OpenAIProvider.rawStreamMessage(
                         "OpenAIProvider",
                         "Stream ended mid-tool-call id=$combined name=${acc.name} argsLen=${acc.args.length} — flushing as ToolCallComplete (T248)",
                     )
+                    responsesToolCallsCompleted++
                     sendTracked(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
                 }
             }
+            val pendingAtTail = responsesToolCalls.size
             responsesToolCalls.clear()
+            responsesToolCallAliases.clear()
+            // [T-openai-terminal-drain] 尾部冲刷的可观测提示。终态后 socket 被我们自己
+            // 的 drain 砍掉（或读取直接报错）时，relay 还没来得及补发的
+            // `response.output_item.done` 根本到不了这里 —— 从未 `added` 过的调用
+            // 连累加器都没有，上面的冲刷循环对它无话可说，于是整条工具调用静默消失，
+            // 旧代码只留一条 info。这里按 declared/completed/pending 三个数把现场写进
+            // warn：declared=1 而 completed=0 就是那条丢掉的调用。
+            // Anything the relay still owed when the tail was cut is invisible to the
+            // flush above — make the loss observable instead of an info-level footnote.
+            if (terminalDrainClosedSocket.get() || postTerminalIoError) {
+                com.openminis.app.logging.AppLogger.warning(
+                    "OpenAIProvider",
+                    "[T-openai-terminal-drain] tail cut after the terminal event without [DONE] " +
+                        "(cutByDrain=${terminalDrainClosedSocket.get()} readError=$postTerminalIoError): " +
+                        "finishReason=$finishReason declaredFunctionCalls=$declaredFunctionCallItems " +
+                        "completedFunctionCalls=$responsesToolCallsCompleted pendingAtTail=$pendingAtTail — " +
+                        "an output_item.done the relay had not flushed yet (incl. a function_call it never " +
+                        "announced with output_item.added) is NOT part of this turn",
+                )
+            }
 
             // T321: stream ended — final tally + warning if we never saw a
             // finish_reason. The latter is the strongest signal of a server-

@@ -17,7 +17,14 @@ import com.openminis.app.data.model.LLMMessage
 internal object ResidentWindow {
     const val RESIDENT_BYTES = HotWindow.RESIDENT_BYTES
 
-    fun bytesOf(history: List<LLMMessage>): Long = history.sumOf { msg ->
+    fun bytesOf(history: List<LLMMessage>): Long = history.sumOf { bytesOf(it) }
+
+    /**
+     * [T-b1-bytesof-toolinput] One message's size. Never serializes tool input:
+     * [AgentContentPart.ToolUse.inputJsonLength] is captured at construction,
+     * so this stays a plain length sum even when called per appended message.
+     */
+    fun bytesOf(msg: LLMMessage): Long =
         msg.content.length.toLong() * 2 +
             (msg.reasoningContent?.length?.toLong() ?: 0L) * 2 +
             msg.contentParts.sumOf { part ->
@@ -25,11 +32,10 @@ internal object ResidentWindow {
                     is AgentContentPart.Text -> part.text.length.toLong() * 2
                     is AgentContentPart.ToolResult ->
                         part.content.length.toLong() * 2 + (part.imageData?.size?.toLong() ?: 0L)
-                    is AgentContentPart.ToolUse -> part.input.toString().length.toLong() * 2
+                    is AgentContentPart.ToolUse -> part.inputJsonLength.toLong() * 2
                     is AgentContentPart.ImageData -> part.data.size.toLong()
                 }
             }
-    }
 
     /**
      * How many leading entries to drop so the history is at most
@@ -54,11 +60,18 @@ internal object ResidentWindow {
      */
     fun byteCut(history: List<LLMMessage>, budget: Long = RESIDENT_BYTES): Int {
         if (history.size <= 1) return 0
-        if (bytesOf(history) <= budget) return 0
+        // [T-b1-bytecut-prefix] One sizing pass, then O(1) per candidate cut.
+        // The old loop re-ran `bytesOf(history.subList(cut, size))` for every
+        // candidate boundary, each term re-serializing every remaining tool
+        // input — quadratic over a list capped at 4000 messages.
+        val prefix = LongArray(history.size + 1)
+        for (i in history.indices) prefix[i + 1] = prefix[i] + bytesOf(history[i])
+        val total = prefix[history.size]
+        if (total <= budget) return 0
         var cut = 0
         while (cut < history.size - 1) {
             if (isLegalBoundary(history, cut)) {
-                if (bytesOf(history.subList(cut, history.size)) <= budget) return cut
+                if (total - prefix[cut] <= budget) return cut
             }
             val next = firstLegalCut(history, cut + 1) ?: break
             cut = next

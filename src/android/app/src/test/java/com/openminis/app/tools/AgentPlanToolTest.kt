@@ -27,6 +27,39 @@ class AgentPlanToolTest {
         assertEquals(2, AgentPlanStore.list(sidA, null).size)
     }
 
+    // ── [T-plan-duplicate-id] 显式 id 的唯一性 ──
+
+    @Test
+    fun addRejectsDuplicateExplicitId() {
+        // 重复 id 会让 resolvePlanIndex 的精确匹配永远只命中第一条，第二条永久
+        // 停在 pending 并占掉 MAX_PLANS 配额，所以 add 必须显式拒绝。
+        AgentPlanStore.clear(sidA, null)
+        AgentPlanStore.add(sidA, null, "first", id = "plan-1")
+        var rejected = false
+        try {
+            AgentPlanStore.add(sidA, null, "second", id = "plan-1")
+        } catch (_: Exception) {
+            rejected = true
+        }
+        assertTrue("duplicate id must be rejected, not inserted", rejected)
+        val plans = AgentPlanStore.list(sidA, null)
+        assertEquals(1, plans.size)
+        assertEquals("first", plans.single().title)
+        // 唯一那条仍可被 update/remove 精确命中
+        assertNotNull(AgentPlanStore.update(sidA, null, "plan-1", status = "done"))
+        assertTrue(AgentPlanStore.remove(sidA, null, "plan-1"))
+    }
+
+    @Test
+    fun generatedIdsNeverCollideWithExplicitOnes() {
+        AgentPlanStore.clear(sidA, null)
+        val explicit = AgentPlanStore.add(sidA, null, "explicit", id = "fixed-id")
+        val generated = AgentPlanStore.add(sidA, null, "generated")
+        assertEquals("fixed-id", explicit.id)
+        assertTrue(generated.id != explicit.id)
+        assertEquals(2, AgentPlanStore.list(sidA, null).map { it.id }.toSet().size)
+    }
+
     @Test
     fun addRejectsBlankTitle() {
         try { AgentPlanStore.add(sidA, null, "  "); assertFalse(true) } catch (_: Exception) {}

@@ -193,8 +193,14 @@ object MessageTransformerChain {
                 } else if (inFence && trimmed.startsWith(fenceMark) &&
                     trimmed.length == fenceMark.length
                 ) {
-                    out += segStart until lineEnd + 1 to true
-                    segStart = lineEnd + 1
+                    // [T-fence-segments-bounds] 收尾围栏行可能没有尾换行：
+                    // 此时 lineEnd == text.length，`until lineEnd + 1` 会产出
+                    // endInclusive = text.length 的区间，下游
+                    // transformProtectingCode 的 text.substring(range) 即
+                    // substring(start, length + 1) → StringIndexOutOfBounds，
+                    // 整轮发送失败（"```\nx\n```" 这种以围栏收尾的回复必现）。
+                    out += segStart until minOf(lineEnd + 1, text.length) to true
+                    segStart = minOf(lineEnd + 1, text.length)
                     inFence = false
                 }
                 if (nl < 0) break

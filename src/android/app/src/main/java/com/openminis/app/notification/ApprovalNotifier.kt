@@ -30,7 +30,10 @@ import com.openminis.app.service.ApprovalGate
  *
  * The approval notification is cleared on every resolution path:
  * - **Approve / Deny tap**: [ApprovalBroadcastReceiver.onReceive] calls the
- *   companion [cancelApproval] after forwarding the result to [ApprovalGate].
+ *   companion [cancelApproval] after forwarding the result to [ApprovalGate] —
+ *   but only when the tap actually landed (or the request is already gone);
+ *   see [shouldClearEntryAfterTap]. A live request whose tap was rejected keeps
+ *   its buttons rather than vanishing with the user's approval.
  * - **Timeout**: [ApprovalGate.waitFor] returns `false`; callers in
  *   `ChatViewModel` must call [cancelApproval] after a `false` result so the
  *   stale buttons are removed. (The [ApprovalBroadcastReceiver] fallback —
@@ -51,6 +54,13 @@ class ApprovalNotifier(private val context: Context) {
         const val ACTION_APPROVE = "com.openminis.app.APPROVE_TOOL"
         const val ACTION_DENY    = "com.openminis.app.DENY_TOOL"
         const val EXTRA_REQUEST_ID = "approval_request_id"
+        // [T-approval-pendingintent-identity] 请求归属的会话，随按钮一起下发：
+        // receiver 用它调 ApprovalGate.approve(id, sessionId) 做第二道归属校验。
+        // 注意这是**发通知那一刻的快照**，不是一票否决的判据：draft→persisted
+        // 迁移（ApprovalGate.migrateSession）会改写请求的路由键，gate 因此按
+        // 「请求的 id + 它归属过的会话键（origin 或当前路由键）」判定归属，
+        // 快照过期不会让一次真实批准失效。
+        const val EXTRA_SESSION_ID = "approval_session_id"
 
         // Different requestCode per action so the system doesn't collapse them
         // into a single PendingIntent (which would make approve/deny indistinguishable).
@@ -59,6 +69,16 @@ class ApprovalNotifier(private val context: Context) {
         private const val NOTIF_BASE = 0x2C300
 
         fun notificationId(requestId: String): Int = NOTIF_BASE xor requestId.hashCode()
+
+        /**
+         * [T-approval-pendingintent-identity] 按钮 PendingIntent 的 data，唯一随
+         * [requestId] 变化、且参与 `Intent.filterEquals` 的成分。PendingIntent 的身份是
+         * `(requestCode, filterEquals)`，而 filterEquals 只看 action/data/type/component/
+         * categories —— **extras 不在其中**：两个并发审批若共用身份，后注册者的 extras
+         * 会覆盖前者，点"同意"A 实际批准 B。requestId 是 app 自产的 UUID（无 URI 非法
+         * 字符），因此这个映射是单射。纯字符串实现，便于 JVM 单测钉住该不变量。
+         */
+        fun approvalActionDataPath(requestId: String): String = "minis://approval/$requestId"
 
         /**
          * Creates the notification channel [CHANNEL_ID] if it hasn't been created yet.
@@ -80,6 +100,22 @@ class ApprovalNotifier(private val context: Context) {
                 }
             )
         }
+
+        /**
+         * [T-approval-tap-must-land] 一次按钮点击之后，通知条目到底该不该清。
+         *
+         * 只有两种情况可以清：点击**真的落地**了（gate 把请求从待审批表摘掉并
+         * 唤醒了等待者），或者请求已经不在待审批表里（过期通知，按钮唤醒不了
+         * 任何东西，留着只会误导）。
+         *
+         * 反过来，"请求还挂着、但这次点击被判归属不符" **必须留着按钮**：那正是
+         * B14 回归的现场——receiver 无条件 cancel，用户点"同意"被静默丢弃、通知
+         * 消失，SecurityGateHolder.waitFor 一直等到 90s 超时再把 "User REJECTED"
+         * 回给模型，一次真实批准被当成拒绝并终止任务线。宁可让按钮留着重试，
+         * 也不能把用户的选择吞掉。
+         */
+        fun shouldClearEntryAfterTap(tapLanded: Boolean, requestStillPending: Boolean): Boolean =
+            tapLanded || !requestStillPending
 
         /**
          * Cancels the approval notification by [NOTIF_ID].
@@ -127,8 +163,10 @@ class ApprovalNotifier(private val context: Context) {
      * @param requestId  id returned by [com.openminis.app.service.ApprovalGate.requestApproval]
      * @param toolName   human-readable tool name for the notification title
      * @param preview    short tool input preview (e.g. first 200 chars)
+     * @param sessionId  session the request belongs to (see [EXTRA_SESSION_ID]);
+     *   may be null when the caller has no session binding.
      */
-    fun notifyApproval(requestId: String, toolName: String, preview: String) {
+    fun notifyApproval(requestId: String, toolName: String, preview: String, sessionId: String? = null) {
         ensureChannel(context)
         val nm = NotificationManagerCompat.from(context)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !nm.areNotificationsEnabled()) {
@@ -140,7 +178,15 @@ class ApprovalNotifier(private val context: Context) {
             val intent = Intent(context, ApprovalBroadcastReceiver::class.java).apply {
                 action = if (approved) ACTION_APPROVE else ACTION_DENY
                 putExtra(EXTRA_REQUEST_ID, requestId)
+                putExtra(EXTRA_SESSION_ID, sessionId)
                 setPackage(context.packageName) // explicit package so the PendingIntent resolves reliably
+                // [T-approval-pendingintent-identity] PendingIntent 的身份是
+                // (requestCode, Intent.filterEquals)，而 filterEquals **不含 extras**。
+                // 两条并发审批原先共用 action+reqCode+组件，第二次 getBroadcast 命中的
+                // 是同一个 PendingIntentRecord，FLAG_UPDATE_CURRENT 把 extras 覆盖成后
+                // 注册者的 requestId —— 两条通知的按钮指向同一个 id，点"同意"A 实际批准 B。
+                // data 参与 filterEquals：每个 requestId 一个独立身份，按钮各归其主。
+                data = Uri.parse(approvalActionDataPath(requestId))
             }
             val reqCode = if (approved) REQ_APPROVE else REQ_DENY
             return PendingIntent.getBroadcast(

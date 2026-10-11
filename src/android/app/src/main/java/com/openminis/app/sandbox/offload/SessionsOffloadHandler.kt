@@ -3,16 +3,22 @@ package com.openminis.app.sandbox.offload
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.util.IsoTime
+import com.openminis.app.offload.OffloadPermissionManager
+import com.openminis.app.offload.PromptDecision
 import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
-import com.openminis.app.offload.OffloadPermissionManager
 import com.openminis.app.sandbox.SessionAccessAudit
 import com.openminis.app.sandbox.SessionAccessPolicy
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Calendar
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * T188 — `minis-sessions-cli` offload handler. Lets the in-shell agent
@@ -93,6 +99,26 @@ class SessionsOffloadHandler(
      * `messages` return message bodies, which is the payload this boundary
      * exists to protect: a caller that does not own the target session must
      * hold the user's grant. Every attempt, allowed or not, is audited.
+     *
+     * [T-android-offload-hang] The grant check is bounded by
+     * [OffloadPermissionManager.INTERACTIVE_BUDGET_MS], the same contract
+     * [OffloadGate] applies: this runs inside `runBlocking` on an offload
+     * worker thread where the ASK_ONCE prompt has no guaranteed UI, so an
+     * unbounded wait parked that thread (and its suspended continuation) for
+     * good — long after the caller's watchdog gave up. Expiry answers
+     * `interaction_required` / exit 124, exactly like the gate.
+     *
+     * [T-d10-prompt-slot] 预算之外还要分清"提示到底有没有上过屏"。ASK_ONCE 提示槽是
+     * **全局单槽**（`OffloadPromptQueue`：一张在屏、其余 FIFO 排队），而在屏那一张只由
+     * **调用方自己的预算**让它退位。在屏工具（`SessionLookupTool` →
+     * [SessionAccessPolicy.isCrossSessionGranted]）没有预算，它那张提示可以一直挂在
+     * 屏幕上；此时本调用方排进 FIFO 只会把 15s 预算整段烧在队列里，然后报一句
+     * "15s 内没人应答"——用户根本没看过这张提示，agent 会据此反复重试，而不是去处理
+     * 眼前那一张。所以这里观测"我方提示是否上过屏"，把两种失败在文案上分开
+     * （错误码不变：都是 `interaction_required` / 124，只有明确的 ALLOWED 才放行）。
+     * 根因（在屏路径无预算）在 `SessionLookupTool` / `SessionAccessPolicy` 一侧，
+     * 不在本文件；槽本身的"无人应答即退位"由 `OffloadPromptQueue` + 调用方预算共同
+     * 保证（回归判据见 `SessionsOffloadSlotRetirementTest`）。
      */
     private suspend fun crossSessionDenial(
         request: NativeOffloadRequest,
@@ -119,12 +145,44 @@ class SessionsOffloadHandler(
             SessionAccessAudit.record(caller, sub, target, true, false)
             return null
         }
-        val granted = OffloadPermissionManager.checkPermission(
-            SessionAccessPolicy.GRANT,
-            "Read other chats",
-            caller,
-        )
-        SessionAccessAudit.record(caller, sub, target.ifEmpty { "(all sessions)" }, granted, granted)
+        // [T-d10-prompt-slot] 观测我方那张提示有没有真的上屏（见方法 KDoc）。watcher 是
+        // 当前 runBlocking 事件循环上的子协程：不新起线程，父协程挂起（等提示）时它才
+        // 被调度，因此能在提示在屏期间看到它。StateFlow 会合并中间值，所以这只是
+        // "best-effort 观测"——判错时两边都还是 fail-closed 的 interaction_required，
+        // 只是文案不同。
+        val promptOnScreen = AtomicBoolean(false)
+        val decision = coroutineScope {
+            val watcher = launch {
+                OffloadPermissionManager.pendingRequest.collect { pending ->
+                    val shown = pending?.request ?: return@collect
+                    if (shown.toolName == SessionAccessPolicy.GRANT && shown.sessionId == caller) {
+                        promptOnScreen.set(true)
+                    }
+                }
+            }
+            try {
+                withTimeoutOrNull(OffloadPermissionManager.INTERACTIVE_BUDGET_MS) {
+                    OffloadPermissionManager.checkPermission(SessionAccessPolicy.GRANT, "Read other chats", caller)
+                }
+            } finally {
+                watcher.cancel()
+            }
+        }
+        val targetLabel = target.ifEmpty { "(all sessions)" }
+        // [T-android-prompt-identity] 没人应答 ≠ 策略拒绝：null = 预算耗尽，
+        // UNANSWERED = 提示被队列丢弃（排队超时 / 队列满，见 OffloadPromptQueue）。
+        // 审计标记未回答，错误码走 interaction_required / 124，而不是 PERMISSION_DENIED / 126。
+        if (decision == null || decision.isUnanswered) {
+            SessionAccessAudit.record(caller, sub, targetLabel, false, false, promptUnanswered = true)
+            return when (CrossSessionPromptSlot.outcome(decision, promptOnScreen.get())) {
+                // [T-d10-prompt-slot] 我方的提示从来没上过屏（槽被另一张提示占着 / 队列满）：
+                // 不能报"没人应答"，那是把槽的饥饿说成用户没点。
+                CrossSessionPromptSlot.Outcome.DROPPED_WITHOUT_SCREEN -> slotBusyResult(sub, args)
+                else -> interactionRequiredResult(sub, args)
+            }
+        }
+        val granted = decision.isAllowed
+        SessionAccessAudit.record(caller, sub, targetLabel, granted, granted)
         if (granted) return null
         val err = errorEnvelope(
             sub,
@@ -338,14 +396,6 @@ class SessionsOffloadHandler(
         )
     }
 
-    private fun errorEnvelope(action: String, code: String, msg: String): JSONObject {
-        return JSONObject()
-            .put("ok", false)
-            .put("tool", TOOL_NAME)
-            .put("action", action)
-            .put("data", JSONObject().put("error", code).put("message", msg))
-    }
-
     companion object {
         private const val TAG = "SessionsOffload"
         private const val TOOL_NAME = "minis-sessions-cli"
@@ -358,6 +408,68 @@ class SessionsOffloadHandler(
         // Same code ConfigOffloadHandler uses for permission_denied, so a
         // caller can classify the failure without reading the message.
         private const val EXIT_PERMISSION_DENIED = 126
+        // [T-android-offload-hang] The ASK_ONCE prompt went unanswered inside
+        // INTERACTIVE_BUDGET_MS. 124 is the "timed out" code OffloadGate and
+        // the offload watchdog already report, so a caller can tell "nobody
+        // has answered yet" apart from "the user denied it" (126).
+        private const val EXIT_INTERACTION_REQUIRED = 124
+
+        /**
+         * [T-android-offload-hang] Result for an expired cross-session prompt:
+         * `interaction_required` + exit 124, matching [OffloadGate]'s timeout
+         * branch so both gates read identically to the caller. `internal`
+         * rather than private so the JVM unit test can pin the contract
+         * without a Room-backed handler instance.
+         *
+         * [T-android-prompt-identity] 提示被队列丢弃（排队超时 / 队列满，
+         * `PromptDecision.UNANSWERED`）也从这里出去 —— 两种情况下用户都还没
+         * 看过那张提示，都不是"用户拒绝"。
+         */
+        internal fun interactionRequiredResult(action: String, args: OffloadArgs): NativeOffloadResult {
+            val err = errorEnvelope(
+                action,
+                "interaction_required",
+                "This command reads message bodies from other chat sessions, which needs the " +
+                    "user to grant `session_read`. Nobody answered the in-app prompt within " +
+                    "${OffloadPermissionManager.INTERACTIVE_BUDGET_MS / 1000}s, so no message " +
+                    "bodies were read. Ask the user to approve it, then retry.",
+            )
+            return NativeOffloadResult(
+                EXIT_INTERACTION_REQUIRED,
+                OffloadOutput.formatBody(err.toString(2), args) + "\n",
+            )
+        }
+
+        /**
+         * [T-d10-prompt-slot] 在屏槽被**另一张**提示占着、我方这张压根没上屏时的结果。
+         * 错误码与 [interactionRequiredResult] 相同（124 / `interaction_required`，
+         * 仍然 fail-closed，没读到任何消息体），区别只在文案：说清"这张提示没上过屏"，
+         * 让 agent 去处理眼前那张提示（或去设置里直接授权）后重试，而不是以为用户
+         * 看到了却没点。`internal` 供 JVM 单测钉住文案契约。
+         */
+        internal fun slotBusyResult(action: String, args: OffloadArgs): NativeOffloadResult {
+            val err = errorEnvelope(
+                action,
+                "interaction_required",
+                "This command reads message bodies from other chat sessions, which needs the " +
+                    "user to grant `session_read`. The app is already showing another permission " +
+                    "prompt, so this one was never put on screen and no message bodies were read. " +
+                    "Ask the user to answer that prompt (or to grant `session_read` under " +
+                    "Settings > Permissions), then retry.",
+            )
+            return NativeOffloadResult(
+                EXIT_INTERACTION_REQUIRED,
+                OffloadOutput.formatBody(err.toString(2), args) + "\n",
+            )
+        }
+
+        private fun errorEnvelope(action: String, code: String, msg: String): JSONObject {
+            return JSONObject()
+                .put("ok", false)
+                .put("tool", TOOL_NAME)
+                .put("action", action)
+                .put("data", JSONObject().put("error", code).put("message", msg))
+        }
 
         private const val HELP_TEXT = """minis-sessions-cli - Query historical chat sessions and messages
 
@@ -414,5 +526,32 @@ EXAMPLES:
   minis-sessions-cli messages --id <session_id> --full
   minis-sessions-cli messages --id <session_id> --offset 20 --limit 10
 """
+    }
+}
+
+/**
+ * [T-d10-prompt-slot] `minis-sessions-cli` 跨会话门控"没拿到授权"时的两种失败形态，
+ * 判据只有两件事：`checkPermission` 的返回值，以及**我方那张提示有没有真的上过屏**
+ * （`OffloadPermissionManager.pendingRequest` 里出现过 `toolName == session_read` 且
+ * `sessionId == 调用方` 的那一张，观测见 `crossSessionDenial`）。
+ *
+ * - [Outcome.DECIDED]：拿到了明确答复（ALLOWED / DENIED）——不是"没人应答"，文案由调用方按
+ *   [PromptDecision.isAllowed] 决定；
+ * - [Outcome.SHOWN_THEN_UNANSWERED]：提示上过屏，但预算内没人点 —— 文案说"没人应答"；
+ * - [Outcome.DROPPED_WITHOUT_SCREEN]：提示压根没上屏（全局单槽被另一张提示占着 / 队列满 /
+ *   排队超时）—— 文案必须说"没上屏"，否则 agent 会把槽的饥饿当成用户没点，反复重试。
+ *
+ * 三种都 fail-closed（只有 ALLOWED 放行）。抽成纯逻辑是为了让这条判据能被单测钉住
+ * （见 `SessionsOffloadPromptSlotTest`）：调用它的 `crossSessionDenial` 要 Room 的
+ * `ChatRepository` 才能实例化，本模块没有 Robolectric。
+ */
+internal object CrossSessionPromptSlot {
+
+    enum class Outcome { DECIDED, SHOWN_THEN_UNANSWERED, DROPPED_WITHOUT_SCREEN }
+
+    fun outcome(decision: PromptDecision?, sawOurPromptOnScreen: Boolean): Outcome = when {
+        decision != null && !decision.isUnanswered -> Outcome.DECIDED
+        sawOurPromptOnScreen -> Outcome.SHOWN_THEN_UNANSWERED
+        else -> Outcome.DROPPED_WITHOUT_SCREEN
     }
 }

@@ -48,8 +48,17 @@ object WebAppPathResolver {
     fun inferScope(hostFile: File): Triple<String, String?, String>? {
         val hostAbs = hostFile.absolutePath
         // Longest host-prefix wins, mirroring resolveHostPath's longest-key match.
+        // [T-b4-#2] bindMounts 现在是 ConcurrentHashMap（IO 线程在建壳/改挂载时会写，
+        // 这里跑在主线程），遍历顺序不再确定。多个 key 共享同一宿主根（`/sdcard`、
+        // `/storage/emulated/0`、`/var/minis/mounts/sdcard` 都指向共享存储），而首个
+        // 命中就决定结果，所以平局必须确定化：linux 路径短的优先——这正是旧
+        // LinkedHashMap 插入序产生的顺序（`/sdcard` 最先插入）。
         val sorted = com.openminis.app.sandbox.PRootKernel
-            .bindMounts.entries.sortedByDescending { it.value.length }
+            .bindMounts.toList()
+            .sortedWith(
+                compareByDescending<Pair<String, String>> { it.second.length }
+                    .thenBy { it.first.length },
+            )
         for ((linuxPrefix, hostBase) in sorted) {
             val baseNorm = hostBase.trimEnd('/')
             if (hostAbs == baseNorm || hostAbs.startsWith("$baseNorm/")) {

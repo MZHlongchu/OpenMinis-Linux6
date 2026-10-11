@@ -24,6 +24,13 @@ import com.openminis.app.data.model.LLMMessage
  */
 object CompactHistoryProjector {
 
+    /**
+     * [T-compact-summary-single-carrier] 注入摘要的开启标记。宿主侧的 parts 重建
+     * （`projectUserTurnParts`）按它识别「这不是用户正文」，从而既不会把摘要算进
+     * 正文、也不会在截断重建时把它吞掉——两边必须用同一个常量，别各写一份字面量。
+     */
+    const val SUMMARY_OPEN_TAG = "<context-summary>"
+
     /** 宿主标记的接缝形状（CompactMarkerEntity 的纯投影）。 */
     data class Marker(
         val id: String,
@@ -130,7 +137,7 @@ object CompactHistoryProjector {
     ): List<LLMMessage> {
         if (summary.isNullOrBlank() || marker == null) return history.toList()
 
-        val summaryWrappedText = "<context-summary>\n" +
+        val summaryWrappedText = SUMMARY_OPEN_TAG + "\n" +
             "The following is a summary of the earlier conversation that was compacted to save context space.\n" +
             "Treat it as background context only. The user's most recent message (below or in the next turn) takes precedence — if it changes the task, the goal, or any numbers/scope, follow the new instruction and do not resume the old plan from this summary. The current persona in the system prompt overrides any voice implied by this summary. Do not re-run discovery (reading memory, scanning skills, re-reading files) unless the new instruction requires it.\n\n" +
             summary +
@@ -143,7 +150,7 @@ object CompactHistoryProjector {
                 ?.joinToString("\n\n---\n\n")
         }
         val effectiveSummaryWrappedText = if (chunkRetrieved != null && chunkRetrieved != summary) {
-            "<context-summary>\n" +
+            SUMMARY_OPEN_TAG + "\n" +
                 "The following cumulative summary preserves the earlier conversation. A few relevant compaction excerpts follow as additional detail.\n" +
                 "Treat it as background context only. The user's most recent message (below or in the next turn) takes precedence — if it changes the task, the goal, or any numbers/scope, follow the new instruction and do not resume the old plan from this summary.\n\n" +
                 summary +
@@ -246,15 +253,14 @@ object CompactHistoryProjector {
                     result.addAll(postAnchor.subList(0, firstUserOffset))
                 }
                 val target = postAnchor[firstUserOffset]
-                val injected = target.copy(
-                    content = effectiveSummaryWrappedText + "\n\n" + target.content,
-                )
+                val injected = withInjectedSummary(target, effectiveSummaryWrappedText)
                 result.add(injected)
                 if (firstUserOffset + 1 < postAnchor.size) {
                     result.addAll(postAnchor.subList(firstUserOffset + 1, postAnchor.size))
                 }
             } else {
                 result.addAll(postAnchor)
+                // 合成消息没有 parts → provider 走 legacy 的 content 分支，摘要照常送达。
                 result.add(LLMMessage(role = LLMMessage.Role.USER, content = effectiveSummaryWrappedText))
             }
             return result
@@ -293,8 +299,8 @@ object CompactHistoryProjector {
     }
 
     /**
-     * 分离锚点的降级投影：摘要内联为尾部首条 user 消息的
-     * `<context-summary>` 前缀（角色交替安全），尾部逐字跟随。
+     * 分离锚点的降级投影：摘要作为尾部首条 user 消息的
+     * `<context-summary>` Text part（角色交替安全），尾部逐字跟随。
      */
     fun detachedCompactHistory(
         history: List<LLMMessage>,
@@ -312,8 +318,46 @@ object CompactHistoryProjector {
         }
         val out = ArrayList<LLMMessage>(tail.size - start + 1)
         val first = tail[start]
-        out.add(first.copy(content = summaryWrappedText + "\n\n" + first.content))
+        out.add(withInjectedSummary(first, summaryWrappedText))
         out.addAll(tail.subList(start + 1, tail.size))
         return out
+    }
+
+    /**
+     * [T-compact-summary-parts] 摘要必须进 `contentParts`：provider 在
+     * `contentParts` 非空时**完全忽略** `content`（AnthropicProvider 的 parts
+     * 分支只遍历 parts 并 `put("content", contentArray)`；OpenAIRequestBodies 的
+     * user 分支走 `textParts.joinToString("")`；GeminiProvider 同构），而生产历史
+     * 里的 user 消息总是带 parts（发送时 `contentParts = [Text(body), …]`，DB 重建
+     * 同理）。只写 `content` 会让摘要从第二次请求起静默丢失——测试断言的是 provider
+     * 根本不读的字段，所以一直全绿。
+     *
+     * Text part 追加在 parts 末尾：Anthropic 要求 `tool_result` 居 user content 数组
+     * 首位，追加不会把它挤走。
+     *
+     * [T-compact-summary-single-carrier] **摘要只写这一处**：`content` 不再重复
+     * 携带一份。旧实现两边都写（`content = summary + "\n\n" + body` +
+     * 末尾 Text part），而 `applyContextWindowPolicy` 的巨型用户轮截断是**按
+     * `content` 取正文**、再用 `projectUserTurnParts` 重建 parts 的——摘要因此在
+     * 长会话里出现两次（截断后的正文里一次 + 尾部那个 Text part 再一次），截断标记
+     * 本身也会落进摘要内部（头 3/4 保留）。单载体之后：正文截断只动正文，摘要整段
+     * 留在 parts 里，既不会重复也不会被打断。
+     *
+     * 代价：`content` 不再含摘要，读 `content` 的旧路径（token 估算、日志）看不到
+     * 它——但这些路径都不发给模型，provider 只看 parts（见上）。
+     *
+     * 顺带补齐 parts 缺正文的形状：parts 为空而 content 非空（合成/遗留消息）时，
+     * 先把正文折成一个 Text part，再追加摘要。旧实现在这种形状下 parts 只有摘要，
+     * provider 便**只**发摘要、把 `content` 里的正文整段丢掉。
+     */
+    private fun withInjectedSummary(target: LLMMessage, summaryWrappedText: String): LLMMessage {
+        val bodyPart = if (target.contentParts.isEmpty() && target.content.isNotBlank()) {
+            listOf(AgentContentPart.Text(target.content))
+        } else {
+            emptyList()
+        }
+        return target.copy(
+            contentParts = bodyPart + target.contentParts + AgentContentPart.Text(summaryWrappedText),
+        )
     }
 }

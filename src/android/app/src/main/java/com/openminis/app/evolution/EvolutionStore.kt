@@ -137,6 +137,27 @@ class EvolutionStore(dir: File) {
             }
         }
         mergeSimilar()
+        // [T-evolution-retention] 空闲维护顺带执行证据表保留策略：tool_fails /
+        // observations 此前只增不减，evolution.db 随使用时间无限增长。
+        pruneEvidence(now)
+    }
+
+    /**
+     * [T-evolution-retention] 删除超过保留窗口的证据行。
+     *
+     * 只清这两张"原始证据"表：beliefs / proposals 是用户可见的演化账本与已采纳
+     * 规则，按时间删除会破坏 [coreBulletBodies] 与提案历史。窗口与表清单见
+     * [EvolutionRetention]（纯函数，单测可验）。删除后顺手尝试回收空闲页——
+     * 只有库处于 incremental auto-vacuum 模式才真正释放文件空间，否则是无害的
+     * no-op；行数有界这一点不依赖它。
+     */
+    private fun pruneEvidence(now: Long) {
+        val db = helper.writableDatabase
+        val cutoff = EvolutionRetention.cutoff(now)
+        for (table in EvolutionRetention.EVIDENCE_TABLES) {
+            db.execSQL(EvolutionRetention.pruneSql(table), arrayOf<Any>(cutoff))
+        }
+        db.execSQL("PRAGMA incremental_vacuum")
     }
 
     @Synchronized
@@ -400,6 +421,13 @@ class EvolutionStore(dir: File) {
             addColumn(db, "beliefs", "scene", "TEXT")
             addColumn(db, "beliefs", "last_hit_at", "INTEGER")
             addColumn(db, "proposals", "scene", "TEXT")
+            // [T-evolution-retention] recentToolFails 按 (session_id, skill_id,
+            // created_at) 过滤再按时间倒序取 8 条：没有索引就是每次工具失败都
+            // 全表扫。IF NOT EXISTS 幂等，旧库在下次打开时补建。
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS idx_tool_fails_lookup " +
+                    "ON tool_fails(session_id, skill_id, created_at)",
+            )
         }
 
         private fun addColumn(db: SQLiteDatabase, table: String, column: String, type: String) {
@@ -417,4 +445,29 @@ class EvolutionStore(dir: File) {
             return false
         }
     }
+}
+
+/**
+ * [T-evolution-retention] 证据表的保留策略。
+ *
+ * `tool_fails`（每次与 skill 相关的工具失败一行）与 `observations` 只增不减是
+ * evolution.db 唯一没有上界的部分。策略抽成纯函数以便单测覆盖"窗口多长、清哪
+ * 两张表"，SQL 的执行由 [EvolutionStore.maintainBeliefs] 在空闲维护（充电 +
+ * 冷却）时完成。
+ */
+internal object EvolutionRetention {
+    /** 保留窗口：30 天。 */
+    const val WINDOW_MS = 30L * 24 * 60 * 60 * 1000
+
+    /**
+     * 需要按 `created_at` 清理的表。**不含** beliefs / proposals：它们承载已采纳
+     * 的规则与提案历史（[EvolutionStore.coreBulletBodies] 依赖），按时间删除等于
+     * 丢用户的知识沉淀。
+     */
+    val EVIDENCE_TABLES = listOf("tool_fails", "observations")
+
+    fun cutoff(now: Long): Long = now - WINDOW_MS
+
+    /** 表名来自 [EVIDENCE_TABLES] 常量白名单，时间值走 bind 参数。 */
+    fun pruneSql(table: String): String = "DELETE FROM $table WHERE created_at < ?"
 }

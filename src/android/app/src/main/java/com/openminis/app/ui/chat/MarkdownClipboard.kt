@@ -201,36 +201,82 @@ object MarkdownClipboard {
         return sb.toString()
     }
 
+    // ─── Inline marker patterns (shared by both copy flavors) ───────────────
+    //
+    // The `*`/`_` emphasis rules carry flanking conditions — the OUTER side must
+    // be line-start/whitespace/punctuation, the INNER side non-whitespace —
+    // instead of the old "not `**`/`__`" lookarounds. Without them a Copy ate
+    // the middle of identifiers: `last_mouse_click_ms` came back as
+    // `lastmouse_click_ms`, `my_file_name.kt` as `myfile_name.kt`, and the
+    // asterisks in `a*b*c` vanished. Dropping characters from the clipboard
+    // payload is silent corruption: the paste target shows no sign it happened.
+    // [T-b10-copy-inline-emphasis-flanking]
+    private val IMAGE_RE = Regex("!\\[([^\\]]*)\\]\\([^)]*\\)")
+    private val LINK_RE = Regex("\\[([^\\]]+)\\]\\(([^)]+)\\)")
+    private val BOLD3_STAR_RE = Regex("\\*\\*\\*(.+?)\\*\\*\\*")
+    private val BOLD3_UNDER_RE = Regex("___(.+?)___")
+    private val BOLD_STAR_RE = Regex("\\*\\*(.+?)\\*\\*")
+    private val BOLD_UNDER_RE = Regex("__(.+?)__")
+    private val ITALIC_STAR_RE = Regex("(?<![\\w*])\\*(?!\\s)([^*\\n]*[^\\s*])\\*(?![\\w*])")
+    private val ITALIC_UNDER_RE = Regex("(?<![\\w_])_(?!\\s)([^_\\n]*[^\\s_])_(?![\\w_])")
+    private val STRIKE_RE = Regex("~~(.+?)~~")
+
+    /** Delimiter wrapping the code-span placeholders below; NUL cannot appear
+     *  in chat markdown, so it can't be forged by a reply. Same sentinel the
+     *  previous inline-code extraction used. */
+    private const val CODE_SENTINEL = '\u0000'
+
+    private val CODE_RE = Regex("`([^`]+)`")
+    private val CODE_PLACEHOLDER_RE = Regex("$CODE_SENTINEL(\\d+)$CODE_SENTINEL")
+
+    /**
+     * Pull inline `code` spans out into placeholders so no marker rule can
+     * rewrite literal text.
+     *
+     * Previously the backticks were stripped FIRST and the emphasis/link rules
+     * then ran over the code body, so `` `last_mouse_click_ms` `` lost its
+     * underscores and `[text](url)` inside a span was resolved — the copy
+     * rewrote text the user had explicitly marked as literal.
+     * [T-b10-copy-inline-code-literal]
+     */
+    private fun extractCodeSpans(s: String, codes: MutableList<String>): String =
+        CODE_RE.replace(s) { m ->
+            codes.add(m.groupValues[1])
+            "$CODE_SENTINEL${codes.size - 1}$CODE_SENTINEL"
+        }
+
+    /** Inverse of [extractCodeSpans]; [wrap] renders each code body verbatim. */
+    private fun restoreCodeSpans(
+        s: String,
+        codes: List<String>,
+        wrap: (String) -> String,
+    ): String = CODE_PLACEHOLDER_RE.replace(s) { m -> wrap(codes[m.groupValues[1].toInt()]) }
+
     /** Strip inline markdown markers, return readable text. */
     private fun stripInline(s: String): String {
-        var t = s
+        val codes = mutableListOf<String>()
+        var t = extractCodeSpans(s, codes)
         // Images: ![alt](url) → alt
-        t = Regex("!\\[([^\\]]*)\\]\\([^)]*\\)").replace(t, "$1")
+        t = IMAGE_RE.replace(t, "$1")
         // Links: [text](url) → text
-        t = Regex("\\[([^\\]]+)\\]\\(([^)]+)\\)").replace(t, "$1")
-        // Inline code: `code` → code
-        t = Regex("`([^`]+)`").replace(t, "$1")
+        t = LINK_RE.replace(t, "$1")
         // Bold/italic/strike — order matters: longest delimiter first.
-        t = Regex("\\*\\*\\*(.+?)\\*\\*\\*").replace(t, "$1")
-        t = Regex("___(.+?)___").replace(t, "$1")
-        t = Regex("\\*\\*(.+?)\\*\\*").replace(t, "$1")
-        t = Regex("__(.+?)__").replace(t, "$1")
-        t = Regex("(?<!\\*)\\*(?!\\*)([^*\\n]+)\\*").replace(t, "$1")
-        t = Regex("(?<!_)_(?!_)([^_\\n]+)_").replace(t, "$1")
-        t = Regex("~~(.+?)~~").replace(t, "$1")
-        return t
+        t = BOLD3_STAR_RE.replace(t, "$1")
+        t = BOLD3_UNDER_RE.replace(t, "$1")
+        t = BOLD_STAR_RE.replace(t, "$1")
+        t = BOLD_UNDER_RE.replace(t, "$1")
+        t = ITALIC_STAR_RE.replace(t, "$1")
+        t = ITALIC_UNDER_RE.replace(t, "$1")
+        t = STRIKE_RE.replace(t, "$1")
+        // Inline code: `code` → code (verbatim, never re-marked-up).
+        return restoreCodeSpans(t, codes) { it }
     }
 
     /** Inline markdown → HTML, escaping non-markdown characters. */
     private fun inlineToHtml(s: String): String {
         // Pull code spans out first so their contents aren't re-escaped/processed.
-        val codePlaceholder = " CODE "
         val codes = mutableListOf<String>()
-        var work = Regex("`([^`]+)`").replace(s) { m ->
-            codes.add(m.groupValues[1])
-            "$codePlaceholder${codes.size - 1}$codePlaceholder"
-        }
-        work = escapeHtml(work)
+        var work = escapeHtml(extractCodeSpans(s, codes))
         // Images: ![alt](url)
         work = Regex("!\\[([^\\]]*)\\]\\(([^)]+)\\)").replace(work) { m ->
             "<img alt=\"${m.groupValues[1]}\" src=\"${m.groupValues[2]}\"/>"
@@ -240,21 +286,25 @@ object MarkdownClipboard {
             "<a href=\"${m.groupValues[2]}\">${m.groupValues[1]}</a>"
         }
         // Bold ***x*** / ___x___
-        work = Regex("\\*\\*\\*(.+?)\\*\\*\\*").replace(work, "<strong><em>$1</em></strong>")
-        work = Regex("___(.+?)___").replace(work, "<strong><em>$1</em></strong>")
+        work = BOLD3_STAR_RE.replace(work, "<strong><em>$1</em></strong>")
+        work = BOLD3_UNDER_RE.replace(work, "<strong><em>$1</em></strong>")
         // Bold **x**
-        work = Regex("\\*\\*(.+?)\\*\\*").replace(work, "<strong>$1</strong>")
-        work = Regex("__(.+?)__").replace(work, "<strong>$1</strong>")
-        // Italic *x* / _x_
-        work = Regex("(?<!\\*)\\*(?!\\*)([^*\\n]+)\\*").replace(work, "<em>$1</em>")
-        work = Regex("(?<!_)_(?!_)([^_\\n]+)_").replace(work, "<em>$1</em>")
+        work = BOLD_STAR_RE.replace(work, "<strong>$1</strong>")
+        work = BOLD_UNDER_RE.replace(work, "<strong>$1</strong>")
+        // Italic *x* / _x_ — same flanking conditions as stripInline, so an
+        // identifier never picks up a spurious <em> that pastes as italics.
+        work = ITALIC_STAR_RE.replace(work, "<em>$1</em>")
+        work = ITALIC_UNDER_RE.replace(work, "<em>$1</em>")
         // Strikethrough ~~x~~
-        work = Regex("~~(.+?)~~").replace(work, "<del>$1</del>")
-        // Restore code spans (and HTML-escape their inside)
-        work = Regex("$codePlaceholder(\\d+)$codePlaceholder").replace(work) { m ->
-            "<code>${escapeHtml(codes[m.groupValues[1].toInt()])}</code>"
-        }
-        return work
+        work = STRIKE_RE.replace(work, "<del>$1</del>")
+        // Restore code spans (and HTML-escape their inside), re-wrapping them in
+        // the `<code>` element — that wrapper IS the code span on this path:
+        // Copy Rich Text exists so the paste target renders the span as code
+        // instead of as loose prose.
+        // [T-f6-rich-text-code-span-wrapper] 把两处代码跨度还原合并进
+        // restoreCodeSpans 时只留下了 escapeHtml，包裹标签被丢掉，行内代码在
+        // HTML 载荷里退化成普通文字（纯文本路径的 `{ it }` 才是正确的）。
+        return restoreCodeSpans(work, codes) { "<code>${escapeHtml(it)}</code>" }
     }
 
     private fun escapeHtml(s: String): String =

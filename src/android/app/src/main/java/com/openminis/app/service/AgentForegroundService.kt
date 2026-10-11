@@ -262,14 +262,35 @@ class AgentForegroundService : Service() {
             // re-routes a stale broadcast to the foreground service).
             val id = intent.getStringExtra(EXTRA_APPROVAL_ID)
             if (id != null) {
-                if (intent.action == ACTION_APPROVE) ApprovalGate.approve(id)
-                else ApprovalGate.deny(id)
+                // [T-approval-pendingintent-identity] 与会话同源校验：extras 里的
+                // sessionId 由 ApprovalNotifier 一并下发，gate 只在归属一致时生效。
+                val sid = intent.getStringExtra(
+                    com.openminis.app.notification.ApprovalNotifier.EXTRA_SESSION_ID,
+                )
+                val tapLanded = if (intent.action == ACTION_APPROVE) {
+                    ApprovalGate.approve(id, sid)
+                } else {
+                    ApprovalGate.deny(id, sid)
+                }
+                // [T-approval-tap-must-land] 清理契约与 ApprovalBroadcastReceiver 同源
+                // （ApprovalNotifier.shouldClearEntryAfterTap）：只有点击**真的落地**、
+                // 或请求已经不在待审批表里（过期通知，按钮唤醒不了任何东西）才清条目。
+                // 这里此前无条件 cancelApproval —— 归属不符/并发里输掉的那一次点击会
+                // 连人带通知一起消失：用户的"同意"被静默丢弃，SecurityGateHolder.waitFor
+                // 一路挂到 90s 超时再把 "User REJECTED" 回给模型。宁可留着按钮重试。
+                val stillPending = ApprovalGate.detailOf(id) != null
+                if (com.openminis.app.notification.ApprovalNotifier
+                        .shouldClearEntryAfterTap(tapLanded, stillPending)
+                ) {
+                    com.openminis.app.notification.ApprovalNotifier.cancelApproval(this, id)
+                } else {
+                    Log.w(
+                        TAG,
+                        "approval tap not applied while id=${id.take(8)}… is still pending " +
+                            "(action=${intent.action}); keeping the notification so the user can retry",
+                    )
+                }
             }
-            // Clear the approval notification on every resolution path that
-            // lands here — the receiver owns its own tap path, but if the
-            // system delivers this intent to onStartCommand we still need
-            // the bar entry gone.
-            if (id != null) com.openminis.app.notification.ApprovalNotifier.cancelApproval(this, id)
             return START_NOT_STICKY
         }
         if (intent?.action == ACTION_STOP) {
@@ -442,6 +463,13 @@ class AgentForegroundService : Service() {
         } catch (_: Throwable) {}
         overlayController = null
         overlayScope.cancel()
+        // [T-b15-island-probe-executor] 单线程执行器的 core 线程不超时退出，而服务
+        // 实例会被反复创建/销毁（SessionActivityTracker 的流结束/absent/clearPresence
+        // 三条路径都 stopService）——不回收就每销毁一个实例残留一条 mi-island-probe
+        // 线程，随进出会话单调累积。两个派发点分别在 onCreate（实例已销毁不会再跑）
+        // 与 applyOverlayState（唯一调用者是上面已取消的 overlayScope 收集器），
+        // onDestroy 之后不会再派发新任务。
+        islandProbeExecutor.shutdownNow()
         super.onDestroy()
         Log.d(TAG, "Service destroyed")
     }

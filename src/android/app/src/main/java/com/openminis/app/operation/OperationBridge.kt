@@ -11,6 +11,11 @@ import com.openminis.app.harness.operation.OperationPhase
 import com.openminis.app.harness.operation.OperationSnapshot
 import com.openminis.app.harness.operation.OperationStatus
 import com.openminis.app.harness.operation.ReplayPolicy
+// [T-b18-op-lookup-session-domain] 转移入口拆到 OperationCoordinatorTransitions（架构门行数帽）。
+import com.openminis.app.harness.operation.providerIntent
+import com.openminis.app.harness.operation.providerSettled
+import com.openminis.app.harness.operation.toolIntent
+import com.openminis.app.harness.operation.toolSettled
 import com.openminis.app.harness.runtime.FileHarnessRuntimePersistence
 import com.openminis.app.harness.session.SessionTreeStore
 import com.openminis.app.data.model.LLMUsage
@@ -98,8 +103,12 @@ object OperationBridge {
         coordinator(context.filesDir).beginRun(sessionId)
     }
 
-    suspend fun providerIntent(context: Context, operationId: String, round: Int) = io {
-        coordinator(context.filesDir).providerIntent(operationId, "round-$round", round, 1, 1)
+    // [T-b18-op-lookup-session-domain] 转移挂点带上 sessionId：协调器据此只读该会话
+    // 自己的台账文件，不再每次都有「扫全目录 + 解码每个会话文件」。
+    suspend fun providerIntent(context: Context, sessionId: String, operationId: String, round: Int) = io {
+        coordinator(context.filesDir).providerIntent(
+            operationId, "round-$round", round, 1, 1, sessionId = sessionId,
+        )
     }
 
     suspend fun providerSettled(context: Context, sessionId: String, operationId: String, usage: LLMUsage?, round: Int) = io {
@@ -119,25 +128,40 @@ object OperationBridge {
                 ),
             )
         }
-        coordinator.providerSettled(operationId, null, entity, round)
+        coordinator.providerSettled(operationId, null, entity, round, sessionId = sessionId)
     }
 
-    suspend fun toolIntent(context: Context, operationId: String, call: ToolCall, replay: ReplayPolicy, round: Int) = io {
+    suspend fun toolIntent(
+        context: Context,
+        sessionId: String,
+        operationId: String,
+        call: ToolCall,
+        replay: ReplayPolicy,
+        round: Int,
+    ) = io {
         coordinator(context.filesDir).toolIntent(
             operationId,
             call,
             json.encodeToString(HarnessMessage.serializer(), call),
             replay,
             round,
+            sessionId = sessionId,
         )
     }
 
-    suspend fun toolSettled(context: Context, operationId: String, result: ToolResult, round: Int, toolName: String) = io {
-        coordinator(context.filesDir).toolSettled(operationId, result, round, toolName)
+    suspend fun toolSettled(
+        context: Context,
+        sessionId: String,
+        operationId: String,
+        result: ToolResult,
+        round: Int,
+        toolName: String,
+    ) = io {
+        coordinator(context.filesDir).toolSettled(operationId, result, round, toolName, sessionId = sessionId)
     }
 
-    suspend fun suspendRun(context: Context, operationId: String, reason: String) = io {
-        coordinator(context.filesDir).suspendOperation(operationId, reason)
+    suspend fun suspendRun(context: Context, sessionId: String, operationId: String, reason: String) = io {
+        coordinator(context.filesDir).suspendOperation(operationId, reason, sessionId = sessionId)
     }
 
     suspend fun finishRun(context: Context, sessionId: String, outcome: String) = io {

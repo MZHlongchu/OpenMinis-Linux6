@@ -46,6 +46,11 @@ internal suspend fun ChatViewModel.truncateBeforeEdit(messageId: String) {
     val remaining = awaitBoundedHistoryRebuild(sid)
     // [T-truncation-digest-clear] 编辑截断同样清 digest 摘录。
     clearHistoryDigestState()
+    // [T-b1-truncate-compact-reconcile] 编辑点落在摘要区间内时，锚行随
+    // deleteMessagesAfter 一起被删，但压缩标记还挂着 → 摘要继续对模型宣称
+    // 已完成那些刚被删掉的轮次。与 deleteFromMessage / 撤回共用同一收尾序列
+    // （rebuild → clearHistoryDigestState → reconcile）。
+    reconcileCompactMarkerAfterTruncation()
     AppLogger.info(
         ChatViewModel.TAG_STREAM,
         "✏️ truncateBeforeEdit cutoffSortOrder=$cutoffSortOrder remaining=${remaining.size}"

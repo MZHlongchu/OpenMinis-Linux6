@@ -9,6 +9,13 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.openminis.app.data.db.CodeIndexDao
 import com.openminis.app.data.db.CodeSymbolEntity
 import com.openminis.app.data.db.CodeEdgeEntity
+// [T-b1-db-gate-off-main] 冷启动完整性闸门的后台预热/消费。
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
 
 @Database(
     entities = [
@@ -23,9 +30,8 @@ import com.openminis.app.data.db.CodeEdgeEntity
         MessageVersionEntity::class,
     ],
     version = 22, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
-    // [T-android-downgrade-compat] Kept ON so MigrationTestHelper and CI can
-    // validate every migration (and its downgrade counterpart) against the
-    // committed schema json. Without it the upgrade/downgrade chain has no
+    // Kept ON so MigrationTestHelper and CI can validate every migration
+    // against the committed schema json. Without it the upgrade chain has no
     // automated check at all and only a real device install can catch a break.
     exportSchema = true,
 )
@@ -39,6 +45,51 @@ abstract class AppDatabase : RoomDatabase() {
     companion object {
         @Volatile
         private var INSTANCE: AppDatabase? = null
+
+        /**
+         * [T-b1-db-gate-off-main] 冷启动完整性闸门的后台预热句柄。
+         *
+         * `DatabaseHealthCheck.ensureHealthyOrQuarantined` 会跑一次
+         * `PRAGMA quick_check` —— 遍历整库 b-tree 的冷页读，耗时随库体积线性
+         * 增长。它原先在 [getInstance] 里同步执行，而 [getInstance] 是
+         * `Application.onCreate` 主线程调用的，于是整段扫描都计在首帧之前。
+         *
+         * 现在 `MinisApp` 在 onCreate 早期用 [warmStartupGate] 把闸门丢到
+         * `Dispatchers.IO`，与其余启动初始化并行；[getInstance] 只消费这个
+         * 结果。闸门仍然严格早于 Room 建库（`build()` 之前），进程内只跑一次，
+         * 失败语义（QuarantineFailed → 抛异常）与顺序都不变。
+         */
+        @Volatile
+        private var startupGate: Deferred<DatabaseHealthCheck.Outcome>? = null
+
+        /**
+         * 把完整性闸门提前调度到 [scope] 上（幂等，进程级一次）。预热未完成时
+         * [getInstance] 等的是同一个 job，不会重复扫描。
+         */
+        fun warmStartupGate(context: Context, scope: CoroutineScope) {
+            if (startupGate != null) return
+            synchronized(this) {
+                if (startupGate != null) return
+                val app = context.applicationContext
+                startupGate = scope.async(Dispatchers.IO) {
+                    DatabaseHealthCheck.ensureHealthyOrQuarantined(app, "minis.db")
+                }
+            }
+        }
+
+        /**
+         * 闸门结论：消费 [warmStartupGate] 的结果（正常路径下它早已跑完，等待为
+         * 零）。没有预热过（非 MinisApp 入口 / 测试）时在这里补建同一个 job ——
+         * 监视器保证只建一次，并发调用不会重复扫描，闸门也始终不跑在调用线程上。
+         */
+        private fun consumeStartupGate(context: Context): DatabaseHealthCheck.Outcome {
+            val warmed = startupGate ?: synchronized(this) {
+                startupGate ?: CoroutineScope(SupervisorJob() + Dispatchers.IO).async {
+                    DatabaseHealthCheck.ensureHealthyOrQuarantined(context.applicationContext, "minis.db")
+                }.also { startupGate = it }
+            }
+            return runBlocking { warmed.await() }
+        }
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -263,53 +314,32 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
-         * [T-android-downgrade-compat] Downgrade 12 → 11. Deliberately a NO-OP.
+         * [T-b11-no-downgrade-migrations] 降级不受支持——本文件**不要**再声明
+         * `Migration(N+1, N)` 这类降级迁移。这是 schema 变更清单里的一条硬规则。
          *
-         * ## Why this exists
+         * ## 为什么注册降级迁移是无效代码
          *
-         * Room resolves a downgrade by calling `onUpgrade(from, to)` and
-         * looking for a migration path; when none exists it consults
-         * `isMigrationRequired`, which either throws or — with a destructive
-         * fallback enabled — calls `dropAllTables`. We enable no fallback, so
-         * before this migration existed, installing an older build on top of a
-         * newer database threw `IllegalStateException` at first DB access and
-         * the app could not start at all. Data survived on disk, but the user
-         * experience was "the app is broken".
+         * Room 解析降级用的是**正在运行的那个更旧 APK** 里注册的迁移表：更旧的构建
+         * 打开本构建的库时，需要的是它自己那份注册表里的 N+1 → N，而它早已发布，
+         * 不可能包含本构建此刻新增的迁移。本构建里注册的降级迁移只有「更旧的构建」
+         * 用得上——那些构建不存在。再加上 [com.openminis.app.data.db.DatabaseVersionGuard]
+         * 对 onDisk > CODE_DB_VERSION 一律走 guidance 屏（默认拒绝，不碰文件），
+         * 所以 12→11 … 22→21 这批降级迁移从诞生起就不可达。其中 22→21 更糟：
+         * 它会 `DROP TABLE message_versions`，是唯一会删用户数据的降级迁移——一旦
+         * 版本探针打不开库（`readOnDiskVersion` 返回 null 就 PROCEED）而 Room 能打开，
+         * 它就会静默删掉整个消息归档。
          *
-         * Registering any 12 → 11 path is enough for Room to proceed; it does
-         * not inspect what the migration does. So the cheapest correct answer
-         * is to do nothing and let the four extra columns stay.
+         * ## 现在的降级语义
          *
-         * ## Why NOT `DROP COLUMN`
+         * 降级 = 只显示 guidance 屏：数据一个字节都不动，装回新版本即恢复。这比
+         * 「注册一条自以为安全的迁移」更诚实，也是守卫默认拒绝的方向（代价是要用户
+         * 升回去，而不是静默损坏或丢数据）。
          *
-         * Dropping would genuinely delete the attribution captured by the
-         * newer build, so a user who downgrades to look at something and then
-         * upgrades back would silently lose it — violating the "no data loss"
-         * constraint this whole mechanism exists to uphold. Keeping the
-         * columns costs a few dozen bytes per row and makes the round trip
-         * lossless. (`ALTER TABLE ... DROP COLUMN` also needs SQLite 3.35+ /
-         * API 34+, and a full table rebuild below that.)
+         * ## 加列 / 加表 / 加索引仍然保持向后可忽略形态
          *
-         * ## Why leaving the columns is safe for the older build
-         *
-         * - Room's generated DAOs bind by column NAME, never by position.
-         * - Room's schema validation checks that every column the entity
-         *   REQUIRES exists; extra columns in the table are ignored.
-         * - `SELECT *` is likewise resolved by name.
-         * - The one place this codebase reads a cursor positionally
-         *   (`VoiceCorrectionDb`, `ConfigAuditLog`) uses explicit column lists
-         *   in separate databases, so the projection is fixed regardless.
-         * - Old `INSERT` statements omit the new columns, which is fine
-         *   precisely because they are nullable with no DEFAULT.
-         *
-         * ## Scope
-         *
-         * This pattern generalises to ADD COLUMN / ADD TABLE / ADD INDEX. It
-         * does NOT cover renames, drops, type changes, or changes to the
-         * MEANING of existing data (Room cannot detect the last one at all).
-         * Those need a real reverse migration — or the version pre-check in
-         * [com.openminis.app.data.db.DatabaseVersionGuard], which is the
-         * backstop for exactly this case.
+         * Room 的 DAO 按列名绑定、schema 校验只要求实体用到的列存在，多余的列与表
+         * 会被旧构建忽略——前提是新列 **nullable 且无 DEFAULT**（旧 INSERT 不带它）。
+         * 重命名 / 删除 / 改类型 / 改语义没有安全降级，只能靠上面的守卫拦下来。
          */
         /**
          * [T-code-graph] Adds the code_symbols and code_edges tables for the
@@ -357,17 +387,6 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
-         * Downgrade 13 → 12. Intentionally a no-op: the two code index tables
-         * remain on disk so the index survives a version round-trip and the
-         * next 1.31+ upgrade doesn't need to rebuild from scratch.
-         */
-        val MIGRATION_13_12 = object : Migration(13, 12) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                // No-op. See T-code-graph downgrade policy.
-            }
-        }
-
-        /**
          * [T-kanban] Adds the kanban_tasks table for the task board.
          * Pure additive — no existing entity is modified and no data is rewritten.
          */
@@ -389,17 +408,6 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
-         * Downgrade 14 → 13. Intentionally a no-op: the kanban_tasks table
-         * remains on disk so tasks survive a version round-trip. The older
-         * build simply won't see the column, which is the safe fallback.
-         */
-        val MIGRATION_14_13 = object : Migration(14, 13) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                // No-op.
-            }
-        }
-
-        /**
          * [T-kanban-removal] Drops the kanban_tasks table (feature removed:
          * no entry point, no readers). Pure destructive on a table nothing
          * references anymore; chat/code-index data is untouched.
@@ -407,16 +415,6 @@ abstract class AppDatabase : RoomDatabase() {
         val MIGRATION_14_15 = object : Migration(14, 15) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("DROP TABLE IF EXISTS kanban_tasks")
-            }
-        }
-
-        /**
-         * Downgrade 15 -> 14. No-op: the table is already gone and the older
-         * build only touched it from the removed Kanban screen.
-         */
-        val MIGRATION_15_14 = object : Migration(15, 14) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                // No-op.
             }
         }
 
@@ -433,25 +431,12 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        /** Downgrade 16 -> 15: drop the index; the old schema has no column constraints. */
-        val MIGRATION_16_15 = object : Migration(16, 15) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("DROP INDEX IF EXISTS `index_sessions_updated_at`")
-            }
-        }
-
         val MIGRATION_17_18 = object : Migration(17, 18) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // [T-compact-chunk-pool] Additive only: per-compaction summary
                 // chunks for retrieval. Legacy rows stay NULL and keep
                 // reading through `summary`.
                 db.addColumnIfMissing("compact_markers", "summary_chunks", "TEXT")
-            }
-        }
-
-        val MIGRATION_18_17 = object : Migration(18, 17) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                // Keep the column. Older builds ignore extra fields.
             }
         }
 
@@ -478,12 +463,6 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        val MIGRATION_19_18 = object : Migration(19, 18) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                // Keep the columns. Older builds ignore extra fields.
-            }
-        }
-
         val MIGRATION_19_20 = object : Migration(19, 20) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("""
@@ -501,12 +480,6 @@ abstract class AppDatabase : RoomDatabase() {
                         updated_at INTEGER NOT NULL
                     )
                 """.trimIndent())
-            }
-        }
-
-        val MIGRATION_20_19 = object : Migration(20, 19) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                // Keep session_goals so a downgrade does not discard a user's goal.
             }
         }
 
@@ -534,16 +507,6 @@ abstract class AppDatabase : RoomDatabase() {
                 } finally {
                     db.endTransaction()
                 }
-            }
-        }
-
-        val MIGRATION_21_20 = object : Migration(21, 20) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("DROP INDEX IF EXISTS `index_messages_session_id_sort_order`")
-                db.execSQL(
-                    "CREATE INDEX IF NOT EXISTS `index_messages_session_id_sort_order` " +
-                        "ON `messages` (`session_id`, `sort_order`)"
-                )
             }
         }
 
@@ -583,12 +546,6 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        val MIGRATION_22_21 = object : Migration(22, 21) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("DROP TABLE IF EXISTS `message_versions`")
-            }
-        }
-
         val MIGRATION_16_17 = object : Migration(16, 17) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.addColumnIfMissing("sessions", "permission_mode", "TEXT")
@@ -598,35 +555,27 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        val MIGRATION_17_16 = object : Migration(17, 16) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                // Keep the column. Older builds ignore extra fields.
-            }
-        }
-
-        val MIGRATION_12_11 = object : Migration(12, 11) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                // Intentionally empty. See the doc comment above — the four
-                // columns added by MIGRATION_11_12 are left in place.
-            }
-        }
-
         fun getInstance(context: Context): AppDatabase {
-            return INSTANCE ?: synchronized(this) {
+            INSTANCE?.let { return it }
+            // [T-b1-db-gate-off-main] 闸门等待放在监视器之外：预热 job 只碰文件
+            // 与日志，等待期间不持有本对象的锁，避免与 IO 线程形成锁环。
+            val gate = consumeStartupGate(context)
+            return synchronized(this) {
                 INSTANCE ?: run {
                 // [T-db-startup-integrity-gate] quick_check BEFORE Room opens
                 // the file. A corrupt database is quarantined (renamed aside,
                 // never opened, never silently erased) and the app starts on
                 // a fresh empty database; MainActivity surfaces the pending
                 // failure report so the user learns where their data copy is.
-                when (val gate = DatabaseHealthCheck.ensureHealthyOrQuarantined(
-                    context.applicationContext, "minis.db"
-                )) {
+                when (gate) {
                     is DatabaseHealthCheck.Outcome.QuarantineFailed ->
                         throw IllegalStateException(
                             "minis.db failed integrity check and could not be " +
                                 "quarantined: ${gate.reason}"
                         )
+                    // [T-db-gate-probe-unavailable] 探针没判出结论（打不开≠损坏）：
+                    // 文件原封不动，按常规路径交给 Room——隔离健康库才是要避免的。
+                    is DatabaseHealthCheck.Outcome.Unavailable -> Unit
                     else -> Unit
                 }
                 Room.databaseBuilder(
@@ -634,21 +583,22 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "minis.db"
                 )
-                    // MIGRATION_12_11 is the downgrade counterpart of
-                    // MIGRATION_11_12 — registering it is what lets an older
-                    // build open a newer database instead of failing to start.
+                    // 只注册升级迁移（N-1 → N）。降级迁移在这里注册也永远不会被
+                    // 执行，见 [T-b11-no-downgrade-migrations]：解析降级的是运行中
+                    // 的那个更旧 APK，它不可能含有本构建新增的迁移。
                     .addMigrations(
                         MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
                         MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
-                        MIGRATION_11_12, MIGRATION_12_11, MIGRATION_12_13, MIGRATION_13_12,
-                        MIGRATION_13_14, MIGRATION_14_13, MIGRATION_14_15, MIGRATION_15_14,
-                        MIGRATION_15_16, MIGRATION_16_15,
-                        MIGRATION_16_17, MIGRATION_17_16,
-                        MIGRATION_17_18, MIGRATION_18_17,
-                        MIGRATION_18_19, MIGRATION_19_18,
-                        MIGRATION_19_20, MIGRATION_20_19,
-                        MIGRATION_20_21, MIGRATION_21_20,
-                        MIGRATION_21_22, MIGRATION_22_21,
+                        MIGRATION_11_12, MIGRATION_12_13,
+                        MIGRATION_13_14,
+                        MIGRATION_14_15,
+                        MIGRATION_15_16,
+                        MIGRATION_16_17,
+                        MIGRATION_17_18,
+                        MIGRATION_18_19,
+                        MIGRATION_19_20,
+                        MIGRATION_20_21,
+                        MIGRATION_21_22,
                     )
                     .build()
                     .also { INSTANCE = it }

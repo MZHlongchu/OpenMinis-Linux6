@@ -46,10 +46,15 @@ interface A11yActor {
  *   node actions via [com.openminis.app.accessibility.AccessibilityQueryGuard]
  * - tap/swipe → [MinisAccessibilityService.dispatchSimpleGesture]
  * - back → [AccessibilityService.performGlobalAction(GLOBAL_ACTION_BACK)]
- * - openApp → `android-shizuku-cli launch <pkg>` via the app process shell
- *   (same route UiActionTool.open_app takes).
+ * - openApp → [com.openminis.app.sandbox.offload.OffloadCliSyntax.launchPackage]
+ *   **in the guest** (see [openApp]): the CLI exists only in the PRoot rootfs,
+ *   so [guestSessionId] must be bound; without it the action fails explicitly
+ *   instead of pretending to have run.
  */
-class ServiceA11yActor(private val svc: MinisAccessibilityService) : A11yActor {
+class ServiceA11yActor(
+    private val svc: MinisAccessibilityService,
+    private val guestSessionId: String? = null,
+) : A11yActor {
 
     override fun dumpScreen(): String = AccessibilityQueryGuard.query("") {
         buildString {
@@ -117,14 +122,34 @@ class ServiceA11yActor(private val svc: MinisAccessibilityService) : A11yActor {
     override fun back(): Boolean =
         svc.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
 
-    override fun openApp(packageName: String): Boolean = runCatching {
-        val cmd = "android-shizuku-cli launch '" + packageName.replace("'", "'\\''") + "'"
-        val p = ProcessBuilder("/bin/bash", "-c", cmd).redirectErrorStream(true).start()
-        val out = p.inputStream.bufferedReader().readText()
-        p.waitFor()
-        AppLogger.info(TAG, "openApp $packageName → exit=${p.exitValue()} ${out.take(120)}")
-        p.exitValue() == 0
-    }.getOrDefault(false)
+    /**
+     * [T-a11y-cli-guest] `android-shizuku-cli` 只存在于 guest rootfs
+     * (`/usr/local/bin` 的 offload shim)，宿主 App 进程连 `/bin/bash` 都没有，
+     * 所以这里必须走 guest 持久 shell。没有绑定 session 时**显式失败**（返回
+     * false + 一条 warning），不再回退到宿主 bash —— 那条路在真机上永远不成立，
+     * 只会把"没执行"伪装成一次无声的尝试。
+     *
+     * [T-d11-a11y-cli-syntax] 命令串由 [OffloadCliSyntax.launchPackage] 生成：旧写法
+     * 用了一个并不存在的 `launch <pkg>` 组（真机上退 2 unknown subcommand），现在走
+     * `exec` + monkey 的标准启动式，与 `ui_action open_app` 共用同一个 builder。
+     */
+    override fun openApp(packageName: String): Boolean {
+        val sessionId = guestSessionId?.takeIf { it.isNotBlank() }
+        if (sessionId == null) {
+            AppLogger.warning(
+                TAG,
+                "openApp($packageName) refused: no guest session bound — android-shizuku-cli " +
+                    "lives in the guest rootfs and the host process has no /bin/bash",
+            )
+            return false
+        }
+        return runCatching {
+            val cmd = com.openminis.app.sandbox.offload.OffloadCliSyntax.launchPackage(packageName)
+            val r = com.openminis.app.sandbox.GuestScriptRunner.runSync(sessionId, cmd)
+            AppLogger.info(TAG, "openApp $packageName → exit=${r.exitCode} ${r.output.trim().take(120)}")
+            r.exitCode == 0
+        }.getOrDefault(false)
+    }
 
     override fun sleep(ms: Long) {
         try { Thread.sleep(ms) } catch (_: InterruptedException) {}

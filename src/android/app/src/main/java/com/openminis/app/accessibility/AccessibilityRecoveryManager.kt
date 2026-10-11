@@ -4,14 +4,12 @@ import android.content.Context
 import android.provider.Settings
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.offload.ShizukuManager
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.coroutines.Continuation
-import kotlin.coroutines.resume
 
 /**
  * [T-android-a11y-force-stop-recovery] Detects a revoked accessibility grant
@@ -103,7 +101,21 @@ object AccessibilityRecoveryManager {
     private val _pendingPrompt = MutableStateFlow<RepairPrompt?>(null)
     val pendingPrompt: StateFlow<RepairPrompt?> = _pendingPrompt.asStateFlow()
 
-    private var continuation: Continuation<Decision>? = null
+    /**
+     * 在飞询问的决定槽（single-flight）。
+     *
+     * [T-a11y-prompt-single-flight] 旧实现是"单槽 Continuation"：后到者直接覆盖
+     * 前者的槽，而 `invokeOnCancellation` 又**无条件**清空 `_pendingPrompt` /
+     * `continuation`。于是先到者超时会把后到者的注册一起抹掉——对话框消失、用户
+     * 的点击落在 null 上、后到者再等满 60s 拿 CANCEL。丢掉的正是"用户点了修复"
+     * 这个决定。并发来源真实存在：MCP 服务端 4 线程池并发处理
+     * shell_exec/ui_action、并行子代理各跑一条 a11y 命令。
+     *
+     * 现在只有一个 [CompletableDeferred]：已有询问在飞时复用同一个并 await
+     * （不再弹第二个对话框），清理只在槽仍属于自己时执行。
+     */
+    private val decisionStateLock = Any()
+    private var pendingDecisionDeferred: CompletableDeferred<Decision>? = null
 
     /**
      * Observable "the grant is currently missing" flag for Settings UI, so the
@@ -300,34 +312,67 @@ object AccessibilityRecoveryManager {
      * away, or the dialog dismissed by something else) degrades to the normal
      * "service not running" error instead of hanging the agent loop. The
      * pending prompt is always cleared, including on coroutine cancellation,
-     * so a stale dialog can never outlive its caller.
+     * so a stale dialog can never outlive its owner (see
+     * [T-a11y-prompt-single-flight]: a joiner no longer clears the slot it did
+     * not create).
+     *
+     * `internal` (not private) so the single-flight contract can be exercised
+     * on the JVM without a Context — same rationale as [isRevokedIn].
      */
-    private suspend fun awaitDecision(prompt: RepairPrompt): Decision {
-        val decision = withTimeoutOrNull(PROMPT_TIMEOUT_MS) {
-            suspendCancellableCoroutine<Decision> { cont ->
-                continuation = cont
+    internal suspend fun awaitDecision(prompt: RepairPrompt): Decision {
+        // [T-a11y-prompt-single-flight] 抢槽：抢到的人负责弹窗 + 超时，没抢到的人
+        // 复用同一个 deferred 等同一个用户决定（也不会因为自己这条协程被取消而把
+        // 别人的对话框抹掉）。
+        val mine = CompletableDeferred<Decision>()
+        val shared = synchronized(decisionStateLock) {
+            val existing = pendingDecisionDeferred
+            if (existing != null) {
+                existing
+            } else {
+                pendingDecisionDeferred = mine
                 _pendingPrompt.value = prompt
-                cont.invokeOnCancellation {
+                mine
+            }
+        }
+        if (shared !== mine) {
+            AppLogger.info(TAG, "repair prompt already pending — joining the in-flight decision")
+            // owner 的超时会把 CANCEL 写进同一个 deferred，所以这里不会无限期挂起。
+            return shared.await()
+        }
+        return try {
+            val decision = withTimeoutOrNull(PROMPT_TIMEOUT_MS) { shared.await() }
+            if (decision == null) {
+                AppLogger.info(TAG, "repair prompt timed out after ${PROMPT_TIMEOUT_MS}ms — treating as cancel")
+                Decision.CANCEL
+            } else {
+                decision
+            }
+        } finally {
+            // 先投递决定再拆槽：这个窗口里赶到的调用者复用到的是一秒钟前的真实
+            // 用户决定，而不是又弹一次窗。complete 幂等（respond 已投递则空操作）。
+            shared.complete(Decision.CANCEL)
+            synchronized(decisionStateLock) {
+                // 只有槽仍属于自己时才清：否则会把后来者的询问一起抹掉（旧 bug）。
+                if (pendingDecisionDeferred === shared) {
+                    pendingDecisionDeferred = null
                     _pendingPrompt.value = null
-                    continuation = null
                 }
             }
         }
-        if (decision == null) {
-            // Timed out: tear the dialog down so it doesn't linger on screen.
-            _pendingPrompt.value = null
-            continuation = null
-            AppLogger.info(TAG, "repair prompt timed out after ${PROMPT_TIMEOUT_MS}ms — treating as cancel")
-        }
-        return decision ?: Decision.CANCEL
     }
 
     /** Called by the UI once the dialog closes. Safe to call spuriously. */
     fun respond(decision: Decision) {
-        _pendingPrompt.value = null
-        val c = continuation
-        continuation = null
-        c?.resume(decision)
+        // [T-a11y-prompt-single-flight] 取出后置空的原子写法：与 awaitDecision 的
+        // 清理共用同一把锁，保证决定只投递给当时在槽的那次询问；超时之后到达的
+        // 迟到点击是空操作，不会误唤醒别的调用者。
+        val c = synchronized(decisionStateLock) {
+            val current = pendingDecisionDeferred
+            pendingDecisionDeferred = null
+            _pendingPrompt.value = null
+            current
+        }
+        c?.complete(decision)
     }
 
     /**

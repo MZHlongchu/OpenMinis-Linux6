@@ -26,7 +26,9 @@ import java.util.concurrent.ConcurrentHashMap
  * Concurrency guarantees:
  * - Same session: commands are serialized by the per-session Mutex
  * - Different sessions: run concurrently (each has its own Mutex)
- * - Shell creation: protected by globalLock to prevent duplicate shells
+ * - Shell registration: globalLock guards the shells[] decision/write only —
+ *   the tree kill and the spawn run outside it, and a registered-but-spawning
+ *   shell is reused, so no duplicate shells [T-b10-shell-create-off-lock]
  * - Shell death: detected on next command, shell is recreated with same bind mounts
  */
 object ExecutionCoordinator {
@@ -64,8 +66,11 @@ object ExecutionCoordinator {
     private val lastInjectedKeys = ConcurrentHashMap<String, Set<String>>()
 
     /**
-     * Global lock used only for shell creation to prevent duplicate shells
-     * when the same session's first command arrives concurrently.
+     * Global lock used only for the shells[] decision when a session's shell
+     * must be created or recreated, preventing duplicate shells when the same
+     * session's first command arrives concurrently. The blocking parts of that
+     * path (killing the stale shell, spawning the new one) deliberately run
+     * outside it. [T-b10-shell-create-off-lock]
      */
     private val globalLock = Mutex()
     private val lastIdle = ConcurrentHashMap<String, Long>()
@@ -135,8 +140,12 @@ object ExecutionCoordinator {
         }
         SandboxJobKeepAlive.onStart(appContext, sessionId, command)
         try {
-        // ConcurrentHashMap.getOrPut is not atomic, use putIfAbsent pattern
-        val mutex = mutexes.getOrPut(sessionId) { Mutex() }
+        // [T-e4-mutex-atomic] 同会话的第一条并发命令必须拿到**同一把** Mutex，否则类头
+        // 承诺的"同会话命令串行"不成立（takeover/superseded 窗口也只有这一个入口）。
+        // computeIfAbsent 在 ConcurrentHashMap 内原子地完成"取值或发布"，两个调用者拿到
+        // 的是同一个实例；旧写法 `getOrPut { Mutex() }` 是靠 stdlib 的 ConcurrentMap 重载
+        // 才返回 putIfAbsent 的赢家，读代码看不出这一点，且与它上面的注释互相矛盾。
+        val mutex = mutexes.computeIfAbsent(sessionId) { Mutex() }
 
         return mutex.withLock {
         lastIdle.remove(sessionId)
@@ -256,7 +265,14 @@ object ExecutionCoordinator {
     private fun recordLastCommand(sessionId: String, command: String) {
         if (sessionId.startsWith("__") || sessionId == "self-build") return
         if (!SandboxNotifyActions.shouldRecordLastCommand(command)) return
-        val host = PRootKernel.resolveHostPath(SandboxNotifyActions.LAST_CMD_GUEST_PATH) ?: return
+        // [T-mcp-session-bind] LAST_CMD_GUEST_PATH 在 /var/minis/workspace 下，是每会话
+        // 路径：走全局 resolveHostPath 会把它写进"最近建壳的那个会话"的 workspace，
+        // 于是上一轮命令提示出现在别的聊天里。按本会话解析。
+        val host = PRootKernel.resolveSessionHostPath(
+            sessionId,
+            SandboxNotifyActions.LAST_CMD_GUEST_PATH,
+            appContext,
+        ) ?: return
         // [T-shell-perf] 每条命令的宿主文件写（mkdirs + writeText + setExecutable）
         // 原本同步跑在会话互斥锁内——移到后台 scope，命令延迟不再包含这次 IO。
         recordScope.launch {
@@ -272,10 +288,45 @@ object ExecutionCoordinator {
 
     /**
      * Get the existing shell for this session, or create a new one.
-     * Uses globalLock to prevent two coroutines from simultaneously creating
-     * a shell for the same session (e.g. if the old shell just died).
+     *
+     * [T-b10-superseded-null] [startOrReuseShell] 的单次尝试可能在锁外窗口里被摘掉
+     * （`stopCurrentCommand` / `sessionDidTerminate` 都不持 globalLock），此时它返回
+     * null：那次 spawn 出来的实例已被 `stop()`，**绝不能**交回调用方 ——
+     * `PersistentShell.executeCommand` 会先 `ensureStarted()`，把这个已停的壳重新
+     * spawn 成一个不在 `shells[]` 里的 proot（孤儿进程：没人能停它，也没人会复用它），
+     * 而同一会话的下一条命令又会建第二个壳，两个壳各有独立的 cd/env/后台作业。
+     * 所以这里重试整条路径，连续 [ShellSupersedePolicy.MAX_START_ATTEMPTS] 次都被
+     * 摘掉才判失败（fail-closed，调用方拿到明确错误而不是一个没人管的壳）。
      */
     private suspend fun getOrCreateShell(sessionId: String): PersistentShell {
+        var attempt = 0
+        while (true) {
+            attempt++
+            val shell = startOrReuseShell(sessionId)
+            if (shell != null) return shell
+            if (attempt >= ShellSupersedePolicy.MAX_START_ATTEMPTS) {
+                throw ShellSupersedePolicy.exhausted(sessionId, attempt)
+            }
+            Log.w(TAG, "[$sessionId] shell registry emptied while starting; retrying (attempt $attempt)")
+        }
+    }
+
+    /**
+     * 单次尝试：复用注册表里的活壳，或注册并 spawn 一个新实例。
+     * Uses globalLock to prevent two coroutines from simultaneously creating
+     * a shell for the same session (e.g. if the old shell just died).
+     *
+     * [T-b10-shell-create-off-lock] The lock now covers only the registry
+     * decision + the registration of the new instance; killing the stale shell
+     * and spawning the new one happen outside it, because that work is
+     * blocking and used to serialize every session that needed a (re)build —
+     * see the slow path.
+     *
+     * 返回 null = 这一次拿到手的实例在锁外窗口里被摘掉（注册表已空，或接管者自己也
+     * 被摘走，见 [T-d10-takeover-recheck]），调用方 [getOrCreateShell] 负责重试；
+     * null 不代表"可以继续用这个壳"。
+     */
+    private suspend fun startOrReuseShell(sessionId: String): PersistentShell? {
         // Fast path: existing alive shell
         val existing = shells[sessionId]
         if (existing != null && existing.isAlive && !shellMountsStale(existing, sessionId)) {
@@ -283,32 +334,113 @@ object ExecutionCoordinator {
             return existing
         }
 
-        // Slow path: need to create (or recreate after crash)
-        return globalLock.withLock {
+        // Slow path: need to create (or recreate after crash).
+        //
+        // [T-b10-shell-create-off-lock] This block used to also keep
+        // recheck.stop() (SandboxWorkload.release → killOwned's three full
+        // /proc sweeps → destroyForcibly → waitFor(500ms)) and
+        // shell.ensureStarted() (startProcess sleeps 200ms, +200ms again on the
+        // seccomp self-heal) behind globalLock. Any session that needed a
+        // (re)build therefore queued behind another session's tree kill or
+        // spawn, which is exactly the delay a user feels on the first command
+        // after switching session or editing mounts. The fast path never took
+        // the lock, so only those rebuilds were affected.
+        //
+        // Mutual exclusion is preserved without holding the lock across the
+        // blocking work: the instance is registered while the lock is held, and
+        // a caller that finds a registered-but-still-spawning instance reuses
+        // it (ensureStarted is idempotent) instead of building a second shell.
+        val plan = globalLock.withLock {
             // Double-check after acquiring lock
             val recheck = shells[sessionId]
             if (recheck != null && recheck.isAlive && !shellMountsStale(recheck, sessionId)) {
                 Log.w(TAG, "[diag] reuse existing shell (post-lock) for sessionId=$sessionId attachmentsMount=${recheck.debugBindMount("/var/minis/attachments")}")
-                return@withLock recheck
+                return@withLock recheck to null
+            }
+            if (recheck != null && recheck.isStartingUp && !shellMountsStale(recheck, sessionId)) {
+                Log.w(TAG, "[diag] reuse spawning shell for sessionId=$sessionId")
+                return@withLock recheck to null
             }
 
-            // Shell is dead or missing — clean up and create fresh
-            if (recheck != null) {
-                Log.w(TAG, "[$sessionId] Shell ${if (recheck.isAlive) "mounts stale" else "died"}, recreating")
-                recheck.stop()
-            }
-
+            // Shell is dead or missing — register a fresh instance now; the old
+            // one is killed outside the lock (stop() is idempotent).
+            // buildSessionBindMounts publishes into PRootKernel.bindMounts, so
+            // it stays inside the lock; constructing the shell is bookkeeping.
             val bindMounts = buildSessionBindMounts(sessionId)
-            val shell = PersistentShell(appContext, sessionId, bindMounts)
-            shells[sessionId] = shell
-            shell.ensureStarted()
+            val fresh = PersistentShell(appContext, sessionId, bindMounts)
+            shells[sessionId] = fresh
             Log.i(TAG, "[$sessionId] Shell created with ${bindMounts.size} bind mounts")
             Log.w(TAG, "[diag] new shell created sessionId=$sessionId attachmentsMount=${bindMounts["/var/minis/attachments"]}")
-            shell
+            fresh to recheck
+        }
+        val (shell, stale) = plan
+        if (stale != null) {
+            Log.w(TAG, "[$sessionId] Shell ${if (stale.isAlive) "mounts stale" else "died"}, recreating")
+            // 先杀旧壳再启动新壳：release(kill=true) 的扫描若在新 shell 起来之后跑，
+            // 可能把刚 spawn 的进程按旧归属杀掉。
+            stale.stop()
+        }
+        shell.ensureStarted()
+        // [T-b10-shell-create-off-lock] 这段锁外窗口里，stopCurrentCommand（它不看
+        // globalLock）或一次挂载变更可能已经让另一个实例接管 registry：收掉刚起来的
+        // 进程，别留下没人引用的 proot；有接管者就交给它（ensureStarted 幂等）。
+        val current = shells[sessionId]
+        when (ShellSupersedePolicy.verdict(current, shell)) {
+            ShellSupersedePolicy.Verdict.REGISTERED -> return shell
+            ShellSupersedePolicy.Verdict.SUPERSEDED -> {
+                Log.w(TAG, "[$sessionId] shell superseded while starting; discarding the new instance")
+                shell.stop()
+                // verdict 已判定 current 非空；这里再读一次，防止判定与使用之间被摘掉。
+                val takeover = current ?: return null
+                takeover.ensureStarted()
+                // [T-d10-takeover-recheck] 复核：takeover 是锁外窗口里的接管者，它自己也会被
+                // stopCurrentCommand / sessionDidTerminate（都不持 globalLock）摘走并 stop()。
+                // 那个窗口就在上面这一句 ensureStarted() 前后：若 takeover 已被摘走，这次
+                // ensureStarted() 会把它重新 spawn 成一个**不在 shells[] 里的 proot**，交回
+                // 调用方后 PersistentShell.executeCommand 还会再 ensureStarted 一次，而注册表
+                // 里没有它 —— 与原回归同型（孤儿 proot + 同会话双壳）。所以返回前再读一次注册表：
+                // 不是 takeover 就收掉它并返回 null，交给 [getOrCreateShell] 重试整条路径。
+                val latest = shells[sessionId]
+                if (ShellSupersedePolicy.verdict(latest, takeover) != ShellSupersedePolicy.Verdict.REGISTERED) {
+                    Log.w(TAG, "[$sessionId] takeover instance left the registry while starting; discarding it")
+                    takeover.stop()
+                    return null
+                }
+                return takeover
+            }
+            // [T-b10-superseded-null] 注册表空了（条目在锁外被摘走）：刚起来的实例
+            // 已经 stop()，交回调用方就等于把一个"已停的壳"重新 spawn 成孤儿 proot。
+            // 返回 null 让 [getOrCreateShell] 重试整条路径。
+            ShellSupersedePolicy.Verdict.REGISTRY_EMPTY -> {
+                Log.w(TAG, "[$sessionId] shell registry emptied while starting; discarding the new instance")
+                shell.stop()
+                return null
+            }
         }
     }
 
-    fun sessionBindMounts(sessionId: String): Map<String, String> = buildSessionBindMounts(sessionId)
+    /**
+     * The bind set (`linuxPath -> hostPath`) this session's shell would use:
+     * per-session subdirs, the global dirs, external mounts and shared storage.
+     *
+     * [T-mcp-session-bind] `publish = false` returns exactly the same map but does
+     * NOT write the per-session subdirs into the process-wide
+     * [PRootKernel.bindMounts] table. That table is last-writer-wins, so a reader
+     * gets whichever session built a shell last; any caller that spawns its own
+     * guest process *for a known session* — the MCP stdio bridge — must take its
+     * `-b` argv from here instead, or its `/var/minis/{workspace,attachments,
+     * offloads,browser,memory}` point at another chat. Host dirs are still created
+     * either way: proot needs both sides of `-b host:linux` to exist.
+     *
+     * The per-session subdirs keep being published (publish = true) for the readers
+     * that still resolve through the shared table and have no session at hand:
+     * `TerminalSession.buildTermuxArgs`, `ShellExecutor`'s one-shot proot and
+     * `WebAppPathResolver.inferScope`. Session-scoped callers must NOT consume it —
+     * MCP spawn uses this accessor with `publish = false`, file tools use
+     * [PRootKernel.resolveSessionHostPath].
+     */
+    fun sessionBindMounts(sessionId: String, publish: Boolean = true): Map<String, String> =
+        buildSessionBindMounts(sessionId, publish = publish, mkdirs = true)
 
     internal fun hasLiveShell(sessionId: String): Boolean = shells[sessionId]?.isAlive == true
 
@@ -323,8 +455,17 @@ object ExecutionCoordinator {
      * Build bind mounts for a session:
      * - Session-level: workspace, attachments, offloads, browser → per-session dirs
      * - Global: memory, skills, shared → shared dirs across all sessions
+     *
+     * [T-mcp-session-bind] `publish` writes the session subdirs into the shared
+     * [PRootKernel.bindMounts] table AND creates the host dirs; `mkdirs = false`
+     * (used by the mount-staleness check, which runs on every command) keeps the
+     * map computation free of IO.
      */
-    private fun buildSessionBindMounts(sessionId: String, publish: Boolean = true): Map<String, String> {
+    private fun buildSessionBindMounts(
+        sessionId: String,
+        publish: Boolean = true,
+        mkdirs: Boolean = publish,
+    ): Map<String, String> {
         val filesDir = appContext.filesDir
         val mounts = linkedMapOf<String, String>()
 
@@ -340,7 +481,7 @@ object ExecutionCoordinator {
         val owner = ownerSessionId(sessionId)
         SessionWorkspace.SESSION_SUBDIRS.forEach { subdir ->
             val hostDir = SessionWorkspace.hostDir(filesDir, owner, subdir).also {
-                if (publish) it.mkdirs()
+                if (mkdirs) it.mkdirs()
             }
             val linuxPath = "/var/minis/$subdir"
             mounts[linuxPath] = hostDir.absolutePath
@@ -363,7 +504,7 @@ object ExecutionCoordinator {
         val globalBase = File(filesDir, SessionWorkspace.GLOBAL_DIR)
         SessionWorkspace.GLOBAL_BIND_SUBDIRS.forEach { subdir ->
             val hostDir = File(globalBase, subdir).also {
-                if (publish) it.mkdirs()
+                if (mkdirs) it.mkdirs()
             }
             val linuxPath = "/var/minis/$subdir"
             mounts[linuxPath] = hostDir.absolutePath
@@ -403,6 +544,12 @@ object ExecutionCoordinator {
         if (!isLaneSession(sessionId)) {
             val prefix = lanePrefix(sessionId)
             shells.keys.filter { it.startsWith(prefix) }.forEach { terminateOne(it) }
+            // [T-mcp-session-bind] MCP stdio client 是按会话作用域派生的常驻 guest
+            // 进程（缓存键见 McpNativeBridge.clientFor），会话真正结束时要一并收掉，
+            // 否则每关一个聊天就漏一个进程。lane 结束不走这里：lane 与父会话同作用域，
+            // 收掉会打断父会话正在进行的调用。
+            runCatching { com.openminis.app.mcp.client.McpNativeBridge.closeSession(sessionId) }
+                .onFailure { Log.w(TAG, "[$sessionId] closing MCP stdio clients failed: ${it.message}") }
         }
     }
 
@@ -430,9 +577,15 @@ object ExecutionCoordinator {
             }
         } else {
             // Stop all sessions (legacy/fallback)
-            shells.values.forEach { it.stop() }
+            // [T-e4-stop-all-detach-first] 先摘注册表再逐个 stop，与 stopOne/terminateOne
+            // 同序。原先"先 stop、后 clear"：两次操作之间的窗口里 shells[] 仍引用已停实例，
+            // getOrCreateShell 的快路径/启动后复核会把它交回调用方，而调用方
+            // PersistentShell.executeCommand 的 ensureStarted 又把这个已停的壳重新 spawn
+            // 成不在注册表里的 proot（孤儿进程 + 同会话双壳）。
+            val doomed = shells.values.toList()
             shells.clear()
             lastInjectedKeys.clear()
+            for (shell in doomed) shell.stop()
             ShellExecutor.destroyCurrent()
         }
     }
@@ -498,4 +651,42 @@ object ExecutionCoordinator {
     fun isLaneSession(sessionId: String): Boolean = sessionId.startsWith(LANE_PREFIX)
 
     private fun lanePrefix(ownerSessionId: String): String = "$LANE_PREFIX$ownerSessionId:"
+}
+
+/**
+ * [T-b10-superseded-null] `ExecutionCoordinator.startOrReuseShell` 在锁外 spawn 结束后，
+ * 注册表可能已经不再引用刚起来的那个实例。三种收尾互斥，判据只看"注册表当前引用了谁"：
+ *
+ * - [Verdict.REGISTERED]：注册表就是我们刚 spawn 的实例 —— 正常返回。
+ * - [Verdict.SUPERSEDED]：别的实例接管了注册表 —— 收掉自己的进程，把接管者
+ *   `ensureStarted()`（幂等）后返回。接管者在这段锁外窗口里同样可能被摘走
+ *   （见 [T-d10-takeover-recheck]），所以 `ensureStarted()` 之后必须再复核一次注册表：
+ *   不是它就把这个已被 stop 的实例收掉并返回 null 重试，**不能**把"已停的壳"交出去。
+ * - [Verdict.REGISTRY_EMPTY]：注册表已空（`stopCurrentCommand` / `sessionDidTerminate`
+ *   摘走了条目）—— **不能**把刚停掉的实例交回调用方：`PersistentShell.executeCommand`
+ *   会 `ensureStarted()` 把它重新 spawn 成一个不在 `shells[]` 里的 proot（孤儿进程 +
+ *   同会话双壳），这正是要修的回归。正确动作是重试整条路径，连续
+ *   [MAX_START_ATTEMPTS] 次仍被摘掉才判失败。
+ *
+ * 抽成纯函数只有一个理由：这条回归的判据必须能被固定住（见 `ShellSupersedePolicyTest`），
+ * 而调用它的 `startOrReuseShell` 需要真机 Context 与真实 proot 才能跑。
+ */
+internal object ShellSupersedePolicy {
+
+    /** 连续被摘掉多少次就判失败。每次重试都要完整 spawn 一次，远慢于任何争用窗口。 */
+    const val MAX_START_ATTEMPTS = 3
+
+    enum class Verdict { REGISTERED, SUPERSEDED, REGISTRY_EMPTY }
+
+    /** 按引用比较：注册表里还是不是我们刚 spawn 的那个实例。 */
+    fun <T : Any> verdict(current: T?, mine: T): Verdict = when {
+        current === mine -> Verdict.REGISTERED
+        current != null -> Verdict.SUPERSEDED
+        else -> Verdict.REGISTRY_EMPTY
+    }
+
+    fun exhausted(sessionId: String, attempts: Int): IllegalStateException = IllegalStateException(
+        "session $sessionId: shell kept being removed from the registry while starting " +
+            "($attempts attempts) — refusing to return a stopped shell",
+    )
 }

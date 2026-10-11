@@ -112,6 +112,9 @@ fun MountedFoldersScreen(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 hasAllFilesAccess = checkAllFilesAccess(context)
+                // [T-b4-#6] 用户可能刚在系统设置里改过「所有文件访问」：让沙箱缓存的
+                // 共享存储探测失效，下一条命令就会按新权限重建 /sdcard 绑定。
+                com.openminis.app.sandbox.PRootKernel.invalidateSharedStorageProbe()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -130,6 +133,9 @@ fun MountedFoldersScreen(
     ) { grants ->
         if (grants.values.any { it }) {
             hasAllFilesAccess = checkAllFilesAccess(context)
+            // [T-b4-#6] Q 上的运行时授权可能没有让 Activity 走一遍 stop/start，这里
+            // 显式失效共享存储探测缓存。
+            com.openminis.app.sandbox.PRootKernel.invalidateSharedStorageProbe()
             scope.launch { store.refreshWritability() }
         }
     }

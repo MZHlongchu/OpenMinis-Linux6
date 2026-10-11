@@ -57,13 +57,21 @@ class SessionGoalMigrationTest {
         }
     }
 
-    @Test fun migration20To19KeepsGoalData() {
+    /**
+     * Session-goal rows must not be collateral damage of the added table's
+     * lifecycle. There is no 20 → 19 downgrade migration to run — and per
+     * [T-b11-no-downgrade-migrations] there must not be one: the older build
+     * resolves a downgrade against its OWN migration table, so nothing
+     * registered here could ever execute. The row is protected because no
+     * downgrade migration exists that could drop it, which the source-level
+     * check in DatabaseVersionGuardTest enforces for the whole registry.
+     */
+    @Test fun goalRowSurvivesWithoutAnyDowngradeMigration() {
         AppDatabase.MIGRATION_19_20.migrate(supportDb)
         supportDb.execSQL(
             "INSERT INTO session_goals (session_id, objective, status, tokens_used, elapsed_ms, blocked_count, created_at, updated_at) " +
                 "VALUES ('session','keep me','active',0,0,0,1,1)",
         )
-        AppDatabase.MIGRATION_20_19.migrate(supportDb)
         supportDb.query("SELECT objective FROM session_goals WHERE session_id='session'").use { cursor ->
             assertTrue(cursor.moveToFirst())
             assertEquals("keep me", cursor.getString(0))

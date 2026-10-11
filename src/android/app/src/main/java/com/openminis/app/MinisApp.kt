@@ -288,6 +288,11 @@ class MinisApp : Application(), ImageLoaderFactory {
         // come up.
         com.openminis.app.provider.ZenFreeLaneHealth.initialize(this)
         com.openminis.app.platform.OptionalPackages.probe(this)
+        // [T-i18n-probe-wiring] 引擎可用性探测此前零调用点：AUTO 档永远回落不到
+        // 用户模型、语言包缺失时实时翻译整条静默。冷启动 fire-and-forget 探一次。
+        appCoroutineScopes.io.launch {
+            runCatching { com.openminis.app.i18n.MlKitTranslationEngine.probe(this@MinisApp) }
+        }
         com.openminis.app.session.ChatRuntime.binder =
             com.openminis.app.ui.chat.ChatViewModelBinder(this)
 
@@ -402,6 +407,12 @@ class MinisApp : Application(), ImageLoaderFactory {
                 else -> AppLogger.debug("Harness", text)
             }
         }
+
+        // [T-b1-db-gate-off-main] 把冷启动 DB 完整性闸门（PRAGMA quick_check，
+        // 全库 b-tree 扫描）提前丢到 IO 线程，与下面这一大段启动初始化并行。
+        // 闸门结论由 AppDatabase.getInstance() 消费；这里只是提前调度，Database
+        // 仍然在闸门有结论之前不会被 Room 打开。
+        com.openminis.app.data.db.AppDatabase.warmStartupGate(this, appCoroutineScopes.io)
 
         // [T-generation-run] 启动扫描：上一次进程死亡时半途而废的生成轮次
         // 标记为 ABANDONED 并留日志，让"崩溃时在跑哪条回复"可追溯。
@@ -542,6 +553,13 @@ class MinisApp : Application(), ImageLoaderFactory {
         subsystemsInitialized = true
             appCoroutineScopes.io.launch {
                 runCatching { chatRepository.dao.backfillBlankPermissionModesToAsk() }
+            }
+            // [T-bodies-gc] 启动期正文维护：清掉上次被杀掉的写入留下的 .tmp
+            // （BodyStore.discardTemps 此前生产代码从不调用）。孤儿正文的回收不走
+            // 启动路径（避免在冷启动上再叠一次 messages 全表引用扫描），由删会话
+            // 与存储管理页的清理触发。
+            appCoroutineScopes.io.launch {
+                runCatching { chatRepository.discardBodyTemps() }
             }
             try {
                 Log.i("WebViewEngine", com.openminis.app.browser.WebViewEngine.snapshot(this).summary)
@@ -858,7 +876,12 @@ class MinisApp : Application(), ImageLoaderFactory {
             override fun onActivityStarted(activity: Activity) {
                 val wasBackgrounded = foregroundActivityCount == 0
                 foregroundActivityCount++
-                if (wasBackgrounded) _isAppForegroundFlow.value = true
+                if (wasBackgrounded) {
+                    _isAppForegroundFlow.value = true
+                    // [T-b4-#6] 回到前台时失效共享存储探测缓存：用户可能刚在系统设置里
+                    // 改过「所有文件访问」，或刚答完存储运行时权限弹窗。
+                    PRootKernel.invalidateSharedStorageProbe()
+                }
                 // T298: as soon as the app transitions background → foreground,
                 // clear any task-completed notifications still in the tray.
                 // The user is back in front of the app — there's no point

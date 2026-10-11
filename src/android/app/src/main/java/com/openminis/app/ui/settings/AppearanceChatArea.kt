@@ -189,16 +189,28 @@ internal fun colorOverride(context: android.content.Context, slot: ColorSlot, is
         slot == ColorSlot.PLAN_BOARD && isDark -> KEY_CHAT_PLAN_BOARD_COLOR_DARK
         else -> KEY_CHAT_PLAN_BOARD_COLOR_LIGHT
     }
-    val mode = prefs.getLong(modeKey, NO_COLOR_OVERRIDE)
-    if (mode != NO_COLOR_OVERRIDE) return mode
+    // [T-color-split-legacy-clear] 用「键是否存在」区分「从未设置」与「显式清除」：
+    // 键不存在 = 该模式从未设置（才回落旧单一键迁移源）；键存在且为
+    // NO_COLOR_OVERRIDE = 用户显式「跟随主题」，必须就此返回——旧实现只看值
+    // （mode != NO_COLOR_OVERRIDE 才返回），于是清掉的槽位又被旧键回弹成升级前的旧色。
+    val mode = if (prefs.contains(modeKey)) prefs.getLong(modeKey, NO_COLOR_OVERRIDE) else null
     // 旧单一键迁移源：模式槽未设置时两模式共用旧值。
     val legacy = when (slot) {
         ColorSlot.USER_BUBBLE -> prefs.getLong(KEY_CHAT_USER_BUBBLE_COLOR, NO_COLOR_OVERRIDE)
         ColorSlot.CHAT_BG -> prefs.getLong(KEY_CHAT_BG_COLOR, NO_COLOR_OVERRIDE)
         ColorSlot.PLAN_BOARD -> NO_COLOR_OVERRIDE
     }
-    return legacy
+    return resolveColorOverride(mode, legacy)
 }
+
+/**
+ * [T-color-split-legacy-clear] 模式槽与旧单一键的**纯决策**（无 Android 依赖，
+ * JVM 可测）：[modeValue] 为 null 表示模式槽键**不存在**（该模式从未设置过），
+ * 此时才回落到迁移源 [legacyValue]；显式清除写入的 [NO_COLOR_OVERRIDE] 属于
+ * 「已设置」，原样返回（= 跟随主题）。
+ */
+internal fun resolveColorOverride(modeValue: Long?, legacyValue: Long): Long =
+    modeValue ?: legacyValue
 
 internal fun storeColorOverride(context: android.content.Context, slot: ColorSlot, isDark: Boolean, value: Long) {
     val key = when {
@@ -221,7 +233,18 @@ internal fun clearColorOverride(context: android.content.Context, slot: ColorSlo
         slot == ColorSlot.PLAN_BOARD && isDark -> KEY_CHAT_PLAN_BOARD_COLOR_DARK
         else -> KEY_CHAT_PLAN_BOARD_COLOR_LIGHT
     }
-    getAppearancePrefs(context).edit().putLong(key, NO_COLOR_OVERRIDE).apply()
+    val edit = getAppearancePrefs(context).edit().putLong(key, NO_COLOR_OVERRIDE)
+    // [T-color-split-legacy-clear] 一并作废旧单一键（迁移源），否则清除只对当前
+    // 模式生效：另一个尚未设置的模式槽仍会回落到升级前的旧色，「跟随主题」看起来
+    // 只清了一半；旧键也从「永久残留」变为显式可清除。写 NO_COLOR_OVERRIDE 而非
+    // remove——「已清除」是显式状态（读侧靠 contains 区分，见 colorOverride）。
+    val legacyKey = when (slot) {
+        ColorSlot.USER_BUBBLE -> KEY_CHAT_USER_BUBBLE_COLOR
+        ColorSlot.CHAT_BG -> KEY_CHAT_BG_COLOR
+        ColorSlot.PLAN_BOARD -> null // 新槽无旧键（对照 PlanBoardColorBindingTest）
+    }
+    if (legacyKey != null) edit.putLong(legacyKey, NO_COLOR_OVERRIDE)
+    edit.apply()
 }
 
 /** [T-android-chat-customization] Gutter slider — mirrors FontScaleSliderRow's

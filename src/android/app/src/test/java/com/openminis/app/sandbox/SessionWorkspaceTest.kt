@@ -1,7 +1,10 @@
 package com.openminis.app.sandbox
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -118,4 +121,173 @@ class SessionWorkspaceTest {
             SessionWorkspace.rememberFolder("sess-a", null)
         }
     }
+
+    // ── [T-file-tool-symlink-jail] ──
+
+    @Test
+    fun workspaceSymlinkCannotEscapeTheSessionJail() {
+        val filesDir = tmp.root
+        SessionWorkspace.ensureDirs(filesDir, "sess-a")
+        SessionWorkspace.ensureDirs(filesDir, "sess-b")
+        File(SessionWorkspace.memoryDir(filesDir, "sess-b"), "secret.md").writeText("nope")
+        val ws = SessionWorkspace.hostDir(filesDir, "sess-a", "workspace")
+        val leak = File(ws, "leak")
+        Assume.assumeTrue(
+            "symlinks unavailable on this host",
+            symlink(leak, java.nio.file.Paths.get("../../..")),
+        )
+
+        // `leak` resolves to filesDir, so this path really is sess-b's private
+        // tree even though it is written as one inside sess-a's workspace.
+        val escaped = File(leak, "minis-sessions/sess-b/memory/secret.md")
+        assertFalse(
+            "a workspace symlink must not reach another session",
+            SessionWorkspace.acceptsResolved(filesDir, "sess-a", escaped),
+        )
+        // Same escape for a path that does not exist yet — that is the shape
+        // `file_write` uses to create a brand-new file through the link.
+        assertFalse(
+            SessionWorkspace.acceptsResolved(filesDir, "sess-a", File(leak, "brand-new.txt")),
+        )
+        // The jail itself still works.
+        val ok = File(ws, "ok.txt").apply { writeText("ok") }
+        assertTrue(SessionWorkspace.acceptsResolved(filesDir, "sess-a", ok))
+    }
+
+    @Test
+    fun symlinkInsideTheJailIsStillAllowed() {
+        val filesDir = tmp.root
+        SessionWorkspace.ensureDirs(filesDir, "sess-a")
+        val ws = SessionWorkspace.hostDir(filesDir, "sess-a", "workspace")
+        val real = File(ws, "real.txt").apply { writeText("ok") }
+        val alias = File(ws, "alias.txt")
+        Assume.assumeTrue("symlinks unavailable on this host", symlink(alias, real.toPath()))
+        assertTrue(SessionWorkspace.acceptsResolved(filesDir, "sess-a", alias))
+    }
+
+    /**
+     * [T-symlink-realpath-failclosed] 悬空软链（目标不存在）的真实目标**不可知**：
+     * 词法判定只会看到「在 sess-a 的 workspace 里」而放行，等于把「它到底指向哪」
+     * 留给判定之后再决定（guest 期间补建目标即可换向）。现在解析不出 real 路径
+     * 一律拒——读不到是可接受的，读错别人的树不是。
+     */
+    @Test
+    fun danglingSymlinkIsRefusedInsteadOfJudgedLexically() {
+        val filesDir = tmp.root
+        SessionWorkspace.ensureDirs(filesDir, "sess-a")
+        val ws = SessionWorkspace.hostDir(filesDir, "sess-a", "workspace")
+        val dangling = File(ws, "dangling")
+        Assume.assumeTrue(
+            "symlinks unavailable on this host",
+            symlink(dangling, java.nio.file.Paths.get("../../../../outside-sess-a")),
+        )
+
+        assertFalse(
+            "a symlink whose target does not exist must not be judged by its lexical path",
+            SessionWorkspace.acceptsResolved(filesDir, "sess-a", File(dangling, "brand-new.txt")),
+        )
+        assertFalse(
+            "the dangling link itself is not resolvable either",
+            SessionWorkspace.acceptsResolved(filesDir, "sess-a", dangling),
+        )
+    }
+
+    @Test
+    fun pathsOutsideEveryManagedTreeNeedAnInjectedRoot() {
+        val filesDir = File(tmp.root, "files").apply { mkdirs() }
+        val rootfs = File(tmp.root, "rootfs").apply { mkdirs() }
+        val guest = File(rootfs, "etc/hostname").apply {
+            parentFile?.mkdirs()
+            writeText("minis")
+        }
+        // The old fallback returned true for anything outside the Minis trees,
+        // which is how a symlink escape was waved through. Outside paths are
+        // now allowed only when PRootKernel injects their root.
+        assertFalse(SessionWorkspace.acceptsResolved(filesDir, "sess-a", guest))
+        assertTrue(SessionWorkspace.acceptsResolved(filesDir, "sess-a", guest, listOf(rootfs)))
+        val neighbour = File(tmp.root, "elsewhere.txt").apply { writeText("no") }
+        assertFalse(SessionWorkspace.acceptsResolved(filesDir, "sess-a", neighbour, listOf(rootfs)))
+    }
+
+    @Test
+    fun globalSkillsTreeResolvesWithoutAnyMountTable() {
+        // /var/minis/{skills,shared,mcp-servers} live under minis-global and must
+        // not depend on the bind-mount table being populated.
+        val filesDir = File(tmp.root, "files").apply { mkdirs() }
+        val skill = File(filesDir, "${SessionWorkspace.GLOBAL_DIR}/skills/demo/SKILL.md")
+        skill.parentFile.mkdirs()
+        skill.writeText("# tool")
+        assertTrue(SessionWorkspace.acceptsResolved(filesDir, "sess-a", skill))
+    }
+
+    // ── [T-walk-cage-single-resolve] resolve + verify 一体 API ──
+
+    /**
+     * 现场：`acceptsResolved` 只回 Boolean，调用方手里留下的是**词法**路径，工具侧
+     * （SessionTreeGuard / walkOwnedTree）会再解析一次。guest 在两次解析之间把中间分量换成
+     * 软链，工具就以新目标为根列出/读取。[verifiedCanonical] 回传复检时用的那条 canonical
+     * 路径，工具侧直接用就不会有第二次解析。
+     */
+    @Test
+    fun verifiedCanonicalReturnsThePathItChecked() {
+        val filesDir = tmp.root
+        SessionWorkspace.ensureDirs(filesDir, "sess-a")
+        val ws = SessionWorkspace.hostDir(filesDir, "sess-a", "workspace")
+        val real = File(ws, "real.txt").apply { writeText("ok") }
+        val alias = File(ws, "alias.txt")
+        Assume.assumeTrue("symlinks unavailable on this host", symlink(alias, real.toPath()))
+
+        val verified = SessionWorkspace.verifiedCanonical(filesDir, "sess-a", alias)
+
+        assertEquals(
+            "a verified path must be the canonical target it was checked against",
+            real.toPath().toRealPath().toFile().path,
+            verified?.path,
+        )
+        assertTrue("the lexical alias must not be handed back", verified?.path != alias.path)
+        assertEquals(
+            "verifiedCanonical must agree with acceptsResolved",
+            SessionWorkspace.acceptsResolved(filesDir, "sess-a", alias),
+            verified != null,
+        )
+    }
+
+    @Test
+    fun verifiedCanonicalIsFailClosedOnEscapesAndStillResolvesNewFiles() {
+        val filesDir = tmp.root
+        SessionWorkspace.ensureDirs(filesDir, "sess-a")
+        SessionWorkspace.ensureDirs(filesDir, "sess-b")
+        val secret = File(SessionWorkspace.memoryDir(filesDir, "sess-b"), "secret.md").apply { writeText("nope") }
+        val ws = SessionWorkspace.hostDir(filesDir, "sess-a", "workspace")
+        val leak = File(ws, "leak")
+        Assume.assumeTrue(
+            "symlinks unavailable on this host",
+            symlink(leak, java.nio.file.Paths.get("../../..")),
+        )
+
+        // 越权路径一律 null（fail-closed）——绝不允许「通过但回传词法路径」。
+        assertNull(SessionWorkspace.verifiedCanonical(filesDir, "sess-a", File(leak, "minis-sessions/sess-b/memory/secret.md")))
+        assertNull(SessionWorkspace.verifiedCanonical(filesDir, "sess-a", secret))
+
+        // 尚不存在的文件（file_write 建新文件的形状）：整条路径 canonical 化不可能。
+        // [T-symlink-realpath-failclosed] 现在锚定「最深的存在祖先」：祖先走 realpath，
+        // 尾部分量按词法追加，归属判定与修复前一致（仍然被接受），回传的就是这条锚定
+        // 路径。无软链的临时目录里它与绝对路径逐字相同；以 real 祖先为基准断言是为了
+        // 在 macOS（/var → /private/var）这类宿主上不比一个必然不同的字符串。
+        val fresh = File(ws, "brand-new.txt")
+        assertFalse(fresh.exists())
+        val anchoredFresh = File(ws.toPath().toRealPath().toFile(), "brand-new.txt")
+        assertEquals(
+            anchoredFresh.path,
+            SessionWorkspace.verifiedCanonical(filesDir, "sess-a", fresh)?.path,
+        )
+    }
+
+    private fun symlink(link: File, target: java.nio.file.Path): Boolean =
+        try {
+            java.nio.file.Files.createSymbolicLink(link.toPath(), target)
+            true
+        } catch (_: Exception) {
+            false
+        }
 }

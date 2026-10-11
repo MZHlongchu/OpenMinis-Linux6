@@ -542,6 +542,7 @@ fun SessionListScreen(
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val isSearching by viewModel.isSearching.collectAsState()
+    val searchTruncated by viewModel.searchTruncated.collectAsState()
     val searchSnippets by viewModel.searchSnippets.collectAsState()
     // [T-android-search-jump] Session id → matched message id, collected so
     // the click handler below can read the CURRENT map without a second
@@ -901,22 +902,19 @@ fun SessionListScreen(
                         // Leave space for bottom FAB row
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 96.dp),
                     ) {
-                        // T25: search-active path used to flatten the list and skip
-                        // section headers entirely. Now reuses the same grouped
-                        // rendering — `displayedSessions` is already filtered by
-                        // the VM when active && query.isNotBlank, so the same
-                        // groupSessionsByDate(sessions) computation produces
-                        // header buckets over the filtered set.
-                        // [T-android-session-grouping] Assembly: Pinned →
-                        // groups → date buckets — pinnedFirst / leading /
-                        // trailing are hoisted above the LazyColumn so the
-                        // accordion anchor + mini-bar share them; keep the
-                        // builder and folderHeaderIndices in lockstep.
-
-                        // [T-android-session-grouping] Membership is "points at a
-                        // group that exists", matching partitionByFolder. Hoisted
-                        // out of the row so it is not rebuilt per item.
+                        // T25: search-active path reuses the same grouped rendering —
+                        // `displayedSessions` is already filtered by the VM, so the same
+                        // groupSessionsByDate(sessions) produces header buckets over the
+                        // filtered set. [T-android-session-grouping] Assembly order:
+                        // Pinned → groups → date buckets; pinnedFirst / leading /
+                        // trailing are hoisted above the LazyColumn so the accordion
+                        // anchor + mini-bar share them.
                         val existingFolderIds = folders.mapTo(HashSet()) { it.id }
+
+                        // [T-search-truncation-visible] 命中超上限时列表只是最近的一批。
+                        if (isSearchActive && searchQuery.isNotBlank() && searchTruncated) {
+                            item(key = "search_truncated_notice") { SearchTruncatedNotice() }
+                        }
 
                         fun androidx.compose.foundation.lazy.LazyListScope.renderSessionRows(
                             rows: List<ChatSessionEntity>,

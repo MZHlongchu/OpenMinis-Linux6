@@ -140,7 +140,14 @@ object SessionConcurrencyManager {
                     "running=${_runningSessions.value.size}/$MAX_CONCURRENT " +
                     "holders=${_runningSessions.value.joinToString(",")}",
             )
-            if (had || removedWaiting) pollNextLocked() else null
+            // [T-slot-queue-overshoot] 只有真正交还了名额（had=true）才允许补位。
+            // 排队中的 turn 超时/被取消时走的是 invokeOnCancellation →
+            // releaseSlot(sid)：它从未进过 _runningSessions，所以 had=false，
+            // 而 removeAll 让它落进 removedWaiting=true；旧条件 `had ||
+            // removedWaiting` 于是在没有任何名额被释放的情况下把队首塞进
+            // _runningSessions（+ 从队列摘除），running 5 → 6，队列非空期间每次
+            // 超时/取消再 +1，并发上限被逐次突破。`!had` 时只做队列清理。
+            if (had) pollNextLocked() else null
         }
         if (pending != null) {
             try {

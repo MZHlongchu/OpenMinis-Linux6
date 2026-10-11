@@ -8,7 +8,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -191,15 +190,5 @@ class MessageVersionMigrationTest {
             assertTrue(cursor.moveToFirst())
             assertEquals(0, cursor.getInt(0))
         }
-    }
-
-    @Test
-    fun migration22To21DropsTable() {
-        AppDatabase.MIGRATION_21_22.migrate(supportDb)
-        AppDatabase.MIGRATION_22_21.migrate(supportDb)
-        val exists = supportDb.query(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='message_versions'",
-        ).use { cursor -> cursor.moveToFirst() }
-        assertFalse(exists)
     }
 }

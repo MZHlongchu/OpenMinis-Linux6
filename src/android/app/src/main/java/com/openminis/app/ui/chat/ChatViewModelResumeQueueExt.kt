@@ -27,7 +27,11 @@ import kotlinx.coroutines.launch
 internal fun ChatViewModel.resumeQueueAfterCancel() {
     viewModelScope.launch {
         kotlinx.coroutines.delay(200)
-        if (_promptQueue.value.isEmpty()) return@launch
+        // [T-b18-resume-queue-shelved-guard] 与 drainQueuedPrompts 的循环条件同口径：
+        // 只有**非搁置**项才算待办。原来只判 isEmpty()，而「队列非空但全部搁置」
+        // （shelveAllQueuedPrompts 保留条目只置 shelved）是合法状态——drain 一进循环
+        // 立刻退出，于是白占一次流状态/并发名额，用户看到一次「运行中」闪烁。
+        if (!_promptQueue.value.any { !it.shelved }) return@launch
         if (_isStreaming.value) return@launch
         // [T-android-compact-queued-drain] Defer while a compact is in
         // flight — draining would mutate agentHistory mid-marker-write.

@@ -252,6 +252,32 @@ class SecurityGateImplTest {
         assertTrue((d as Decision.Denied).reason.startsWith("规则拒绝"))
     }
 
+    /**
+     * [T-b1-rule-anchor] 规则 pattern 只按锚定正则匹配。旧实现并了
+     * `target.contains(pattern.trim('*'))` 子串兜底，于是任何"提到"该子串的命令
+     * （含模型可自由构造的注释/回显/参数）都会被规则放行，并跳过其后所有硬拒绝。
+     */
+    @Test
+    fun allowRulePatternIsAnchoredNotSubstring() {
+        gate.setPermissionRules(
+            listOf(PermissionRule(action = "allow", toolFilter = "shell_execute", pattern = "rm*")),
+        )
+        // "rm*" → "^rm.*$"：命令必须以 rm 开头才算命中。
+        val substringOnly = gate.decide(
+            gate.classify("shell_execute", """{"command":"echo rm -rf /tmp/x"}"""),
+            PermissionMode.ASK,
+        )
+        assertTrue(
+            "substring fallback must not allow this: $substringOnly",
+            substringOnly !is Decision.Allow,
+        )
+        val anchored = gate.decide(
+            gate.classify("shell_execute", """{"command":"rm /tmp/x"}"""),
+            PermissionMode.ASK,
+        )
+        assertTrue("anchored match must still allow: $anchored", anchored is Decision.Allow)
+    }
+
     @Test
     fun sessionAllowAllUsesSameModeAsGlobal() {
         assertEquals(

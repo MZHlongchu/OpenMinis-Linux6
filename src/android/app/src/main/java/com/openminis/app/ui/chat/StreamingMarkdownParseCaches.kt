@@ -32,6 +32,21 @@ internal object MarkdownParseCaches {
     private const val CHAR_BUDGET_PER_CACHE = 2_000_000
 
     /**
+     * [T-android-incremental-cache-key] 增量拼接结果**自己一个缓存**，不与全量键共享。
+     *
+     * 旧实现（含 prewarmLiveTail 的显式写入）把「切点 + 拼接」得到的结果写进
+     * `inlineLru[raw]` / `mathLru[raw]` —— 那正是 `inline()` / `mathLatex()` 的权威
+     * 键。只要 [safeInlineSplitOffset] 与 parseInline 有一处判据不一致，错误结果就
+     * 成了该文本的「全量解析」，冻结分支、复制、后续所有缓存命中的调用点都读到它，
+     * 直到 LRU 淘汰（用户看到的就是样式定格在错误形态）。
+     *
+     * 现在权威键只由 [inline] / [mathLatex]（真全量解析）写；增量结果只进这两个
+     * 缓存。预算刻意小：并存的活尾通常只有一条（流式最后一段），256K 字符足够
+     * 覆盖「预热 + 主线程命中」的同一次 tick，且不会为历史片段长期占内存。
+     */
+    private const val CHAR_BUDGET_INCREMENTAL = 256_000
+
+    /**
      * Access-order LinkedHashMap with eviction driven by a running
      * character total rather than entry count. [sizer] returns the number
      * of source characters each (key, value) pair contributes (we count
@@ -104,6 +119,16 @@ internal object MarkdownParseCaches {
         sizer = { k, _ -> k.length },
     )
 
+    /** [T-android-incremental-cache-key] 增量 inline / math 结果（见上）。 */
+    private val incrInlineLru = Lru<Pair<String, MdColors>, AnnotatedString>(
+        budget = CHAR_BUDGET_INCREMENTAL,
+        sizer = { k, _ -> k.first.length },
+    )
+    private val incrMathLru = Lru<String, List<String>>(
+        budget = CHAR_BUDGET_INCREMENTAL,
+        sizer = { k, _ -> k.length },
+    )
+
     // Double-checked get: the lock is held only for map access, never during a
     // parse — a slow parse on Default must not block a main-thread hit on a
     // DIFFERENT key. A concurrent miss on the same key computes twice and the
@@ -152,7 +177,11 @@ internal object MarkdownParseCaches {
      *  to the plain cached path for short text or when no safe boundary exists. */
     fun inlineIncremental(text: String, colors: MdColors): AnnotatedString {
         // Exact-match cache hit (e.g. a re-publish of the same content) — free.
+        // 全量键命中同样是正确值：它只可能由 inline() 的真全量解析写入。
         synchronized(inlineLru) { inlineLru[text to colors] }?.let { return it }
+        // [T-android-incremental-cache-key] 增量结果自己的键：每个 tick 的 raw 都不同，
+        // 没有这一层，主线程每个 tick 都要重跑切点扫描 + 尾段解析（prewarm 白做）。
+        synchronized(incrInlineLru) { incrInlineLru[text to colors] }?.let { return it }
         if (text.length < INCREMENTAL_MIN_CHARS) return inline(text, colors)
         val split = safeInlineSplitOffset(text)
         if (split <= 0) return inline(text, colors)
@@ -162,22 +191,27 @@ internal object MarkdownParseCaches {
         val t0 = System.nanoTime()
         val suffixAnn = parseInline(text.substring(split), colors)
         maybeLogSlowParse("inline-incr", text.length - split, (System.nanoTime() - t0) / 1_000_000)
-        return androidx.compose.ui.text.buildAnnotatedString {
+        val spliced = androidx.compose.ui.text.buildAnnotatedString {
             append(prefixAnn)
             append(suffixAnn)
         }
+        synchronized(incrInlineLru) { incrInlineLru[text to colors] = spliced }
+        return spliced
     }
 
     /** Incremental math-latex collection for the live streaming tail. Same
      *  contract as `mathLatex(text)`; reuses the closed prefix's list. */
     fun mathLatexIncremental(text: String): List<String> {
         synchronized(mathLru) { mathLru[text] }?.let { return it }
+        synchronized(incrMathLru) { incrMathLru[text] }?.let { return it }
         if (text.length < INCREMENTAL_MIN_CHARS) return mathLatex(text)
         val split = safeInlineSplitOffset(text)
         if (split <= 0) return mathLatex(text)
         val prefix = mathLatex(text.substring(0, split))
         val suffix = collectInlineMathLatex(text.substring(split))
-        return if (suffix.isEmpty()) prefix else prefix + suffix
+        val merged = if (suffix.isEmpty()) prefix else prefix + suffix
+        synchronized(incrMathLru) { incrMathLru[text] = merged }
+        return merged
     }
 
     /**
@@ -205,6 +239,24 @@ internal object MarkdownParseCaches {
      *  while routing big MISSes off-main. */
     fun cachedBlocks(raw: String): List<MdBlock>? =
         synchronized(blocksLru) { blocksLru[raw] }
+
+    /**
+     * [T-android-freeze-edge-offmain-inline] Lock-only probe: 该 `raw` 的**权威**
+     * inline / math 结果是否都已入缓存（`inline()` / `mathLatex()` 会同步命中）？
+     *
+     * 冻结分支为什么需要它：`prewarmLiveTail` 只暖增量键（见
+     * [T-android-incremental-cache-key]），流末那一帧 `RenderBlock` 一旦从
+     * liveIncremental 切回权威路径，`inline(raw)` / `mathLatex(raw)` 必 MISS，
+     * 于是**主线程**跑一次全量 parseInline —— 81% 卡顿栈所在的那一层。
+     * 有了这个探针，冻结分支可以在权威键仍冷的那一帧改走增量键（零解析），
+     * 同时把权威解析交给 off-main 预暖。
+     *
+     * `containsKey` 不会刷新 accessOrder 的最近使用序（只有 `get` 会），所以探针
+     * 不会把别处的热条目挤出 LRU。
+     */
+    fun isAuthoritativeParseCached(raw: String, colors: MdColors): Boolean =
+        synchronized(inlineLru) { inlineLru.containsKey(raw to colors) } &&
+            synchronized(mathLru) { mathLru.containsKey(raw) }
 
     /** [T-android-review-p1-fixes] F2(a): freeze-edge handoff — the live
      *  branch deposits its parse result here so the frozen branch HITs
@@ -265,21 +317,24 @@ internal object MarkdownParseCaches {
      * [T-android-streaming-incremental-inline] Off-main prewarm for the LIVE
      * tail block. Warms the closed-prefix inline/math cache so the main-thread
      * `inlineIncremental` / `mathLatexIncremental` (which RenderBlock calls for
-     * the live block) resolve to a prefix HIT + a tiny suffix scan. Only the
-     * LAST block is the live one; earlier blocks are frozen and handled by the
-     * normal [prewarm] above. No-op for non-Paragraph tails (they don't take
-     * the incremental path in RenderBlock).
+     * the live block) resolve to a cache HIT instead of a scan + tail parse.
+     * Only the LAST block is the live one; earlier blocks are frozen and handled
+     * by the normal [prewarm] above. No-op for non-Paragraph tails (they don't
+     * take the incremental path in RenderBlock).
+     *
+     * [T-android-incremental-cache-key] 这里**不再**把增量结果写进
+     * `inlineLru[raw]` / `mathLru[raw]`：那是权威全量键，写进去等于让「切点选错的
+     * 增量结果」冒充全量解析，冻结分支与后续所有 inline() 命中都会定格在错误形态
+     * （本回归的成因之一）。增量结果进它自己的缓存，主线程照样是干净命中。
      */
     fun prewarmLiveTail(blocks: List<MdBlock>, colors: MdColors) {
         val last = blocks.lastOrNull() as? MdBlock.Paragraph ?: return
         // inlineIncremental/mathLatexIncremental internally split at the safe
-        // boundary and reuse inline(prefix)/mathLatex(prefix). Computing them
-        // here (off-main) both warms the prefix AND memoizes the exact full-text
-        // result under the plain key, so the main-thread call is a clean HIT.
-        val ann = inlineIncremental(last.raw, colors)
-        synchronized(inlineLru) { inlineLru[last.raw to colors] = ann }
-        val math = mathLatexIncremental(last.raw)
-        synchronized(mathLru) { mathLru[last.raw] = math }
+        // boundary and reuse inline(prefix)/mathLatex(prefix), so this both warms
+        // the prefix and memoizes the exact full-text result under the
+        // incremental key.
+        inlineIncremental(last.raw, colors)
+        mathLatexIncremental(last.raw)
     }
 }
 

@@ -33,10 +33,14 @@ import java.io.File
  *
  * 1. **Upgrade must not lose data.** `ADD COLUMN` should be an O(1) metadata
  *    change; a migration that rebuilds the table silently drops rows.
- * 2. **Downgrade must not crash and must not delete.** Room resolves a
- *    downgrade through `onUpgrade`; with no registered path it throws (app
- *    cannot start) or, with a destructive fallback, calls `dropAllTables`. We
- *    register a no-op, so an older build opens the newer file untouched.
+ * 2. **The newer table must stay readable by an older build.** There is no
+ *    downgrade migration (see [T-b11-no-downgrade-migrations]: the older APK
+ *    resolves a downgrade against ITS OWN migration table, so nothing this
+ *    build registers can ever run), but the schema change still has to be
+ *    backward-ignorable for the case where an older build is pointed at this
+ *    file: the four attribution columns are nullable with no DEFAULT, so an
+ *    older build's `INSERT` (which names none of them) and `SELECT *` (which
+ *    resolves by name, as Room's generated DAOs do) both keep working.
  */
 @RunWith(AndroidJUnit4::class)
 class MessageAttributionMigrationTest {
@@ -167,14 +171,14 @@ class MessageAttributionMigrationTest {
     }
 
     /**
-     * The downgrade — the case that used to make the app unopenable.
+     * The upgrade itself — the case that used to make the app unopenable.
      *
-     * Asserts what a user installing an older build actually cares about: it
-     * runs at all, their messages are still there, and the newer build's
-     * attribution is still there when they upgrade back.
+     * Asserts what a user installing a newer build actually cares about: it
+     * runs at all, their messages are still there, and the attribution the
+     * newer build captured is readable afterwards.
      */
     @Test
-    fun downgrade12To11_runsWithoutLoss() {
+    fun upgrade11To12_keepsRowsAndAttribution() {
         db.execSQL(
             "INSERT INTO messages (id, session_id, role, parts_json, created_at, token_usage, sort_order) " +
                 "VALUES ('m1','s1','assistant','[]',100,'{\"inputTokens\":7}',0)"
@@ -182,15 +186,12 @@ class MessageAttributionMigrationTest {
         applyMigration(AppDatabase.MIGRATION_11_12)
         db.execSQL("UPDATE messages SET model_id='grok-4.5' WHERE id='m1'")
 
-        applyMigration(AppDatabase.MIGRATION_12_11)
-
         db.rawQuery("SELECT COUNT(*) FROM messages", null).use { c ->
             assertTrue(c.moveToFirst())
-            assertEquals("downgrade must not drop rows", 1, c.getInt(0))
+            assertEquals("upgrade must not drop rows", 1, c.getInt(0))
         }
-        // Round trip: the snapshot survives, so upgrading again restores precise
-        // attribution instead of silently degrading it. This is why the
-        // downgrade is a no-op rather than a DROP COLUMN.
+        // The row survives with its attribution intact; there is no downgrade
+        // migration to run it back through (see the class doc).
         db.rawQuery("SELECT model_id FROM messages WHERE id='m1'", null).use { c ->
             assertTrue(c.moveToFirst())
             assertEquals("grok-4.5", c.getString(0))
@@ -199,14 +200,13 @@ class MessageAttributionMigrationTest {
 
     /**
      * An older build's INSERT — which names none of the new columns — must
-     * still work against the post-downgrade table. This only holds because the
-     * columns are nullable with no DEFAULT, and it is the whole premise of
-     * keeping them rather than dropping them.
+     * still work against the newer table. This only holds because the columns
+     * are nullable with no DEFAULT, and it is the whole premise of adding them
+     * rather than rebuilding the table.
      */
     @Test
-    fun downgrade12To11_oldStyleInsertStillWorks() {
+    fun olderBuildInsertStillWorksAgainstNewerTable() {
         applyMigration(AppDatabase.MIGRATION_11_12)
-        applyMigration(AppDatabase.MIGRATION_12_11)
 
         db.execSQL(
             "INSERT INTO messages (id, session_id, role, parts_json, created_at, sort_order) " +
@@ -216,15 +216,13 @@ class MessageAttributionMigrationTest {
             assertTrue(c.moveToFirst())
             assertTrue("unset snapshot columns must be NULL", c.isNull(0))
         }
-        // And the columns are still present — the downgrade kept them.
-        assertTrue(columnNames().contains("model_id"))
+        assertTrue("the added columns stay in place", columnNames().contains("model_id"))
     }
 
     /** `SELECT *` (used by Room DAOs) must tolerate the extra columns. */
     @Test
-    fun downgrade12To11_selectStarStillReadsOldColumns() {
+    fun olderBuildSelectStarStillReadsOldColumns() {
         applyMigration(AppDatabase.MIGRATION_11_12)
-        applyMigration(AppDatabase.MIGRATION_12_11)
         db.execSQL(
             "INSERT INTO messages (id, session_id, role, parts_json, created_at, sort_order) " +
                 "VALUES ('m3','s3','user','[]',5,0)"

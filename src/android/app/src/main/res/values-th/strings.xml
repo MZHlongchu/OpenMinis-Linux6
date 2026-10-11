@@ -72,6 +72,7 @@
     <string name="resume_action">ดำเนินการต่อ</string>
     <string name="search_chats_placeholder">ค้นหาแชท…</string>
     <string name="search_no_results">ไม่พบผลลัพธ์สำหรับ \"%1$s\"</string>
+    <string name="search_truncated_notice">แสดงเพียง %1$d รายการล่าสุดเท่านั้น — ปรับคำค้นให้แคบลงเพื่อดูเพิ่มเติม</string>
     <string name="stop_tool">หยุดเครื่องมือ</string>
     <string name="mic_permission_title">ต้องการสิทธิ์ไมโครโฟน</string>
     <string name="mic_permission_message">การป้อนด้วยเสียงต้องใช้สิทธิ์ไมโครโฟน แตะ เปิดการตั้งค่า เพื่ออนุญาตให้ Minis Ultra</string>

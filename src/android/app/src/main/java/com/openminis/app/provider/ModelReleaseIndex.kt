@@ -1,6 +1,7 @@
 package com.openminis.app.provider
 
 import com.openminis.app.logging.AppLogger
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * [T-model-release-ranking] Ranks models so the newest / most capable land at
@@ -58,13 +59,39 @@ object ModelReleaseIndex {
 
     private class Entry(val day: Int, val outputCost: Double?, val context: Int?)
 
+    /** [T-model-rank-memo] Box so a *miss* can be memoized too — relay/local
+     *  models that are absent from the catalog are the common case in a picker
+     *  and each miss otherwise re-walks the family/date heuristics. */
+    private class Resolved(val entry: Entry?)
+
     private var byFullId: Map<String, Entry> = emptyMap()
     private var byTail: Map<String, Entry> = emptyMap()
     private var built = false
 
+    /** Catalog generation [byFullId]/[byTail] were built from. */
+    private var builtGeneration: Long = -1L
+
+    /**
+     * [T-model-rank-memo] `rank()` is called twice per comparison inside
+     * `ProviderRepository.releaseRankOrder`, which the model picker runs in a
+     * @Composable body — i.e. on the main thread on every recomposition, for
+     * ~2·n·log₂n comparisons. Each call used to redo `resolve()` (lowercase,
+     * split, several map lookups). Bounded so a relay minting unique model ids
+     * cannot grow it without limit; replaced (not cleared) on rebuild so a
+     * racing writer can only ever fill the discarded instance.
+     */
+    @Volatile
+    private var resolveCache = ConcurrentHashMap<String, Resolved>()
+
+    private const val MAX_RESOLVE_CACHE_ENTRIES = 512
+
     @Synchronized
     private fun ensureIndex() {
-        if (built) return
+        // [T-model-rank-memo] Rebuild when the catalog was re-installed instead
+        // of relying on an explicit invalidate() call site (there was none, so
+        // a refreshed catalog never reached the picker ordering).
+        val generation = ModelsDevApi.currentRegistryGeneration()
+        if (built && builtGeneration == generation) return
         val full = HashMap<String, Entry>()
         val tail = HashMap<String, Entry>()
         for (provider in ModelsDevApi.registrySnapshot().values) {
@@ -83,6 +110,8 @@ object ModelReleaseIndex {
         byFullId = full
         byTail = tail
         built = true
+        builtGeneration = generation
+        resolveCache = ConcurrentHashMap()
         AppLogger.info(TAG, "release index built: full=${full.size} tail=${tail.size}")
     }
 
@@ -90,20 +119,32 @@ object ModelReleaseIndex {
     @Synchronized
     fun invalidate() {
         built = false
+        builtGeneration = -1L
         byFullId = emptyMap()
         byTail = emptyMap()
+        resolveCache = ConcurrentHashMap()
     }
 
     /** Ranking key for a model. Unknown ids get `releaseDay = null` (sink). */
     fun rank(modelId: String, displayName: String, contextWindow: Int?): Rank {
         ensureIndex()
-        val hit = resolve(modelId)
+        val hit = resolveCached(modelId)
         return Rank(
             releaseDay = hit?.day,
             outputCostPerMTok = hit?.outputCost ?: 0.0,
             contextWindow = contextWindow ?: hit?.context ?: 0,
             displayName = displayName,
         )
+    }
+
+    /** [T-model-rank-memo] Memoized [resolve]; see [resolveCache]. */
+    private fun resolveCached(raw: String): Entry? {
+        val cache = resolveCache
+        cache[raw]?.let { return it.entry }
+        val found = resolve(raw)
+        if (cache.size >= MAX_RESOLVE_CACHE_ENTRIES) cache.clear()
+        cache[raw] = Resolved(found)
+        return found
     }
 
     private fun resolve(raw: String): Entry? {

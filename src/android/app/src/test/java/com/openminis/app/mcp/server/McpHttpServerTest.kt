@@ -20,6 +20,11 @@ import java.net.Socket
  */
 class McpHttpServerTest {
 
+    private companion object {
+        /** [T-b1-mcp-token-failclosed] A started server always has a token. */
+        const val TEST_TOKEN = "test-token"
+    }
+
     private class EchoDispatcher : McpServerCore.ToolDispatcher {
         override fun listTools(): JSONArray =
             JSONArray().put(JSONObject().put("name", "device_info"))
@@ -31,7 +36,7 @@ class McpHttpServerTest {
     }
 
     private fun newServer(
-        token: String? = null,
+        token: String? = TEST_TOKEN,
         dispatcher: McpServerCore.ToolDispatcher = EchoDispatcher(),
     ): McpHttpServer =
         McpHttpServer(
@@ -69,7 +74,7 @@ class McpHttpServerTest {
             }
         }
 
-    private fun post(port: Int, path: String, body: String, auth: String? = null): String {
+    private fun post(port: Int, path: String, body: String, auth: String? = TEST_TOKEN): String {
         val headers = buildString {
             append("POST $path HTTP/1.1\r\n")
             append("Host: 127.0.0.1:$port\r\n")
@@ -289,6 +294,7 @@ class McpHttpServerTest {
             val body = """{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"shell_exec","arguments":{"command":"中文"}}}"""
             val bytes = body.toByteArray(Charsets.UTF_8)
             val headers = "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n" +
+                "Authorization: Bearer $TEST_TOKEN\r\n" +
                 "Content-Type: application/json\r\nContent-Length: ${bytes.size}\r\n\r\n"
             val raw = rawRoundTrip(port, headers + body)
             assertTrue("expected echo with CJK in [$raw]", raw.contains("echo:shell_exec:中文"))
@@ -338,15 +344,55 @@ class McpHttpServerTest {
     // ─── CORS / 构造响应（纯函数面） ──────────────────────────────────────
 
     @Test
-    fun `cors preflight response carries the allow headers`() {
-        val pre = McpServerCore.corsPreflightResponse()
+    fun `cors preflight response carries the allow headers only for loopback origins`() {
+        val pre = McpServerCore.corsPreflightResponse("http://127.0.0.1:5173")
         assertTrue(pre.startsWith("HTTP/1.1 204 No Content\r\n"))
-        assertTrue(pre.contains("Access-Control-Allow-Origin: *"))
+        assertTrue(pre.contains("Access-Control-Allow-Origin: http://127.0.0.1:5173"))
         assertTrue(pre.contains("Access-Control-Allow-Headers: Content-Type, Authorization"))
+        // [T-b1-mcp-cors] no / non-loopback origin → no CORS grant.
+        assertFalse(McpServerCore.corsPreflightResponse().contains("Access-Control-Allow-Origin"))
+        assertFalse(
+            McpServerCore.corsPreflightResponse("https://evil.example")
+                .contains("Access-Control-Allow-Origin"),
+        )
         // method not allowed 变体替换了 Allow 头
         val mna = McpServerCore.methodNotAllowedResponse()
         assertTrue(mna.contains("Allow: POST, OPTIONS"))
         assertTrue(mna.startsWith("HTTP/1.1 405 Method Not Allowed"))
+    }
+
+    // ─── 鉴权 fail-closed ─────────────────────────────────────────────────
+
+    @Test
+    fun `start refuses to bind when no bearer token is configured`() {
+        val server = newServer(token = null)
+        try {
+            assertFalse(server.start(freePort()))
+            assertTrue("expected an error message, got ${server.lastError}", server.lastError != null)
+            // Not a bind conflict: the manager's port-fallback loop must stop.
+            assertFalse(server.lastBindConflict)
+        } finally {
+            server.stop()
+        }
+        // A blank (whitespace) token is just as bad.
+        val blank = newServer(token = "   ")
+        try {
+            assertFalse(blank.start(freePort()))
+        } finally {
+            blank.stop()
+        }
+    }
+
+    @Test
+    fun `request without an authorization header gets 401`() {
+        val server = newServer()
+        val port = startOnFreePort(server)
+        try {
+            val raw = post(port, "/mcp", """{"jsonrpc":"2.0","id":1,"method":"tools/list"}""", auth = null)
+            assertTrue("expected 401 in [$raw]", raw.startsWith("HTTP/1.1 401"))
+        } finally {
+            server.stop()
+        }
     }
 
     // ─── 端口占用（bind conflict）─────────────────────────────────────────

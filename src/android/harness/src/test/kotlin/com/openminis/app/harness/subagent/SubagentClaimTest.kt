@@ -102,7 +102,51 @@ class SubagentClaimTest {
         val receipts = extractSubagentReceipts(transcript())
         assertEquals(1, receipts.commands.size)
         assertTrue(receipts.commands.single().contains("gradlew test"))
-        assertEquals(listOf("docs/report.md"), receipts.writtenPaths)
+        // [T-claim-path-root-normalization] 相对写法按工作区根归一，与裁定侧同根。
+        assertEquals(listOf("var/minis/workspace/docs/report.md"), receipts.writtenPaths)
+    }
+
+    @Test
+    fun `relative write receipt backs an absolute claim path`() {
+        val receipts = extractSubagentReceipts(
+            listOf(
+                ToolCall("c1", 1L, HarnessTool.WRITE, buildJsonObject { put("path", JsonPrimitive("docs/report.md")) }, rawToolName = "write"),
+                ToolResult("r1", 2L, "c1", success = true, output = "ok"),
+            )
+        )
+        val claim = parseSubagentClaim(
+            "```json\n{\"status\": \"complete\", \"acceptance_criteria\": " +
+                "[{\"type\": \"files\", \"claim\": \"报告已写入\", \"paths\": [\"/var/minis/workspace/docs/report.md\"]}]}\n```"
+        )!!
+        val adjudication = adjudicateSubagentClaim(claim, receipts)
+        assertTrue(adjudication.verdicts.single().backed)
+        assertEquals("complete", adjudication.adjudicatedStatus)
+        assertFalse(adjudication.downgraded)
+    }
+
+    @Test
+    fun `absolute write receipt backs a relative claim path`() {
+        val receipts = extractSubagentReceipts(
+            listOf(
+                ToolCall("c1", 1L, HarnessTool.WRITE, buildJsonObject { put("path", JsonPrimitive("/var/minis/workspace/docs/report.md")) }, rawToolName = "write"),
+                ToolResult("r1", 2L, "c1", success = true, output = "ok"),
+            )
+        )
+        val claim = parseSubagentClaim(
+            "```json\n{\"status\": \"complete\", \"acceptance_criteria\": " +
+                "[{\"type\": \"files\", \"claim\": \"报告已写入\", \"paths\": [\"./docs/report.md\"]}]}\n```"
+        )!!
+        assertTrue(adjudicateSubagentClaim(claim, receipts).verdicts.single().backed)
+    }
+
+    @Test
+    fun `claim path outside the workspace root is not silently absolved`() {
+        val receipts = extractSubagentReceipts(transcript())
+        val claim = parseSubagentClaim(
+            "```json\n{\"status\": \"complete\", \"acceptance_criteria\": " +
+                "[{\"type\": \"files\", \"claim\": \"改了别的会话\", \"paths\": [\"/var/minis/workspace-other/docs/report.md\"]}]}\n```"
+        )!!
+        assertFalse(adjudicateSubagentClaim(claim, receipts).verdicts.single().backed)
     }
 
     // ---------- 裁定 ----------

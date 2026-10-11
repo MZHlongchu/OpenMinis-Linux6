@@ -189,14 +189,23 @@ interface ChatDao {
     @Query("DELETE FROM sessions WHERE id = :id")
     suspend fun deleteSession(id: String)
 
-    // Full-text search across session titles and message content
+    // Full-text search across session titles and message content.
+    // [T-search-exists-limit] 旧写法 `LEFT JOIN messages` + `DISTINCT` 会把命中行按
+    // 消息数放大（一条消息一行，逐行读 fat 的 parts_json 单元格）再由 DISTINCT 收
+    // 敛，且无法在「本会话已经命中」处提前结束；`%…%` 走不了索引 ⇒ 每次防抖击键都
+    // 全表扫 messages。改成 EXISTS：每条会话在第一条命中消息处短路，一行一会话，
+    // DISTINCT 随之去掉。LIMIT 由调用方下推（多传 1 行即可判定截断，见 ChatRepository.searchSessions）。
     @Query("""
-        SELECT DISTINCT s.* FROM sessions s
-        LEFT JOIN messages m ON m.session_id = s.id
-        WHERE s.title LIKE :pattern OR m.parts_json LIKE :pattern
+        SELECT * FROM sessions s
+        WHERE s.title LIKE :pattern
+           OR EXISTS (
+                SELECT 1 FROM messages m
+                WHERE m.session_id = s.id AND m.parts_json LIKE :pattern
+           )
         ORDER BY s.updated_at DESC
+        LIMIT :limit
     """)
-    suspend fun searchSessions(pattern: String): List<ChatSessionEntity>
+    suspend fun searchSessions(pattern: String, limit: Int): List<ChatSessionEntity>
 
     // ─── Folders (session groups) ──────────────────────────────────────────
     // [T-android-session-grouping] "Folder" in code, "Group" in the UI.
@@ -284,6 +293,14 @@ interface ChatDao {
 
     @Query("SELECT sort_order FROM messages WHERE id = :id")
     suspend fun sortOrderOf(id: String): Int?
+
+    /**
+     * [T-android-persist-row-refresh-debounce] 一批新落库行的 sort_order。
+     * notePersistedUiRow 把一次落库风暴合并成一批对账，只需要这一条查询，
+     * 而不是每行一次 [sortOrderOf]。
+     */
+    @Query("SELECT sort_order FROM messages WHERE id IN (:ids)")
+    suspend fun sortOrdersOf(ids: List<String>): List<Int>
 
     @Query("SELECT COUNT(*) FROM messages WHERE session_id = :sessionId AND sort_order < :sortOrder")
     suspend fun countMessagesBeforeSort(sessionId: String, sortOrder: Int): Int
@@ -617,6 +634,18 @@ interface ChatDao {
 
     @Query("SELECT id, body_bytes, body_ref FROM messages WHERE id = :id")
     suspend fun bodyMeta(id: String): MessageBodyMeta?
+
+    /**
+     * [T-bodies-gc] 这个会话引用到的正文 ref（删会话前先取候选集）。
+     * 回收判定在 repo 侧：只有全库（messages ∪ message_versions）都没有引用的
+     * 文件才会被删。
+     */
+    @Query("SELECT DISTINCT body_ref FROM messages WHERE session_id = :sessionId AND body_ref IS NOT NULL")
+    suspend fun bodyRefsForSession(sessionId: String): List<String>
+
+    /** [T-bodies-gc] 全库仍被 messages 引用的正文 ref（回收对账用）。 */
+    @Query("SELECT DISTINCT body_ref FROM messages WHERE body_ref IS NOT NULL")
+    suspend fun allBodyRefs(): List<String>
 
     // [T-archive-trimmed-parts] Full-row read for archiving a row that is
     // about to be rewritten in place (updateMessageParts). Same explicit

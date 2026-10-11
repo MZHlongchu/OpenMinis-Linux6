@@ -102,4 +102,41 @@ class DatabaseVersionGuardTest {
             assertTrue("$col must be nullable", !f.getBoolean("notNull"))
         }
     }
+
+    /**
+     * [T-b11-no-downgrade-migrations] No downgrade migration may be declared or
+     * registered again.
+     *
+     * Room resolves a downgrade with the table compiled into the *running*
+     * (older) build, so a `Migration(N+1, N)` sitting in this source tree can
+     * never execute: [DatabaseVersionGuard] sends every onDisk >
+     * CODE_DB_VERSION to the guidance screen, and the older build that would
+     * have needed it shipped before it existed. A whole chain of these
+     * accumulated (12→11 … 22→21) and the last one — 22→21 — dropped
+     * `message_versions`, i.e. it was a silent data-loss trap one guard-bypass
+     * away. This is a source check rather than a runtime one because the defect
+     * is the mere presence of the declaration: it is misleading even when it is
+     * unreachable.
+     *
+     * Every migration this file may contain is an UPGRADE (a < b). The doc
+     * comments that explain the rule are allowed to name no migration
+     * identifiers, which is why this test scans only for the identifier shape
+     * `MIGRATION_<a>_<b>`.
+     */
+    @Test
+    fun `app database declares and registers only upgrade migrations`() {
+        val src = File("src/main/java/com/openminis/app/data/db/AppDatabase.kt")
+        require(src.isFile) { "missing ${src.absolutePath}" }
+        val identifiers = Regex("""MIGRATION_(\d+)_(\d+)""")
+            .findAll(src.readText())
+            .map { it.groupValues[1].toInt() to it.groupValues[2].toInt() }
+            .toList()
+        assertTrue("expected the upgrade chain to be non-empty", identifiers.isNotEmpty())
+        val downgrades = identifiers.filter { (from, to) -> from > to }
+        assertTrue(
+            "AppDatabase must not declare or register downgrade migrations " +
+                "(found $downgrades): they can never run — see [T-b11-no-downgrade-migrations]",
+            downgrades.isEmpty(),
+        )
+    }
 }

@@ -97,6 +97,33 @@ class McpToolDispatcherTest {
         assertNull(r.errorCode) // plain tool error, not a JSON-RPC error mapping
     }
 
+    // ─── 传输体积上限：单一常量源 ─────────────────────────────────────────
+
+    /**
+     * [T-b1-transfer-limit-single-source] push 的声明上限必须与 HTTP 报文上限
+     * 自洽：base64 膨胀 4/3 之后仍要装得进 McpHttpServer.MAX_BODY_BYTES，否则
+     * 客户端按 tools/list 的文案发大包只会先吃到一个 413。
+     */
+    @Test
+    fun `file transfer push limit fits inside the http body cap`() {
+        val push = McpToolDispatcher.MAX_PUSH_BYTES
+        assertTrue("push limit must be positive", push > 0)
+        assertTrue(
+            "base64 of the advertised push limit must fit MAX_BODY_BYTES",
+            push * 4 / 3 + McpToolDispatcher.TRANSFER_JSON_ENVELOPE_BYTES <= McpHttpServer.MAX_BODY_BYTES,
+        )
+        val tools = dispatcher(FakeGate()).listTools()
+        val pushDesc = (0 until tools.length())
+            .map { tools.getJSONObject(it) }
+            .first { it.getString("name") == "file_transfer_push" }
+            .getString("description")
+        assertTrue(
+            "tools/list must advertise the real push limit: $pushDesc",
+            pushDesc.contains("${push / 1024} KB"),
+        )
+        assertTrue("stale 8 MB claim must be gone: $pushDesc", !pushDesc.contains("8 MB"))
+    }
+
     // ─── file_read 路径验证（纯函数） ─────────────────────────────────────
 
     @Test

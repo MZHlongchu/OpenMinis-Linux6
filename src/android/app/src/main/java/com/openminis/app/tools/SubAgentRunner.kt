@@ -188,8 +188,16 @@ object SubAgentRunner {
                             // convention (OpenAIProviderUsage.kt subtracts the
                             // cached portion; Anthropic reports it separately), so
                             // prefill is taken as-is — subtracting cacheRead here
-                            // would double-subtract. Gate on any usage field, not
-                            // latestContextTokens: Gemini never sets that field.
+                            // would double-subtract. Gate on either token field
+                            // rather than on latestContextTokens: the providers
+                            // report usage in partial chunks (Anthropic emits it
+                            // twice — message_start for the prompt side,
+                            // message_delta for the output side; see
+                            // AnthropicProvider.mergeUsage), so a context-only
+                            // gate would drop the tokens such a chunk really
+                            // spent. Gemini used to omit latestContextTokens; it
+                            // sets it now (GeminiProvider.extractUsage), so the
+                            // old rationale no longer applies.
                             if (tokenBudget != null &&
                                 (chunk.usage.outputTokens > 0 || chunk.usage.inputTokens > 0)
                             ) {

@@ -1,6 +1,7 @@
 package com.openminis.app.data
 
 import android.content.Context
+import com.openminis.app.data.body.Admission
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.data.repository.SkillRepository
 import com.openminis.app.logging.AppLogger
@@ -51,7 +52,11 @@ class SessionForkManager(
      *   - `source` (origin tag like "shortcut" — the copy was made via the
      *     duplicate button, not via the original entry point)
      *   - `editCount` (starts at 0)
-     *   - `lastMessage` (createSession seeds it; refreshed by appendMessage)
+     *   - `lastMessage` as an inheritable *field* — but see [T-fork-copy-preview]
+     *     below: it is seeded from the source as a FALLBACK and then refreshed by
+     *     every copied row that yields a preview. Not copying it at all left a
+     *     duplicate whose last row is a big/offloaded body showing "No messages
+     *     yet" in the list, even though its conversation is identical.
      *   - `id` / `createdAt` / `updatedAt` (new identity, current timestamps)
      */
     suspend fun duplicateSession(sessionId: String): String? {
@@ -96,32 +101,65 @@ class SessionForkManager(
         // [T-session-duplicate-compact-marker-android] Track old→new message id
         // and old→new sort_order so copied compact markers (which reference DB
         // message ids + legacy sort_orders) can be remapped onto the freshly
-        // minted duplicate messages. appendMessage returns the new MessageEntity
+        // minted duplicate messages. copyMessageInto returns the new MessageEntity
         // (id + sortOrder), so no re-query is needed. Aligns iOS e8ac8b82.
+        //
+        // [T-fork-copy-preview] 先继承源会话的列表预览：副本与源会话消息完全相同，
+        // 而逐行复制时只有"能解析出文本"的行才会写预览（大正文的 offload 行只能
+        // 从 preview 列解析，解析不出来就不写）。没有这一步，最后一条是长回答/
+        // 工具结果的副本会在会话列表里显示成「暂无消息」。后续行写出的真预览会
+        // 覆盖它，故只是兜底。
+        source.lastMessage?.let {
+            chatRepository.dao.updateLastMessage(new.id, it, System.currentTimeMillis())
+        }
         val oldToNewId = HashMap<String, String>()
         val oldToNewSort = HashMap<String, Int>()
         var offset = 0
-        while (offset < messageTotal) {
-            val page = chatRepository.dao.loadMessagesPage(sessionId, offset, 50)
-            if (page.isEmpty()) break
-            val pageBytes = page.sumOf { (it.preview?.length ?: it.partsJson.length).toLong() }
-            if (!com.openminis.app.data.body.Admission.tryAdmit(pageBytes)) break
-            try {
-            for (msg in page) {
-                val newMsg = chatRepository.appendMessage(
-                    sessionId = new.id,
-                    role = msg.role,
-                    partsJson = msg.partsJson,
-                    tokenUsage = msg.tokenUsage,
-                    reasoningContent = msg.reasoningContent,
-                )
-                oldToNewId[msg.id] = newMsg.id
-                oldToNewSort[msg.id] = newMsg.sortOrder
+        var copiedMessages = 0
+        try {
+            while (offset < messageTotal) {
+                val page = chatRepository.dao.loadMessagesPage(sessionId, offset, 50)
+                if (page.isEmpty()) break
+                // [T-fork-admission-not-empty] 预算是进程级并发提示，不是「没有消息」。
+                // 以前 tryAdmit 失败直接 break：副本被静默截断，收尾日志却按源会话
+                // 总数宣称完整（同型缺陷见 ChatRepository.loadBoundedMessageRange 的
+                // 注释）。现在先等一小会儿，仍然挤不下就照常做这次**有界**复制。
+                val pageBytes = page.sumOf { (it.preview?.length ?: it.partsJson.length).toLong() }
+                val admitted = Admission.awaitAdmit(pageBytes)
+                if (!admitted) {
+                    AppLogger.warning(
+                        TAG,
+                        "duplicateSession: admission busy, copying the page without a reservation",
+                    )
+                }
+                try {
+                    for (msg in page) {
+                        // [T-fork-copy-body-ref] 逐条搬引用而不是搬体积：源行可能是
+                        // offload 后的展示 stub（`body stored (N bytes)`），走
+                        // appendMessage 会把 stub 当正文重新落库，副本里所有 >2KB 的
+                        // 正文永久丢失。copyMessageInto 原样搬 body_ref/body_sha/
+                        // body_bytes/preview，BodyStore 内容寻址，共享同一 sha 安全。
+                        val newMsg = chatRepository.copyMessageInto(
+                            targetSessionId = new.id,
+                            source = msg,
+                            tokenUsage = msg.tokenUsage,
+                            reasoningContent = msg.reasoningContent,
+                        )
+                        oldToNewId[msg.id] = newMsg.id
+                        oldToNewSort[msg.id] = newMsg.sortOrder
+                    }
+                    offset += page.size
+                    copiedMessages += page.size
+                } finally {
+                    if (admitted) Admission.release(pageBytes)
+                }
             }
-            offset += page.size
-            } finally {
-                com.openminis.app.data.body.Admission.release(pageBytes)
-            }
+        } catch (t: Throwable) {
+            // 半截副本比没有副本更糟：列表里多一个残缺会话，用户还以为复制成功。
+            // 回滚刚建的新会话再抛，与 AppSessionForkPort.createForkedSession 的
+            // 失败处置一致（删除会话顺带回收它独占的正文引用）。
+            runCatching { chatRepository.deleteSession(new.id) }
+            throw t
         }
 
         // [T-session-duplicate-compact-marker-android] Copy compact markers
@@ -181,9 +219,15 @@ class SessionForkManager(
             AppLogger.warning(TAG, "duplicateSession: workspace copy failed: ${it.message}")
         }
 
+        if (copiedMessages < messageTotal) {
+            AppLogger.warning(
+                TAG,
+                "duplicateSession: copied $copiedMessages/$messageTotal messages — the source changed while copying",
+            )
+        }
         AppLogger.info(
             TAG,
-            "duplicated session $sessionId → ${new.id} (${messageTotal} msgs, " +
+            "duplicated session $sessionId → ${new.id} ($copiedMessages/$messageTotal msgs, " +
                 "category=${source.category}, modelBinding=${source.modelBinding}, " +
                 "memoryEnabled=${source.memoryEnabled})",
         )

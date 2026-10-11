@@ -225,15 +225,37 @@ class McpServerCoreTest {
     }
 
     @Test
-    fun `buildHttpResponse emits status content length and cors`() {
+    fun `buildHttpResponse emits status content length and loopback-only cors`() {
         val http = McpServerCore.buildHttpResponse(
             McpServerCore.Response(200, """{"jsonrpc":"2.0"}"""),
         )
         assertTrue(http.startsWith("HTTP/1.1 200 OK\r\n"))
         assertTrue(http.contains("Content-Type: application/json"))
         assertTrue(http.contains("Content-Length: 17"))
-        assertTrue(http.contains("Access-Control-Allow-Origin: *"))
+        // [T-b1-mcp-cors] no Origin → no CORS grant at all (never `*`).
+        assertFalse(http.contains("Access-Control-Allow-Origin"))
         assertTrue(http.endsWith("\r\n\r\n" + """{"jsonrpc":"2.0"}"""))
+    }
+
+    @Test
+    fun `cors origin is echoed only for loopback origins`() {
+        val local = McpServerCore.buildHttpResponse(
+            McpServerCore.Response(200, "{}"), origin = "http://127.0.0.1:5173",
+        )
+        assertTrue(local.contains("Access-Control-Allow-Origin: http://127.0.0.1:5173"))
+        val named = McpServerCore.buildHttpResponse(
+            McpServerCore.Response(200, "{}"), origin = "http://localhost:3000",
+        )
+        assertTrue(named.contains("Access-Control-Allow-Origin: http://localhost:3000"))
+        // A page on any other host must not be able to read responses back.
+        val remote = McpServerCore.buildHttpResponse(
+            McpServerCore.Response(200, "{}"), origin = "https://evil.example",
+        )
+        assertFalse(remote.contains("Access-Control-Allow-Origin"))
+        // Unparseable / non-http origins are refused, not trusted.
+        assertNull(McpServerCore.loopbackCorsOrigin("null"))
+        assertNull(McpServerCore.loopbackCorsOrigin("file:///tmp/x.html"))
+        assertNull(McpServerCore.loopbackCorsOrigin(null))
     }
 
     @Test

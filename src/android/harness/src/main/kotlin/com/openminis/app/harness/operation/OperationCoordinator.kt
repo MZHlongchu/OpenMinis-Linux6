@@ -32,6 +32,9 @@ import kotlinx.serialization.json.Json
  * 与上游的差异只有接缝：`HarnessRuntimeRepository`（Room）收窄为
  * [OperationRuntimeRepository]，`SessionTreeStore.MAIN_LANE` 换成
  * [HarnessLanes.MAIN_LANE]（SessionTreeStore 属 2.4/2.5 闭包，尚未移植）。
+ *
+ * provider 轮与工具意图/落定的入口壳在 OperationCoordinatorTransitions（架构门行数帽拆出），
+ * 事务主体（[settle] / [transition]）仍在这里。
  */
 class OperationCoordinator(
     private val repository: OperationRuntimeRepository,
@@ -87,7 +90,9 @@ class OperationCoordinator(
         gate.withLaneMutex(sessionId, laneName) {
             var lane = repository.ensureLane(sessionId, laneName)
             lane.currentOperationId?.let { existingId ->
-                val existing = repository.findOperation(existingId)
+                // [T-b18-op-lookup-session-domain] lane 指针指向的 operation 必然与
+                // lane 同文件，单文件读即可（原来每次 beginRun 都要扫全目录解码）。
+                val existing = repository.findOperation(sessionId, existingId)
                 if (existing != null && existing.status != OperationStatus.SUSPENDED.id) return@withLaneMutex existingId
                 if (existing == null) {
                     repository.clearLaneOperation(sessionId, laneName)
@@ -106,107 +111,24 @@ class OperationCoordinator(
             operationId
         }
 
-    suspend fun providerIntent(operationId: String, effectId: String, round: Int, attempt: Int, maxAttempts: Int) {
-        transition(
-            operationId,
-            OperationStatus.RUNNING,
-            OperationSnapshot(
-                phase = OperationPhase.PROVIDER_INTENT.id,
-                round = round,
-                effectKind = "provider",
-                effectId = effectId,
-                reservedEntryId = effectId,
-                attempt = attempt,
-                maxAttempts = maxAttempts,
-            ),
-            ReplayPolicy.NEVER,
-        )
-        emitFor(operationId) { sessionId, timestamp, _ ->
-            HarnessEvent.ProviderRoundStarted(sessionId, timestamp, operationId, round, attempt)
-        }
-    }
-
-    suspend fun providerSettled(
-        operationId: String,
-        message: HarnessMessage?,
-        usage: HarnessUsageEntity? = null,
-        round: Int,
-    ) {
-        settle(
-            operationId = operationId,
-            message = message,
-            usage = usage,
-            snapshot = OperationSnapshot(phase = OperationPhase.PROVIDER_SETTLED.id, round = round),
-        )
-        emitFor(operationId) { sessionId, timestamp, _ ->
-            HarnessEvent.ProviderRoundSettled(
-                sessionId, timestamp, operationId, round,
-                entryId = message?.id,
-                inputTokens = usage?.inputTokens ?: 0,
-                outputTokens = usage?.outputTokens ?: 0,
-            )
-        }
-    }
-
-    suspend fun toolIntent(
-        operationId: String,
-        message: HarnessMessage,
-        payloadJson: String,
-        replay: ReplayPolicy,
-        round: Int,
-    ) {
-        val snapshot = OperationSnapshot(
-            phase = OperationPhase.TOOL_INTENT.id,
-            round = round,
-            effectKind = "tool",
-            effectId = message.id,
-            effectPayloadJson = payloadJson,
-            replayPolicy = replay.id,
-        )
-        settle(operationId, message, null, snapshot, replay)
-        emitFor(operationId) { sessionId, timestamp, _ ->
-            val toolCall = message as? ToolCall
-            HarnessEvent.ToolCallStarted(
-                sessionId, timestamp, operationId,
-                toolCallId = message.id,
-                toolName = toolCall?.rawToolName ?: "tool",
-            )
-        }
-    }
-
-    suspend fun toolSettled(operationId: String, message: HarnessMessage, round: Int, toolName: String? = null) {
-        settle(
-            operationId = operationId,
-            message = message,
-            usage = null,
-            snapshot = OperationSnapshot(phase = OperationPhase.TOOL_SETTLED.id, round = round),
-        )
-        emitFor(operationId) { sessionId, timestamp, _ ->
-            val result = message as? ToolResult
-            HarnessEvent.ToolCallSettled(
-                sessionId, timestamp, operationId,
-                toolCallId = result?.toolCallId ?: message.id,
-                toolName = toolName ?: "tool",
-                success = result?.success ?: true,
-                durationMs = result?.durationMs,
-            )
-        }
-    }
-
-    suspend fun waitingApproval(operationId: String) {
-        val current = requireOperation(operationId)
+    /**
+     * [T-b18-op-lookup-session-domain] sessionId 可选：带上它，[requireOperation] /
+     * [emitFor] 只读该会话的台账文件（单文件）；不带则退化成跨会话扫描（老语义）。
+     */
+    suspend fun waitingApproval(operationId: String, sessionId: String? = null) {
+        val current = requireOperation(operationId, sessionId)
         val snapshot = decode(current).copy(phase = OperationPhase.WAITING_APPROVAL.id)
-        transition(operationId, OperationStatus.WAITING_APPROVAL, snapshot, current.replayPolicy?.let(::replayPolicy))
+        transition(operationId, OperationStatus.WAITING_APPROVAL, snapshot, current.replayPolicy?.let(::replayPolicy), sessionId)
     }
 
-    suspend fun suspendOperation(operationId: String, reason: String) {
-        val current = requireOperation(operationId)
+    suspend fun suspendOperation(operationId: String, reason: String, sessionId: String? = null) {
+        val current = requireOperation(operationId, sessionId)
         // 状态 JSON 可能已损坏（半截写入）；损坏时保留原 stateJson、只更新 lastError 不可行
         // （snapshot 序列化字段固定），因此降级为携带 reason 的最小快照，保证挂起事务总能落盘。
         val snapshot = runCatching { decode(current) }
             .getOrElse { OperationSnapshot(phase = current.phase, lastError = reason) }
             .copy(lastError = reason)
-        transition(operationId, OperationStatus.SUSPENDED, snapshot, current.replayPolicy?.let(::replayPolicy))
+        transition(operationId, OperationStatus.SUSPENDED, snapshot, current.replayPolicy?.let(::replayPolicy), sessionId)
     }
 
     /**
@@ -256,7 +178,8 @@ class OperationCoordinator(
         // lane 指针是权威来源：优先取 currentOperationId 指向的操作，
         // 避免历史遗留的活动行（如等待审批期间被接管的旧操作）抢占判定。
         val lane = repository.findLane(sessionId, laneName) ?: return null
-        lane.currentOperationId?.let { id -> repository.findOperation(id)?.let { return it } }
+        // [T-b18-op-lookup-session-domain] 指针与 lane 同文件，单文件读。
+        lane.currentOperationId?.let { id -> repository.findOperation(sessionId, id)?.let { return it } }
         return repository.listActiveOperations(sessionId).firstOrNull { it.laneName == laneName }
     }
 
@@ -272,7 +195,9 @@ class OperationCoordinator(
     private suspend fun reclaimInterruptedLane(sessionId: String, laneName: String): HarnessLaneEntity {
         val lane = repository.ensureLane(sessionId, laneName)
         val staleOperationId = lane.currentOperationId ?: return lane
-        val staleOperation = repository.findOperation(staleOperationId)
+        // [T-b18-op-lookup-session-domain] 与 beginRun 同理：lane 指针只可能指向
+        // 本会话文件里的 operation，单文件读即可。
+        val staleOperation = repository.findOperation(sessionId, staleOperationId)
         return when {
             // 悬空指针（没有活操作行）：直接清掉。
             staleOperation == null -> {
@@ -314,14 +239,16 @@ class OperationCoordinator(
         createdAt = System.currentTimeMillis(),
     )
 
-    private suspend fun settle(
+    /** 转移事务主体；[OperationCoordinatorTransitions] 的入口壳与锁内路径共用。 */
+    internal suspend fun settle(
         operationId: String,
         message: HarnessMessage?,
         usage: HarnessUsageEntity?,
         snapshot: OperationSnapshot,
         replay: ReplayPolicy? = null,
+        sessionId: String? = null,
     ) {
-        val current = requireOperation(operationId)
+        val current = requireOperation(operationId, sessionId)
         val lane = repository.findLane(current.sessionId, current.laneName)
             ?: error("Missing lane ${current.laneName}")
         val entry = message?.let { messageEntry(current.sessionId, lane.leafId, it) }
@@ -339,13 +266,14 @@ class OperationCoordinator(
         repository.settleEffect(entry, usage, next, lane.copy(leafId = entry?.id ?: lane.leafId, updatedAt = now))
     }
 
-    private suspend fun transition(
+    internal suspend fun transition(
         operationId: String,
         status: OperationStatus,
         snapshot: OperationSnapshot,
         replay: ReplayPolicy?,
+        sessionId: String? = null,
     ) {
-        val current = requireOperation(operationId)
+        val current = requireOperation(operationId, sessionId)
         repository.saveOperation(
             current.copy(
                 status = status.id,
@@ -360,15 +288,29 @@ class OperationCoordinator(
         )
     }
 
-    private suspend fun requireOperation(operationId: String) =
-        repository.findOperation(operationId) ?: error("Missing harness operation $operationId")
+    internal suspend fun requireOperation(operationId: String, sessionId: String? = null) =
+        findOperation(operationId, sessionId) ?: error("Missing harness operation $operationId")
+
+    /**
+     * [T-b18-op-lookup-session-domain] 带 sessionId 时先走会话域单文件读——这是
+     * 每个工具轮 8 次查找的热路径，原先每次都要「扫全目录 + 解码每个会话文件」。
+     * 会话域未命中才退化成跨会话扫描：调用方给的 sessionId 与台账行不一致时
+     * 语义与改动前完全一致（宁可慢一次，也不静默丢掉一次转移）。
+     */
+    internal suspend fun findOperation(operationId: String, sessionId: String?): HarnessOperationEntity? {
+        if (sessionId != null) {
+            repository.findOperation(sessionId, operationId)?.let { return it }
+        }
+        return repository.findOperation(operationId)
+    }
 
     /** 从 operation 行补齐事件路由键；operation 已被清理时静默跳过（事件尽力投递）。 */
-    private suspend fun emitFor(
+    internal suspend fun emitFor(
         operationId: String,
+        sessionId: String? = null,
         build: (sessionId: String, timestamp: Long, laneName: String) -> HarnessEvent,
     ) {
-        val operation = repository.findOperation(operationId) ?: return
+        val operation = findOperation(operationId, sessionId) ?: return
         eventBus.emit(build(operation.sessionId, System.currentTimeMillis(), operation.laneName))
     }
 

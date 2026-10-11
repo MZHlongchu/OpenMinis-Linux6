@@ -212,6 +212,32 @@ val z = 1"""
         assertTrue("Expected failure (multiple non-unique matches)", result is TextReplacers.Result.Failure)
     }
 
+    // ── [T-anchor-pure-run] 整行同标点的锚线（```/###/***/...）──
+
+    @Test
+    fun purePunctuationFenceLineKeepsLineTrimmedLevelAlive() {
+        // 围栏行以前在 anchorToken 里走 substring(run, 0) 抛
+        // StringIndexOutOfBoundsException，被 FileEditTool 吞成误导性的
+        // "begin/end" 报错；现在必须能正常走 line-trimmed 层级。
+        val content = "```\nval x = 1\n```\n"
+        val result = TextReplacers.replace(content, "   val x = 1   ", "val x = 2")
+        assertTrue("裸围栏内容必须走通 line-trimmed", result is TextReplacers.Result.Success)
+        assertEquals("```\nval x = 2\n```\n", (result as TextReplacers.Result.Success).newContent)
+    }
+
+    @Test
+    fun purePunctuationFenceReachesBlockAnchorLevel() {
+        // 正文漂移使 exact / line-trimmed 都不成立时，由 block-anchor 兜住：
+        // 开/闭围栏都是纯分隔行，两者的锚 token 必须相等。
+        val content = "top\n```\nold body\n```\nbottom\n"
+        val result = TextReplacers.replace(content, "```\nnew body\n```", "```\nfresh body\n```")
+        assertTrue("裸围栏块必须走通 block-anchor", result is TextReplacers.Result.Success)
+        assertEquals(
+            "top\n```\nfresh body\n```\nbottom\n",
+            (result as TextReplacers.Result.Success).newContent
+        )
+    }
+
     // ── [T-crlf-cross] CRLF files edited with LF patterns ──
 
     @Test

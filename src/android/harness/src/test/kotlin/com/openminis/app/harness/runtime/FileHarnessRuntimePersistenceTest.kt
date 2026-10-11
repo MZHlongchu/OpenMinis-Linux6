@@ -6,6 +6,8 @@ import com.openminis.app.harness.model.HarnessLaneResultEntity
 import com.openminis.app.harness.model.HarnessOperationEntity
 import java.io.File
 import java.nio.file.Files
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -115,5 +117,58 @@ class FileHarnessRuntimePersistenceTest {
     private fun firstFileName(root: File): String {
         val names = root.listFiles { f -> f.name.endsWith(".json") }!!.map { it.name }
         return names.first()
+    }
+
+    // ─── [T-b18-op-lookup-session-domain] 会话域查询 + 每会话锁 ──────────────
+
+    @Test
+    fun `session-scoped operation lookup stays inside that session file`() = runBlocking {
+        val p = persistence()
+        val lane = p.ensureLane("s1", "main")
+        p.beginOperation(lane.copy(currentOperationId = "op1"), operation("op1", sessionId = "s1"))
+        val other = p.ensureLane("s2", "main")
+        p.beginOperation(other.copy(currentOperationId = "op2"), operation("op2", sessionId = "s2"))
+
+        // 会话域：只认自己那本账
+        assertEquals("op1", p.findOperation("s1", "op1")!!.id)
+        assertNull(p.findOperation("s2", "op1"))
+        assertNull(p.findOperation("s1", "op2"))
+        // 跨会话扫描仍然能找到（恢复期只有 operationId 的路径靠它）
+        assertEquals("op1", p.findOperation("op1")!!.id)
+        assertEquals("op2", p.findOperation("op2")!!.id)
+    }
+
+    @Test
+    fun `concurrent writers on one session do not lose updates`() = runBlocking {
+        val p = persistence()
+        p.ensureLane("s1", "main")
+        val writers = (1..32).map { i ->
+            launch(Dispatchers.Default) { p.appendToLane("s1", "main", entry("e$i", null)) }
+        }
+        writers.forEach { it.join() }
+
+        for (i in 1..32) {
+            assertEquals("entry e$i must survive the concurrent rewrites", "e$i", p.findEntry("s1", "e$i")?.id)
+        }
+    }
+
+    @Test
+    fun `concurrent writers across sessions keep both files intact`() = runBlocking {
+        val p = persistence()
+        p.ensureLane("s1", "main")
+        p.ensureLane("s2", "main")
+        val writers = buildList {
+            (1..16).forEach { i ->
+                add(launch(Dispatchers.Default) { p.appendToLane("s1", "main", entry("a$i", null, "s1")) })
+                add(launch(Dispatchers.Default) { p.appendToLane("s2", "main", entry("b$i", null, "s2")) })
+            }
+        }
+        writers.forEach { it.join() }
+
+        for (i in 1..16) {
+            assertEquals("a$i", p.findEntry("s1", "a$i")?.id)
+            assertEquals("b$i", p.findEntry("s2", "b$i")?.id)
+        }
+        assertNull(p.findEntry("s1", "b1"))
     }
 }

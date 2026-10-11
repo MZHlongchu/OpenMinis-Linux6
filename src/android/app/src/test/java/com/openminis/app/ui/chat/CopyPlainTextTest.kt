@@ -115,4 +115,65 @@ class CopyPlainTextTest {
         val md = "# Title\n\nSome **bold** text."
         assertFalse(plain(md) == md)
     }
+
+    // ─── [T-b10-copy-inline-emphasis-flanking] Identifiers survive a Copy ──
+    //
+    // The `_`/`*` emphasis rules used to fire on any pairing delimiter, so
+    // copying a reply containing `last_mouse_click_ms` produced
+    // `lastmouse_click_ms` — characters silently deleted from the clipboard
+    // payload. Flanking conditions (outer side line-start/whitespace/punctuation)
+    // keep such identifiers intact.
+
+    @Test
+    fun `snake_case identifiers keep every underscore`() {
+        val out = plain("Set last_mouse_click_ms and open my_file_name.kt")
+        assertTrue("underscores kept, got: $out", out.contains("last_mouse_click_ms"))
+        assertTrue("filename kept, got: $out", out.contains("my_file_name.kt"))
+    }
+
+    @Test
+    fun `intraword asterisks are not eaten as emphasis`() {
+        val out = plain("a*b*c and 2 * 3 * 4")
+        assertTrue("got: $out", out.contains("a*b*c"))
+        assertTrue("multiplication kept, got: $out", out.contains("2 * 3 * 4"))
+    }
+
+    @Test
+    fun `genuine emphasis is still stripped`() {
+        val out = plain("Some *italic*, _also italic_, **bold** and ~~struck~~.")
+        assertTrue("got: $out", out.contains("italic"))
+        assertTrue("got: $out", out.contains("also italic"))
+        assertTrue("got: $out", out.contains("bold"))
+        assertTrue("got: $out", out.contains("struck"))
+        assertFalse("no asterisks left, got: $out", out.contains("*"))
+        assertFalse("no underscores left, got: $out", out.contains("_"))
+        assertFalse("no tildes left, got: $out", out.contains("~"))
+    }
+
+    // ─── [T-b10-copy-inline-code-literal] Code spans stay literal ─────────
+
+    @Test
+    fun `inline code content is copied verbatim`() {
+        // The backticks go away (they are markers), but the body must not be
+        // re-interpreted: `_`/`*` inside a span are literal by definition, and
+        // a link-looking span must not lose its brackets to the link rule.
+        val out = plain("Run `last_mouse_click_ms` then `[text](url)`")
+        assertTrue("underscores kept, got: $out", out.contains("last_mouse_click_ms"))
+        assertTrue("brackets kept, got: $out", out.contains("[text](url)"))
+        assertFalse("backticks dropped, got: $out", out.contains("`"))
+    }
+
+    @Test
+    fun `rich text does not italicize identifiers`() {
+        val html = MarkdownClipboard.markdownToHtml("Call last_mouse_click_ms and a*b*c")
+        assertFalse("no bogus <em>, got: $html", html.contains("<em>"))
+        assertTrue("identifier kept, got: $html", html.contains("last_mouse_click_ms"))
+    }
+
+    @Test
+    fun `rich text keeps a code span literal`() {
+        val html = MarkdownClipboard.markdownToHtml("Run `last_mouse_click_ms` now")
+        assertTrue("code span kept, got: $html", html.contains("<code>last_mouse_click_ms</code>"))
+        assertFalse("no emphasis inside code, got: $html", html.contains("<em>"))
+    }
 }

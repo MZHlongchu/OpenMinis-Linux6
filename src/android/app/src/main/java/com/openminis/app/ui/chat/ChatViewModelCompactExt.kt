@@ -421,7 +421,7 @@ private inline fun ChatViewModel.compactAllImpl(
         // and drains through the normal stream-slot machinery — no new
         // reentrancy path. Runs after `finally` so isCompacting is already
         // false. Mirrors the iOS fix for the same report.
-        if (compactSucceeded && _promptQueue.value.isNotEmpty()) {
+        if (compactSucceeded && _promptQueue.value.any { !it.shelved }) { // [T-b18-resume-queue-shelved-guard] 全搁置队列不算待办
             AppLogger.info(ChatViewModel.TAG, "[Compact] success with ${_promptQueue.value.size} queued prompt(s) — kicking drain")
             resumeQueueAfterCancel()
         }

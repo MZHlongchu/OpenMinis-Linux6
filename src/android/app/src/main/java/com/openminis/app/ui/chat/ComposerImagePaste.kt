@@ -28,13 +28,25 @@ import androidx.compose.ui.platform.TextToolbarStatus
  */
 object ComposerImagePaste {
 
-    /** Wrap [delegate] so its Paste action tries [pasteImage] first. */
-    fun toolbar(delegate: TextToolbar, pasteImage: () -> Boolean): TextToolbar =
-        PasteInterceptingTextToolbar(delegate, pasteImage)
+    /**
+     * Wrap [delegate] so its Paste action tries the image path first.
+     *
+     * [hasImageClip] is the cheap clipboard-description probe: it runs on the
+     * UI thread while the menu item is handled and must return synchronously.
+     * [pasteImage] performs the byte copy and is expected to dispatch that
+     * work off the UI thread itself — [T-b1-paste-io] the whole image used to
+     * be read, written to a temp file and re-staged inside this click.
+     */
+    fun toolbar(
+        delegate: TextToolbar,
+        hasImageClip: () -> Boolean,
+        pasteImage: () -> Unit,
+    ): TextToolbar = PasteInterceptingTextToolbar(delegate, hasImageClip, pasteImage)
 
     private class PasteInterceptingTextToolbar(
         private val delegate: TextToolbar,
-        private val pasteImage: () -> Boolean,
+        private val hasImageClip: () -> Boolean,
+        private val pasteImage: () -> Unit,
     ) : TextToolbar {
 
         override val status: TextToolbarStatus
@@ -51,10 +63,9 @@ object ComposerImagePaste {
                 {
                     // Image wins: a clip carrying an image is a copy-image
                     // gesture. Text riding in the same clip is deliberately
-                    // not co-pasted. When no image is present (or the copy
-                    // failed because the clip was overwritten), the normal
-                    // text paste runs.
-                    if (!pasteImage()) fallback()
+                    // not co-pasted. With no image in the clipboard the normal
+                    // text paste runs — synchronously, exactly as before.
+                    if (hasImageClip()) pasteImage() else fallback()
                 }
             }
             delegate.showMenu(rect, onCopyRequested, interceptedPaste, onCutRequested, onSelectAllRequested)

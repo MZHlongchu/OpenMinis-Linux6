@@ -1083,39 +1083,11 @@ fun ChatScreen(
         }
     }
 
-    // Android system permission launcher for agent tools (e.g. location).
-    //
-    // The launcher's `results` map can't be trusted alone: on several Android
-    // versions `RequestMultiplePermissions` returns an empty map (or `false`
-    // entries) for permissions that were already granted and thus didn't need
-    // a dialog. Re-query the live permission state via checkSelfPermission to
-    // decide success — this is what actually matters to the caller.
-    val currentPermissionsRef = remember { mutableStateOf<Array<String>>(emptyArray()) }
-    val androidPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { _ ->
-        val perms = currentPermissionsRef.value
-        val grantedNow = perms.isNotEmpty() && perms.any { p ->
-            ContextCompat.checkSelfPermission(context, p) == PackageManager.PERMISSION_GRANTED
-        }
-        OffloadPermissionManager.respondToAndroidPermission(grantedNow)
-    }
-    val pendingAndroidPermission by OffloadPermissionManager.pendingAndroidPermission.collectAsState()
-    LaunchedEffect(pendingAndroidPermission) {
-        val req = pendingAndroidPermission ?: return@LaunchedEffect
-        val perms = req.permissions.toTypedArray()
-        // Short-circuit when everything's already granted — some OEM builds
-        // launch a no-op dialog that still flashes on screen otherwise.
-        val alreadyGranted = perms.isNotEmpty() && perms.any { p ->
-            ContextCompat.checkSelfPermission(context, p) == PackageManager.PERMISSION_GRANTED
-        }
-        if (alreadyGranted) {
-            OffloadPermissionManager.respondToAndroidPermission(true)
-            return@LaunchedEffect
-        }
-        currentPermissionsRef.value = perms
-        androidPermissionLauncher.launch(perms)
-    }
+    // [T-android-prompt-launch-ledger] 系统运行时权限对话框**不再由聊天页驱动**：
+    // MainActivity 的 AndroidPermissionDialogBridge 是唯一驱动方（按 launch 记账，一次只有
+    // 一个在飞）。这里原有一份 rememberLauncherForActivityResult + LaunchedEffect 会和 Activity
+    // 那份为同一张提示各弹一次系统对话框，而且判据是 `any`（多权限里只要有一个已授予就回
+    // GRANTED）—— 两者都已删除。
 
     val tagScroll = "ChatScrollFollow"
     // Scroll wrappers used by every code path that mutates the LazyColumn
@@ -5916,10 +5888,27 @@ fun ChatScreen(
                         // in clipboard → attach; otherwise normal text paste.
                         // Replaces the old always-visible paste chip.
                         val composerDefaultToolbar = androidx.compose.ui.platform.LocalTextToolbar.current
-                        val imagePasteToolbar = remember(composerDefaultToolbar) {
-                            com.openminis.app.ui.chat.ComposerImagePaste.toolbar(composerDefaultToolbar) {
-                                com.openminis.app.ui.chat.ClipboardImagePaste.paste(context, viewModel)
-                            }
+                        val imagePasteToolbar = remember(composerDefaultToolbar, context) {
+                            com.openminis.app.ui.chat.ComposerImagePaste.toolbar(
+                                delegate = composerDefaultToolbar,
+                                // Probe only — reads the clip DESCRIPTION, never
+                                // the bytes, so the menu stays responsive.
+                                hasImageClip = {
+                                    com.openminis.app.ui.chat.ClipboardImagePaste.currentImageUri(context) != null
+                                },
+                                // [T-b1-paste-io] The full clipboard-image copy
+                                // (content URI → cache temp file → durable
+                                // `cache/share_inbound`) used to run inside this
+                                // click on the UI thread. Keep the probe
+                                // synchronous and hand the IO to Dispatchers.IO.
+                                pasteImage = {
+                                    coroutineScope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            com.openminis.app.ui.chat.ClipboardImagePaste.paste(context, viewModel)
+                                        }
+                                    }
+                                },
+                            )
                         }
                         androidx.compose.runtime.CompositionLocalProvider(
                             androidx.compose.ui.platform.LocalTextToolbar provides imagePasteToolbar,

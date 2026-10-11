@@ -72,6 +72,7 @@
     <string name="resume_action">Fortfahren</string>
     <string name="search_chats_placeholder">Unterhaltungen suchen…</string>
     <string name="search_no_results">Keine Treffer für \"%1$s\"</string>
+    <string name="search_truncated_notice">Nur die %1$d neuesten Treffer werden angezeigt – grenzen Sie die Suche ein.</string>
     <string name="stop_tool">Tool stoppen</string>
     <string name="mic_permission_title">Mikrofon-Berechtigung erforderlich</string>
     <string name="mic_permission_message">Spracheingabe benötigt die Mikrofon-Berechtigung. Tippe auf Einstellungen öffnen, um sie für Minis Ultra zu erlauben.</string>

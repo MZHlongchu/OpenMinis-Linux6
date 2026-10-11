@@ -3,10 +3,12 @@ package com.openminis.app.ui.chat
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.LayoutCoordinates
@@ -168,12 +170,12 @@ class SelectionController {
     }
 
     /**
-     * [T-android-markdown-table-copy-actions] Table actions for the message
-     * currently under selection, so the SINGLE selection toolbar can append
+     * [T-android-markdown-table-copy-actions] Table actions for the table the
+     * selection is inside, so the SINGLE selection toolbar can append
      * "Copy Table" / "Copy Table Image" alongside Copy / Copy Markdown / etc.
      * (instead of the table rendering a second, separate popup). A
-     * [RenderTable] publishes its [TableActions] keyed by messageId while it's
-     * composed; the toolbar reads them for the selected message.
+     * [RenderTable] publishes its [TableActions] while it's composed; the
+     * toolbar reads them for the selected table.
      *
      * [copyTableMarkdown] returns the table's exact markdown source.
      * [copyTableImage] captures + clipboards the rendered table bitmap.
@@ -181,29 +183,91 @@ class SelectionController {
     class TableActions(
         val copyTableMarkdown: () -> Unit,
         val copyTableImage: () -> Unit,
+        /**
+         * Rendered text of every cell of THIS table, used to tell two tables
+         * apart when they share one shard. A frozen message coalesces its
+         * markdown fragments ([coalesceMarkdownFragments]), so two tables can
+         * legitimately register under the SAME shardId — the cell the user
+         * selected then identifies which of them owns the selection.
+         * [T-b10-table-actions-per-table]
+         */
+        val cellTexts: Set<String> = emptySet(),
     )
 
+    /**
+     * Two-level registry: messageId → (table identity → actions). A single
+     * reply can render several tables, each composing/disposing on its own (a
+     * distinct LazyColumn row per markdown fragment), so the previous
+     * messageId-only key made the last-composed table win and let the first
+     * table's dispose delete the other's registration — "Copy Table" then
+     * copied the wrong table, and a button could vanish without ever coming
+     * back. [T-b10-table-actions-per-table]
+     *
+     * The inner key is the table's stable identity, the same
+     * `"<messageId>/<shardId>/tbl:<headers>"` string [RenderTable] uses for its
+     * horizontal-scroll state.
+     */
     private val tableActionsByMessage =
-        androidx.compose.runtime.mutableStateMapOf<String, TableActions>()
+        mutableStateMapOf<String, SnapshotStateMap<String, TableActions>>()
 
-    /** Publish a table's actions for [messageId] (called while it's composed). */
-    fun rememberTableActions(messageId: String, actions: TableActions) {
-        tableActionsByMessage[messageId] = actions
+    /** Publish a table's actions for ([messageId], [tableId]) while it's composed. */
+    fun rememberTableActions(messageId: String, tableId: String, actions: TableActions) {
+        val tables = tableActionsByMessage[messageId]
+            ?: mutableStateMapOf<String, TableActions>().also { tableActionsByMessage[messageId] = it }
+        tables[tableId] = actions
     }
 
-    /** Drop a table's actions when it leaves composition. */
-    fun forgetTableActions(messageId: String) {
-        tableActionsByMessage.remove(messageId)
+    /** Drop ONE table's actions when it leaves composition. */
+    fun forgetTableActions(messageId: String, tableId: String) {
+        val tables = tableActionsByMessage[messageId] ?: return
+        tables.remove(tableId)
+        // Don't leave an empty entry behind per message.
+        if (tables.isEmpty()) tableActionsByMessage.remove(messageId)
     }
 
     /**
-     * Table actions for the message under the active single-message selection,
-     * or null when there's no selection, it spans messages, or that message has
-     * no table composed.
+     * Table actions for the table under the active single-message selection,
+     * or null when there's no selection, it spans messages, or no table can be
+     * identified for the selected shard.
      */
-    fun selectionTableActions(): TableActions? {
+    fun selectionTableActions(): TableActions? =
+        resolveTableActions { shardId -> shards[shardId]?.plainText }
+
+    /**
+     * [T-b10-table-actions-per-table] Resolution rule, with the endpoint's
+     * displayed text injected so it can be exercised without a composed shard.
+     *
+     * The selection's shard names the table in the usual case (one table per
+     * markdown fragment), so the lookup goes shard-first — the old messageId
+     * lookup returned whichever table registered last, silently copying the
+     * wrong table. Two tables CAN share one fragment (a frozen message
+     * coalesces its paragraphs, and a table is not a split boundary), and then
+     * the shardId is identical for both: the cell text the user selected
+     * decides, and only when exactly one table claims it. Anything else
+     * returns null — no buttons is better than copying the wrong table.
+     */
+    internal fun resolveTableActions(cellTextOf: (TextShardId) -> String?): TableActions? {
+        val sel = selection.value ?: return null
         val msgId = singleMessageId() ?: return null
-        return tableActionsByMessage[msgId]
+        val tables = tableActionsByMessage[msgId] ?: return null
+        if (tables.isEmpty()) return null
+        // 表格单元格是 shard 内的 MdText，其 shardId 带 "#<子序号>" 后缀
+        // (StreamingMarkdownMdText)，所以先按原样匹配、再按去掉后缀的根 shard
+        // 匹配；跨 shard 选区只要有一端落在某张表里就用那张表。
+        for (endpoint in listOf(sel.start.shard, sel.end.shard)) {
+            tables.entries.firstOrNull { it.key.startsWith("$msgId/${endpoint.shardId}/tbl:") }
+                ?.let { return it.value }
+            val root = shardIdRoot(endpoint.shardId)
+            if (root == endpoint.shardId) continue
+            val candidates = tables.entries.filter { it.key.startsWith("$msgId/$root/tbl:") }
+            if (candidates.isEmpty()) continue
+            if (candidates.size == 1) return candidates.first().value
+            // 同一 fragment 里有多张表：由该单元格的渲染文本认领，且必须唯一。
+            val cellText = cellTextOf(endpoint) ?: return null
+            val claimed = candidates.filter { cellText in it.value.cellTexts }
+            return if (claimed.size == 1) claimed.first().value else null
+        }
+        return null
     }
 
     /**
@@ -227,13 +291,83 @@ class SelectionController {
      */
     private val shards = mutableStateMapOf<TextShardId, TextShard>()
 
+    /**
+     * [T-cross-shard-copy-docmap-char-budget] 表内分片文本的字符总数，用于
+     * [MAX_DOCUMENT_CHARS] 的淘汰记账（与 [MAX_DOCUMENT_SHARDS] 的条数上限并存）。
+     */
+    private var documentTextChars = 0
+
+    /**
+     * [T-cross-shard-copy-recycled] 文档级 plainText 表：**[register] 写入，
+     * [unregister] 不删**。
+     *
+     * 跨分片复制（Copy / 加入输入框 / 朗读）恰恰发生在端点分片被 LazyColumn 回收
+     * 之后。旧实现只认当前注册的分片：首分片一回收，`started` 恒为 false，中间分片
+     * 被整段跳过而末分片仍被无条件追加 → 只复制出末分片的半截前缀；两端都回收时
+     * 直接复制出空串（静默 no-op，比审计描述更糟）。
+     *
+     * accessOrder 的 LinkedHashMap 兼作 LRU：表的规模随「用户滚过的分片数」增长，
+     * 超过 [MAX_DOCUMENT_SHARDS] 条**或** [MAX_DOCUMENT_CHARS] 字符时淘汰最久未读取
+     * 的条目，避免长会话把已回收分片的文本一直攒在内存里。
+     */
+    private val documentTextMap = object : LinkedHashMap<TextShardId, String>(64, 0.75f, true) {
+        /**
+         * 条数上限与**字符预算**同时收口在这里，两条不变式：
+         *  - `size > 1` 才淘汰：与 MarkdownParseCaches.Lru 同一条不变式 —— 单条超大
+         *    分片（巨段落）必须留在表里，否则端点落在它里面时，跨分片复制在它被
+         *    LazyColumn 回收后就再也取不到文本；
+         *  - 淘汰的是最久未读的条目（accessOrder），刚注册 / 复制刚读过的分片总是
+         *    最后被淘汰。
+         */
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<TextShardId, String>,
+        ): Boolean {
+            if (size <= 1) return false
+            val over = size > MAX_DOCUMENT_SHARDS || documentTextChars > MAX_DOCUMENT_CHARS
+            if (over) documentTextChars -= eldest.value.length
+            return over
+        }
+    }
+
     fun register(shard: TextShard) {
         shards[shard.id] = shard
+        rememberShardText(shard.id, shard.plainText)
     }
 
     fun unregister(id: TextShardId) {
+        // [T-cross-shard-copy-recycled] 只摘掉注册项；文本留在 documentTextMap 里
+        // ——否则端点分片一被回收，跨分片复制就再也取不到它的文本。
         shards.remove(id)
     }
+
+    /**
+     * [T-cross-shard-copy-recycled] [register] 的「文本半边」，单独开出来是因为
+     * 「分片已被回收、只剩文本」正是跨分片复制要处理的状态（那时没有 TextShard /
+     * TextLayoutResult 可注册）；JVM 单测也据此覆盖这条路径。
+     */
+    internal fun rememberShardText(id: TextShardId, text: String) {
+        if (text.isEmpty()) return
+        // [T-cross-shard-copy-docmap-char-budget] 覆盖写（分片重新挂载、文本变长）
+        // 时先扣掉旧值，记账才与表内容一致。
+        documentTextMap[id]?.let { documentTextChars -= it.length }
+        documentTextChars += text.length
+        documentTextMap[id] = text
+    }
+
+    /** [T-cross-shard-copy-recycled] 分片文本：注册中的实例 → 文档级表 → 调用方注册表。 */
+    private fun textOf(id: TextShardId, documentRegistry: Map<TextShardId, String>): String? =
+        shards[id]?.plainText ?: documentTextMap[id] ?: documentRegistry[id]
+
+    /** [T-cross-shard-copy-recycled] 有文本可用的分片：注册中的 + 回收后留在表里的。 */
+    private fun knownShardIds(): List<TextShardId> =
+        if (documentTextMap.isEmpty()) {
+            shards.keys.toList()
+        } else {
+            LinkedHashSet<TextShardId>(shards.size + documentTextMap.size).apply {
+                addAll(shards.keys)
+                addAll(documentTextMap.keys)
+            }.toList()
+        }
 
     /** Read-only snapshot of currently-composed shards. */
     internal fun currentShards(): Map<TextShardId, TextShard> = shards
@@ -832,6 +966,18 @@ class SelectionController {
         if (ka != null && kb != null && a.shard.messageId == b.shard.messageId) {
             return if (ka <= kb) a to b else b to a
         }
+        // [T-cross-shard-copy-recycled] 同一个块内的两个子分片
+        // (`text:<blockId>#<sub>` / `mdblock:…:<idx>#<sub>`) 也有确定的文档序：
+        // 块 id 不是数字时 [shardOrderKey] 取不到键，但同根之下子序号就是文档序。
+        // 少了这条，端点分片一旦被回收，`selectedPlainText` 就落进「只有已注册分片
+        // 才可用」的兜底，复制结果被截断成末分片的半截前缀。
+        if (a.shard.messageId == b.shard.messageId &&
+            shardIdRoot(a.shard.shardId) == shardIdRoot(b.shard.shardId)
+        ) {
+            val sa = shardSubIndex(a.shard.shardId)
+            val sb = shardSubIndex(b.shard.shardId)
+            if (sa != null && sb != null) return if (sa <= sb) a to b else b to a
+        }
         val sA = shards[a.shard] ?: return null
         val sB = shards[b.shard] ?: return null
         val yA = sA.positionInWindow().y
@@ -840,11 +986,14 @@ class SelectionController {
     }
 
     /**
-     * Build the plain-text string covered by the active selection. Shards
-     * not currently composed are still included via [TextShard.plainText]
-     * lookups — but cross-message selections can only contain shards we've
-     * seen at least once. (In practice every shard in a sane selection will
-     * have been registered at the moment the user dragged across it.)
+     * Build the plain-text string covered by the active selection.
+     *
+     * [T-cross-shard-copy-recycled] Shards not currently composed are served by
+     * the controller's document-level table (every shard that ever registered),
+     * so an endpoint that LazyColumn recycled no longer truncates or empties
+     * the copy. The explicit fallback chain — shard walk → message-markdown
+     * slice → collapsed substring — exists so that Copy never silently yields
+     * an empty string.
      */
     fun selectedPlainText(documentRegistry: Map<TextShardId, String> = emptyMap()): String {
         val sel = selection.value ?: return ""
@@ -860,7 +1009,9 @@ class SelectionController {
         // single-shard recycle), keep the original collapsed substring.
         val ordered = orderedEndpoints(sel) ?: run {
             val walked = crossShardSelectedText(sel.start, sel.end, documentRegistry)
-            return walked.ifEmpty { collapsedFallback(sel) }
+            return walked.ifEmpty {
+                markdownSliceFallback(sel.start, sel.end, documentRegistry) ?: collapsedFallback(sel)
+            }
         }
         val (first, last) = ordered
 
@@ -869,15 +1020,19 @@ class SelectionController {
         // shard selection is a normal short/partial-paragraph copy and must
         // stay an exact substring.
         if (first.shard == last.shard) {
-            val txt = shards[first.shard]?.plainText
-                ?: documentRegistry[first.shard]
-                ?: return ""
+            // [T-cross-shard-copy-gap-notice] 文本取不到（分片被回收 + documentTextMap
+            // 的 LRU 淘汰 + 调用方注册表也没有）时不再静默返回空串：空串会让
+            // 「复制」变成一次无声的 no-op（toast 都不弹），用户以为复制成功。
+            val txt = textOf(first.shard, documentRegistry) ?: return unavailableShardNotice(1)
             val a = first.charOffset.coerceIn(0, txt.length)
             val b = last.charOffset.coerceIn(0, txt.length)
             return txt.substring(minOf(a, b), maxOf(a, b))
         }
 
-        return crossShardSelectedText(first, last, documentRegistry)
+        val walked = crossShardSelectedText(first, last, documentRegistry)
+        return walked.ifEmpty {
+            markdownSliceFallback(first, last, documentRegistry) ?: collapsedFallback(sel)
+        }
     }
 
     /**
@@ -885,10 +1040,11 @@ class SelectionController {
      * cross-shard selection, bounded to the selection — never the whole
      * message.
      *
-     * Primary path: the per-shard walk over registered [MdText] shards, sliced
-     * at both endpoints. That is exact for the common case (selection spans
-     * paragraphs / headings / list items, all of which ARE shards — Jackson's
-     * report).
+     * [T-cross-shard-copy-recycled] 两个端点分片**单独取片**（文本可来自文档级表，
+     * 即分片已被回收也能取到），中间分片按 [selectionSpanInDocumentOrder] 的文档序
+     * 补齐。旧实现把三者混在「遍历当前已注册分片」的一次循环里：首分片缺席 →
+     * `started` 恒 false → 中间分片被整段跳过，而末分片仍被无条件追加，于是复制
+     * 结果只剩末分片的半截前缀。
      *
      * The walk's only blind spot is non-shard blocks (code fences, tables,
      * math display) that render via their own Text composables and so drop out
@@ -898,6 +1054,13 @@ class SelectionController {
      * text — and only when such a gap actually exists. If the markdown anchors
      * can't be located, we keep the precise shard-walk result rather than
      * falling back to the full message.
+     *
+     * [T-cross-shard-copy-gap-notice] 走查里**取不到文本**的分片（端点分片被回收后
+     * 又超出了 [MAX_DOCUMENT_SHARDS] 条 / [MAX_DOCUMENT_CHARS] 字符的 LRU；同一处
+     * `?: continue` 的兜底也一并计数），以及 [T-cross-shard-copy-span-blind] 里
+     * **根本枚举不到**的中间分片（已回收 + 无数字序号），都会让复制结果少一段。这种
+     * 缺口必须显式：能定位锚点就退到该消息 markdown 的选中段（原文完整），否则在
+     * 结果里写明缺了几段——静默少复制正是 B1 要消灭的形态，只是换了个触发器。
      */
     private fun crossShardSelectedText(
         first: TextPosition,
@@ -905,36 +1068,267 @@ class SelectionController {
         documentRegistry: Map<TextShardId, String>,
     ): String {
         val sb = StringBuilder()
-        val visitedOrder = registeredShardsInOrder()
-        var started = false
-        for (id in visitedOrder) {
-            val txt = shards[id]?.plainText ?: documentRegistry[id] ?: continue
-            when (id) {
-                first.shard -> {
-                    sb.append(txt.substring(first.charOffset.coerceIn(0, txt.length), txt.length))
-                    started = true
-                }
-                last.shard -> {
-                    if (started) sb.append('\n')
-                    sb.append(txt.substring(0, last.charOffset.coerceIn(0, txt.length)))
-                    started = true
-                    break
-                }
-                else -> if (started) {
-                    sb.append('\n').append(txt)
-                }
+        var unavailable = 0
+        // 头片段：端点可能已回收，文本从文档级表取。
+        val headText = textOf(first.shard, documentRegistry)
+        if (headText == null) {
+            unavailable += 1
+        } else {
+            sb.append(headText.substring(first.charOffset.coerceIn(0, headText.length), headText.length))
+        }
+        // 中间分片：严格位于两端之间、按文档序。
+        val span = selectionSpanInDocumentOrder(first, last, documentRegistry)
+        for (id in span.middles) {
+            val txt = textOf(id, documentRegistry)
+            if (txt == null) {
+                unavailable += 1
+                continue
+            }
+            if (txt.isEmpty()) continue
+            if (sb.isNotEmpty()) sb.append('\n')
+            sb.append(txt)
+        }
+        // 尾片段：同上，端点回收后仍要有。
+        val tailText = textOf(last.shard, documentRegistry)
+        if (tailText == null) {
+            unavailable += 1
+        } else {
+            val head = tailText.substring(0, last.charOffset.coerceIn(0, tailText.length))
+            if (head.isNotEmpty()) {
+                if (sb.isNotEmpty()) sb.append('\n')
+                sb.append(head)
             }
         }
         val walk = sb.toString()
+
+        // [T-cross-shard-copy-span-blind] 跨度枚举不可信 = 至少有一段中间内容看不见
+        // （已回收 + 定不了序的分片）。不知道缺几段时按 1 计：提示的价值在于「这一份
+        // 不完整」这个事实本身；下面的分支会优先改用该消息 markdown 的选中段
+        // （原文完整），拿不到锚点才把缺口写进结果。
+        if (!span.complete) unavailable += 1
+
+        if (unavailable > 0) {
+            // 两端锚点都在（缺的是中间）时，markdown 选中段是完整原文——优先它。
+            // [T-cross-shard-copy-span-blind] 仅限同消息：跨消息选区没有单一源串，
+            // 拿头部的 markdown 去找尾部的锚点只会切出一段错内容。
+            //
+            // [T-cross-shard-copy-gap-notice] 但缺口提示必须跟着一起走：这一份的完整性
+            // 是「锚点定位成功」推出来的，不是数出来的（锚点重复、端点分片被回收都可能
+            // 定位失败或落到错误区间）。静默返回 slice 就是把不确定当成确定——B1 要消灭
+            // 的正是这种静默缺口，只是换了个触发器。
+            if (first.shard.messageId == last.shard.messageId) {
+                selectionMarkdownSlice(first, last, documentRegistry)?.let { slice ->
+                    val notice = unavailableShardNotice(unavailable)
+                    return if (slice.isEmpty()) notice else slice + "\n\n" + notice
+                }
+            }
+            val notice = unavailableShardNotice(unavailable)
+            return if (walk.isEmpty()) notice else walk + "\n\n" + notice
+        }
 
         // Same-message selection: try to recover non-shard blocks (code /
         // tables) inside the selected span by slicing the cached markdown
         // between the selection's head and tail anchors. Cross-message
         // selections have no single source string, so the walk stands.
         if (first.shard.messageId == last.shard.messageId) {
-            spliceNonShardSpan(first, last, walk, documentRegistry)?.let { return it }
+            spliceNonShardSpan(first, last, documentRegistry)?.let { return it }
         }
         return walk
+    }
+
+    /**
+     * [T-cross-shard-copy-gap-notice] 选区里取不到文本的分片数 → 结果里必须能看见的
+     * 提示文案（复制/引用/朗读都会带走它，用户据此知道这一份不完整）。
+     *
+     * [T-cross-shard-copy-gap-notice-i18n] 文案本体在 `values/strings.xml`
+     * （`chat_selection_copy_gap_notice`，含 `values-zh` / `values-zh-rTW`），由
+     * [RegisterSelectionShard] 在组合期装进 [gapNoticeTemplate]。控制器本身不碰
+     * Android 资源（JVM 单测可直接裸构造），[DEFAULT_GAP_NOTICE_TEMPLATE] 只是
+     * 没有资源时的兜底，与 zh 资源逐字一致。
+     */
+    internal var gapNoticeTemplate: String? = null
+
+    private fun unavailableShardNotice(count: Int): String =
+        (gapNoticeTemplate ?: DEFAULT_GAP_NOTICE_TEMPLATE)
+            .replace(GAP_NOTICE_COUNT_PLACEHOLDER, count.toString())
+
+    /**
+     * [T-cross-shard-copy-span-blind] 文档序跨度的枚举结果：[middles] 是能定位的
+     * 中间分片，[complete] 说明这次枚举**是否可信**。
+     *
+     * `complete = false` 的含义是「还有分片可能落在跨度里，但我们看不见它」——
+     * 已回收（不在注册表里）又没有数字序号（定不了序）的分片正是这种。旧实现在
+     * 无序兜底路径上只遍历当前注册的分片：回收掉的那些连「缺口」都计不进去，
+     * 复制结果少一段却没有任何提示——静默缺口换了个触发器，B1 要消灭的形态。
+     */
+    private class ShardSpan(val middles: List<TextShardId>, val complete: Boolean)
+
+    /**
+     * [T-cross-shard-copy-recycled] 选区跨度内、按文档序排列的**中间**分片（不含
+     * 两个端点自身）。三种定序来源，按可靠性依次尝试：
+     *
+     *  1. `mdblock:<parent>:<idx>#<sub>` —— 同一消息内按 (块序号, 子序号) 严格定序。
+     *     候选来自**文档级表**（含已回收分片），所以首分片回收不再把跨度截断；
+     *  2. 同一个根分片（`text:<blockId>#<sub>` 这类块 id 不是数字）—— 根相同即只有
+     *     子序号能定序，子序号就是文档序；
+     *  3. 其余（跨消息 / 无序号 id）—— 只有当前注册的分片有可信的窗口 y 序，
+     *     退回 [isShardBetween]（与修复前一致）。
+     *
+     * 1/2 都带一道保险：只要有**我们知道的**同消息分片无法进入该文档序，就退回 3
+     * ——旧路径包含它们，键序漏掉就是回归。3 无法枚举的分片则由 [ShardSpan.complete]
+     * 标成缺口（[T-cross-shard-copy-span-blind]）。
+     */
+    private fun selectionSpanInDocumentOrder(
+        first: TextPosition,
+        last: TextPosition,
+        documentRegistry: Map<TextShardId, String>,
+    ): ShardSpan {
+        val a = first.shard
+        val b = last.shard
+        if (a.messageId == b.messageId) {
+            // 界内所有「我们知道存在」的分片：注册中的 + 已回收但留有文本的 +
+            // 调用方注册表里的。只看 shards 会让回收掉的无序号分片漏出键序枚举。
+            val known = knownShardIdsIn(a.messageId, documentRegistry)
+            val ka = shardOrderKey(a)
+            val kb = shardOrderKey(b)
+            if (ka != null && kb != null && known.none { shardOrderKey(it) == null }) {
+                return ShardSpan(keyedSpan(a, b, ka, kb, ::shardOrderKey), complete = true)
+            }
+            val root = shardIdRoot(a.shardId)
+            if (root == shardIdRoot(b.shardId)) {
+                val sa = shardSubIndex(a.shardId)
+                val sb = shardSubIndex(b.shardId)
+                // 子序号只给「同根 + 有子序号」的分片定序：同根无子号、或异根又无块
+                // 序号的分片都可能落在跨度里却排不上，有它们就不能声称枚举完整。
+                val unplaceable = known.count { id ->
+                    if (shardIdRoot(id.shardId) == root) {
+                        shardSubIndex(id.shardId) == null
+                    } else {
+                        shardOrderKey(id) == null
+                    }
+                }
+                if (sa != null && sb != null && unplaceable == 0) {
+                    return ShardSpan(
+                        keyedSpan(a, b, sa.toLong(), sb.toLong()) { id ->
+                            if (shardIdRoot(id.shardId) == root) shardSubIndex(id.shardId)?.toLong() else null
+                        },
+                        complete = true,
+                    )
+                }
+            }
+        }
+        return fallbackSpan(a, b, documentRegistry)
+    }
+
+    /**
+     * [T-cross-shard-copy-span-blind] 第 3 类兜底：y 序兜底枚举 + 完整性判定。
+     *
+     * y 序只在**两端都注册且坐标已挂载**时才可信（[positionedInWindow]）：视口是连续
+     * 的，两个可见分片之间的一切必然也已组合（[isShardBetween] 的 y 分支同样要求三者
+     * 在册且定得了位）。否则跨越已回收分片的那一段既排不上序、也进不了 [middles]，
+     * 只能按缺口计。
+     */
+    private fun fallbackSpan(
+        a: TextShardId,
+        b: TextShardId,
+        documentRegistry: Map<TextShardId, String>,
+    ): ShardSpan {
+        val middles = registeredShardsInOrder()
+            .filter { it != a && it != b && isShardBetween(a, b, it) }
+        // [T-cross-shard-copy-y-fallback-position] 「注册了」不等于「定得了位」：
+        // LayoutCoordinates 已 detach 时 positionInWindow 回退 Offset.Zero，两端点的 y
+        // 于是都是 0，y 序分支（`ym in 0..0`）会把注册表里每个未挂载分片都判成「在中间」
+        // 而真正在中间的已挂载分片被漏掉。旧实现只看 `shards[a] != null` 就声称
+        // complete = true：一处都定位不了却报「枚举完整」——静默缺口正是这么来的。
+        val endpointsPositioned = positionedInWindow(a) && positionedInWindow(b)
+        val complete = when {
+            endpointsPositioned -> true
+            a.messageId != b.messageId -> false
+            else -> {
+                // 端点有回收的：同消息里任何「不是端点、也没进跨度」的已知分片都可能
+                // 正落在跨度内（它无序号、无坐标，我们证明不了它在外），计缺口。
+                val inSpan = middles.toHashSet()
+                knownShardIdsIn(a.messageId, documentRegistry)
+                    .none { it != a && it != b && it !in inSpan }
+            }
+        }
+        return ShardSpan(middles, complete)
+    }
+
+    /**
+     * [T-cross-shard-copy-y-fallback-position] 分片是否**注册且坐标已挂载**。
+     * `positionInWindow` 对 detach 的 LayoutCoordinates 回退 [Offset.Zero]，与
+     * [handleAnchor] / [visibleSelectionEndLineRect] 用的是同一个哨兵值。
+     */
+    private fun positionedInWindow(id: TextShardId): Boolean =
+        shards[id]?.positionInWindow()?.let { it != Offset.Zero } == true
+
+    /**
+     * [T-cross-shard-copy-span-blind] 该消息里**我们知道存在**的分片：注册中的、
+     * 文档级表里留有文本的（已回收）、以及调用方注册表里的。
+     */
+    private fun knownShardIdsIn(
+        messageId: String,
+        documentRegistry: Map<TextShardId, String>,
+    ): List<TextShardId> = buildList {
+        addAll(knownShardIds())
+        addAll(documentRegistry.keys)
+    }.filter { it.messageId == messageId }.distinct()
+
+    /** [T-cross-shard-copy-recycled] 键序跨度：严格介于 [keyFirst]/[keyLast] 之间。 */
+    private fun keyedSpan(
+        first: TextShardId,
+        last: TextShardId,
+        keyFirst: Long,
+        keyLast: Long,
+        keyOf: (TextShardId) -> Long?,
+    ): List<TextShardId> {
+        val lo = minOf(keyFirst, keyLast)
+        val hi = maxOf(keyFirst, keyLast)
+        return knownShardIds()
+            .filter { it.messageId == first.messageId && it != first && it != last }
+            .mapNotNull { id -> keyOf(id)?.let { k -> if (k > lo && k < hi) k to id else null } }
+            .sortedBy { it.first }
+            .map { it.second }
+    }
+
+    /**
+     * [T-cross-shard-copy-recycled] 走查为空时的兜底：退回该消息 markdown 里
+     * **两个端点分片之间**的那一段（原始 markdown，保留 ``` 围栏等）。
+     *
+     * 走查为空意味着选区里没有一个字符来自分片文本——最典型的形状是「选区正好从
+     * 段落 1 末尾起、到段落 3 开头止，中间整段是代码围栏 / 表格这类非分片块」。
+     * 这时锚点取自两个端点分片的**整段文本**（头段的尾锚 + 尾段的头锚），而不是选中
+     * 的那 0 个字符。找不到锚点就返回 null，由调用方退到 collapsedFallback：宁可不
+     * 复制，也不要拿整条回复冒充选区（[T-android-copy-long-reply-incomplete] 的
+     * 教训）。
+     */
+    private fun markdownSliceFallback(
+        first: TextPosition,
+        last: TextPosition,
+        documentRegistry: Map<TextShardId, String>,
+    ): String? {
+        if (first.shard.messageId != last.shard.messageId) return null
+        val md = messageMarkdownCache[first.shard.messageId]?.takeIf { it.isNotEmpty() } ?: return null
+        val firstText = textOf(first.shard, documentRegistry).orEmpty()
+        val lastText = textOf(last.shard, documentRegistry).orEmpty()
+        val headAnchor = anchorFor(firstText, fromStart = false)
+        val tailAnchor = anchorFor(lastText, fromStart = true)
+        if (headAnchor.isEmpty() || tailAnchor.isEmpty()) return null
+        // [T-cross-shard-copy-anchor-offset-match] 头锚点是头分片**末尾**的 24 字符，
+        // 它在分片文本里的位置就是「选区偏移」：按位置消歧，别拿首个出现（见
+        // [bestAnchorOccurrence]）。
+        val headIdx = bestAnchorOccurrence(
+            md = md,
+            anchor = headAnchor,
+            shardText = firstText,
+            anchorStart = firstText.trimEnd().length - headAnchor.length,
+        )
+        if (headIdx < 0) return null
+        val startIdx = headIdx + headAnchor.length
+        val tailIdx = md.indexOf(tailAnchor, startIdx)
+        if (tailIdx < 0) return null
+        return md.substring(startIdx, tailIdx).trim('\n')
     }
 
     /**
@@ -948,13 +1342,40 @@ class SelectionController {
     private fun spliceNonShardSpan(
         first: TextPosition,
         last: TextPosition,
-        walk: String,
+        documentRegistry: Map<TextShardId, String>,
+    ): String? {
+        // Only prefer the markdown slice when the selected span actually
+        // crosses a NON-SHARD block — a fenced code block (``` / ~~~), a table
+        // (pipe rows), or display math ($$). Those render via their own Text
+        // composables (no MinisTextKit shard), so the per-shard walk drops them
+        // and the markdown slice is the only way to recover them. For a plain
+        // run of paragraphs / headings / list items (all shards), the walk is
+        // already exact and formatting-free, so prefer it — returning the
+        // markdown slice there would re-introduce `#`, `**`, etc. the user
+        // didn't select as rendered text.
+        val slice = selectionMarkdownSlice(first, last, documentRegistry) ?: return null
+        return if (sliceCrossesNonShardBlock(slice)) slice else null
+    }
+
+    /**
+     * [T-cross-shard-copy-gap-notice] 选区在**该消息 markdown** 里的那一整段
+     * （含两端锚点本身），原始 markdown、保留围栏等。定位失败（没有缓存 / 端点分片
+     * 的文本也已取不到 → 锚点为空 / 锚点在 markdown 里找不到 / 顺序倒置）返回 null。
+     *
+     * 与 [markdownSliceFallback] 的区别：这里用**选中部分**当锚点（头端点从
+     * charOffset 起、尾端点止于 charOffset），所以切片就是用户选中的那段；
+     * [markdownSliceFallback] 用的是两个端点分片的整段文本，只在走查完全为空
+     * （选区正好落在非分片块之间）时才成立。
+     */
+    private fun selectionMarkdownSlice(
+        first: TextPosition,
+        last: TextPosition,
         documentRegistry: Map<TextShardId, String>,
     ): String? {
         val md = messageMarkdownCache[first.shard.messageId]?.takeIf { it.isNotEmpty() } ?: return null
 
-        val firstText = shards[first.shard]?.plainText ?: documentRegistry[first.shard] ?: return null
-        val lastText = shards[last.shard]?.plainText ?: documentRegistry[last.shard] ?: return null
+        val firstText = textOf(first.shard, documentRegistry) ?: return null
+        val lastText = textOf(last.shard, documentRegistry) ?: return null
 
         // Head anchor: a run of the selected text right after the start offset.
         val headSel = firstText.substring(first.charOffset.coerceIn(0, firstText.length))
@@ -965,24 +1386,76 @@ class SelectionController {
         val tailAnchor = anchorFor(tailSel, fromStart = false)
         if (headAnchor.isEmpty() || tailAnchor.isEmpty()) return null
 
-        val startIdx = md.indexOf(headAnchor)
+        // [T-cross-shard-copy-anchor-offset-match] 头锚点用**选区偏移**消歧：锚点只有
+        // 24 字符，同一段样板文字在回复里出现两次时，`md.indexOf(headAnchor)` 取的首个
+        // 出现可能是更早的那一处 —— 切出来的正是用户没选的内容。分片文本在选区起点
+        // 前后各是什么，就是这段偏移信息（被 trim 掉的前导空白要算回来，[anchorFor]
+        // 取的是 trim 后的头 24 字符）。
+        val headAnchorStart = first.charOffset.coerceIn(0, firstText.length) +
+            (headSel.length - headSel.trimStart().length)
+        val startIdx = bestAnchorOccurrence(md, headAnchor, firstText, headAnchorStart)
         if (startIdx < 0) return null
         val tailIdx = md.indexOf(tailAnchor, startIdx + headAnchor.length)
         if (tailIdx < 0) return null
         val endIdx = tailIdx + tailAnchor.length
         if (endIdx <= startIdx) return null
 
-        val slice = md.substring(startIdx, endIdx)
-        // Only prefer the markdown slice when the selected span actually
-        // crosses a NON-SHARD block — a fenced code block (``` / ~~~), a table
-        // (pipe rows), or display math ($$). Those render via their own Text
-        // composables (no MinisTextKit shard), so the per-shard walk drops them
-        // and the markdown slice is the only way to recover them. For a plain
-        // run of paragraphs / headings / list items (all shards), the walk is
-        // already exact and formatting-free, so prefer it — returning the
-        // markdown slice there would re-introduce `#`, `**`, etc. the user
-        // didn't select as rendered text.
-        return if (sliceCrossesNonShardBlock(slice)) slice else null
+        return md.substring(startIdx, endIdx)
+    }
+
+    /**
+     * [T-cross-shard-copy-anchor-offset-match] 在 [md] 里定位 [anchor] 的出现位置，用
+     * **选区偏移**消歧：锚点最多 24 字符（[anchorFor]），重复出现时 `indexOf` 取「首个」
+     * 会切到更早的区间，复制到用户没选的内容。
+     *
+     * 偏移信息就是分片自己的文本：锚点在分片文本里的位置是 [anchorStart]，正确的那一处
+     * 出现会让「锚点前后的 markdown」与「锚点前后的分片文本」对得上（正文段落里渲染
+     * 文本与 markdown 逐字相同；行内格式会让两侧很快分叉，得分自然变低）。取两侧公共串
+     * 最长者；全部分数相同（对不上）时保持旧行为——首个出现。
+     *
+     * 比较长度封顶 [ANCHOR_CONTEXT_CAP]：分片文本可能是巨段落，不封顶会让消歧本身变成
+     * 「出现次数 × 文本长度」——复制跑在主线程上，这个上界必须是常数。
+     */
+    private fun bestAnchorOccurrence(
+        md: String,
+        anchor: String,
+        shardText: String,
+        anchorStart: Int,
+    ): Int {
+        if (anchor.isEmpty()) return -1
+        var bestIdx = -1
+        var bestScore = -1
+        var idx = md.indexOf(anchor)
+        while (idx >= 0) {
+            // 锚点右侧：markdown 的续文 vs 分片文本的续文。
+            var score = 0
+            var m = idx + anchor.length
+            var s = anchorStart + anchor.length
+            while (score < ANCHOR_CONTEXT_CAP && m < md.length && s < shardText.length &&
+                md[m] == shardText[s]
+            ) {
+                m++
+                s++
+                score++
+            }
+            // 锚点左侧：选区起点之前的那一段（没被选中，但它的内容说明我们在哪一块）。
+            var back = 0
+            m = idx - 1
+            s = anchorStart - 1
+            while (back < ANCHOR_CONTEXT_CAP && m >= 0 && s >= 0 && md[m] == shardText[s]) {
+                m--
+                s--
+                back++
+            }
+            score += back
+            if (score > bestScore) {
+                bestScore = score
+                bestIdx = idx
+            }
+            if (bestScore >= ANCHOR_CONTEXT_CAP * 2) break // 两侧都满配：就是这一处
+            idx = md.indexOf(anchor, idx + 1)
+        }
+        return bestIdx
     }
 
     /**
@@ -1017,7 +1490,9 @@ class SelectionController {
     }
 
     private fun collapsedFallback(sel: TextSelection): String {
-        val txt = shards[sel.start.shard]?.plainText ?: return ""
+        // [T-cross-shard-copy-recycled] 用文档级表：端点分片被回收后，最后这一层
+        // 兜底也不该退化成空串。
+        val txt = textOf(sel.start.shard, emptyMap()) ?: return ""
         val a = sel.start.charOffset.coerceIn(0, txt.length)
         val b = sel.end.charOffset.coerceIn(0, txt.length)
         return txt.substring(minOf(a, b), maxOf(a, b))
@@ -1061,6 +1536,15 @@ fun ProvideSelectionController(
 fun RegisterSelectionShard(shard: TextShard?) {
     val controller = LocalMinisSelectionController.current ?: return
     if (shard == null) return
+    // [T-cross-shard-copy-gap-notice-i18n] 缺口提示文案走资源（values/strings.xml +
+    // values-zh / values-zh-rTW）。装的是**解析后的字符串**而不是 Context：控制器
+    // 的寿命长于任何一个 Activity，持有 Context 就是泄漏，而模板串本身没有这个问题。
+    // 这是选区界面唯一必然经过的组合点（每个 MdText 分片都会注册），所以放在这里；
+    // 控制器仍可无 Android 依赖地裸构造（JVM 单测）。
+    val gapNotice = androidx.compose.ui.res.stringResource(
+        com.openminis.app.R.string.chat_selection_copy_gap_notice,
+    )
+    SideEffect { controller.gapNoticeTemplate = gapNotice }
     DisposableEffect(controller, shard.id, shard) {
         controller.register(shard)
         onDispose { controller.unregister(shard.id) }
@@ -1157,11 +1641,11 @@ fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSelectionForShard(
  * range).
  */
 /**
- * Best-effort document-order index for a shard, extracted from the
- * trailing integer in its shardId string. Returns null if the shardId
- * doesn't carry a parseable index. Use case: ordering shards even when
- * one of them isn't currently registered with the SelectionController
- * (e.g. it scrolled off-screen and got disposed by LazyColumn).
+ * Best-effort document-order key for a shard, extracted from the block index in
+ * its shardId string. Returns null if the shardId doesn't carry a numeric block
+ * index. Use case: ordering shards even when one of them isn't currently
+ * registered with the SelectionController (e.g. it scrolled off-screen and got
+ * disposed by LazyColumn).
  *
  * Convention from ChatScreen.kt: shard ids look like
  *   "mdblock:<parentBlockId>:<blockIndex>"   ← splitMarkdownIntoBlockTexts
@@ -1169,13 +1653,88 @@ fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSelectionForShard(
  *   "legacy"                                  ← whole-message legacy path
  * The mdblock case is the only one that needs ordering today; the others
  * are single-shard so the comparison never has to disambiguate.
+ *
+ * [T-cross-shard-copy-recycled] 键是 Long：高 32 位 = 块序号，低 32 位 = 子序号。
+ *
+ * 旧实现取 `substringAfterLast(':')` 后 `toIntOrNull()`，而 `MdText` 会给同一个
+ * markdown 片段里的每个文本节点加 `#<子序号>`（StreamingMarkdownMdText），于是
+ * `mdblock:m:3#1` 解析成 "3#1" → null：文档序兜底对**所有**子分片永久失效，端点
+ * 分片一旦被回收，跨分片复制就只剩末分片的半截前缀。现在保留子序号，既让这些 id
+ * 可定序，也不会把同一片段里的兄弟子分片误判成「同在块内」。
  */
-private fun shardOrderKey(id: TextShardId): Int? {
-    val s = id.shardId
-    val lastColon = s.lastIndexOf(':')
-    if (lastColon < 0) return null
-    return s.substring(lastColon + 1).toIntOrNull()
+private fun shardOrderKey(id: TextShardId): Long? {
+    val block = shardBlockIndex(id.shardId) ?: return null
+    val sub = shardSubIndex(id.shardId) ?: 0
+    return (block.toLong() shl 32) or (sub.toLong() and SHARD_SUB_MASK)
 }
+
+/**
+ * [T-cross-shard-copy-recycled] 剥离 `#<数字>` 子序号后缀后的根 shardId
+ * （`MdText` 的每个文本节点都会带该后缀）。本身含 '#' 但不是 `#<数字>` 形态的
+ * shardId 原样返回，避免误伤。
+ */
+private fun shardIdRoot(shardId: String): String {
+    val hash = shardId.lastIndexOf('#')
+    if (hash <= 0) return shardId
+    return if (shardId.substring(hash + 1).all { it.isDigit() }) {
+        shardId.substring(0, hash)
+    } else {
+        shardId
+    }
+}
+
+/** [T-cross-shard-copy-recycled] `#<子序号>` 的数字值；没有该后缀时 null。 */
+private fun shardSubIndex(shardId: String): Int? {
+    val hash = shardId.lastIndexOf('#')
+    if (hash <= 0) return null
+    return shardId.substring(hash + 1).toIntOrNull()
+}
+
+/** [T-cross-shard-copy-recycled] 根 shardId 末尾的数字块序号；不是数字时 null。 */
+private fun shardBlockIndex(shardId: String): Int? {
+    val root = shardIdRoot(shardId)
+    val lastColon = root.lastIndexOf(':')
+    if (lastColon < 0) return null
+    return root.substring(lastColon + 1).toIntOrNull()
+}
+
+/**
+ * [T-cross-shard-copy-recycled] 文档级 plainText 表的条目上限。表按「用户滚过的
+ * 分片数」增长，超限后按最久未读取淘汰（见 SelectionController.documentTextMap）。
+ */
+private const val MAX_DOCUMENT_SHARDS = 4_096
+
+/**
+ * [T-cross-shard-copy-docmap-char-budget] 文档级 plainText 表的**字符预算**。
+ *
+ * 只用条数上限不封顶内存：条目值是分片全文，单个巨段落分片可达数十 KB，
+ * 4096 × 几十 KB 最坏把上百 MB 的分片文本攒在常驻内存里（长会话滚到底即可触发）。
+ * 512K 字符 ≈ 1 MB（UTF-16），足够装下「用户刚滚过去、复制正要取用」的那一段历史
+ * （约 1000 个普通段落分片，或几十个巨型分片），而与 blocksLru / inlineLru 的
+ * 2M 字符预算同一量级。
+ */
+private const val MAX_DOCUMENT_CHARS = 512_000
+
+/** [T-cross-shard-copy-gap-notice-i18n] 资源串与兜底串里的计数占位符，必须同形。 */
+private const val GAP_NOTICE_COUNT_PLACEHOLDER = "%1\$d"
+
+/**
+ * [T-cross-shard-copy-anchor-offset-match] 锚点消歧时逐字符比对的**单侧**长度上限：
+ * 分片文本可能是巨段落，不封顶会让「找对锚点出现位置」这件事本身变成 O(出现次数 ×
+ * 文本长度) —— 复制跑在主线程上，上界必须是常数。
+ */
+private const val ANCHOR_CONTEXT_CAP = 64
+
+/**
+ * [T-cross-shard-copy-gap-notice-i18n] 拿不到资源时的缺口提示（与
+ * `values-zh` 的 `chat_selection_copy_gap_notice` 逐字一致）。运行路径由
+ * [RegisterSelectionShard] 注入资源串，这里只服务没有 Context 的调用方（JVM 单测）。
+ */
+internal const val DEFAULT_GAP_NOTICE_TEMPLATE =
+    "[…… 选区中有 %1\$d 个分片的文本已被回收，复制到的内容不完整 ……]"
+
+/** [T-cross-shard-copy-recycled] [shardOrderKey] 低 32 位的子序号掩码。 */
+private const val SHARD_SUB_MASK = 0xFFFF_FFFFL
 
 internal fun SelectionController.isShardBetween(
     a: TextShardId,
@@ -1202,13 +1761,22 @@ internal fun SelectionController.isShardBetween(
     }
     // Fall back to y-based comparison when index parsing fails or the
     // selection spans multiple messages.
+    //
+    // [T-cross-shard-copy-y-fallback-position] 坐标未挂载（LayoutCoordinates 已
+    // detach，positionInWindow 回退 Offset.Zero）时 y 序没有意义：三个 y 全是 0，
+    // 任意两个未挂载分片互相都判成「在中间」（把无关内容卷进复制），真正在中间的
+    // 已挂载分片反而判不出来。fail-closed：定不了位就不算在中间，调用方按缺口计。
     val shards = currentShards()
     val sa = shards[a] ?: return false
     val sb = shards[b] ?: return false
     val sm = shards[middle] ?: return false
-    val ya = sa.positionInWindow().y
-    val yb = sb.positionInWindow().y
-    val ym = sm.positionInWindow().y
+    val originA = sa.positionInWindow()
+    val originB = sb.positionInWindow()
+    val originM = sm.positionInWindow()
+    if (originA == Offset.Zero || originB == Offset.Zero || originM == Offset.Zero) return false
+    val ya = originA.y
+    val yb = originB.y
+    val ym = originM.y
     val lo = minOf(ya, yb)
     val hi = maxOf(ya, yb)
     return ym in lo..hi

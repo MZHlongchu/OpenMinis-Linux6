@@ -59,7 +59,20 @@ object ExecuteCodeTool {
     class Bridge(private val invoke: suspend (String, String) -> ToolExecutionResult) {
         val out = StringBuilder()
         var toolCalls = 0
+
+        /**
+         * [T-execute-code-abandoned] 墙钟超时后脚本线程被"弃车"（见 [WALL_CLOCK_MS]
+         * 注释）：线程还在跑，而父调用早已把 "script abandoned" 回给了模型。旧实现只
+         * 是"不回收"——脚本可以继续发起最多 50 次**真实**工具调用（web_fetch /
+         * web_search 这类 15~30 秒的网络 IO、file_read 等），白烧流量、搜索配额与电量，
+         * 结果全部丢弃且不进任何审计。超时时置位：此后 call() 直接短路、print() 丢弃，
+         * 被弃的线程只能空转（仍由指令预算兜底），不再产生外部副作用。
+         */
+        @Volatile
+        var abandoned = false
+
         fun print(v: Any?) {
+            if (abandoned) return
             if (out.length < MAX_STDOUT) out.append(v?.toString() ?: "null").append('\n')
         }
 
@@ -74,6 +87,7 @@ object ExecuteCodeTool {
             RuntimeException("tool call cap $MAX_TOOL_CALLS reached; partial output preserved")
 
         fun call(toolName: String, argsJson: String): String {
+            if (abandoned) return "ERROR: script abandoned"
             if (toolName !in SANDBOX_TOOLS) return "ERROR: '$toolName' not in sandbox"
             if (++toolCalls > MAX_TOOL_CALLS) throw ToolCallCapExceeded(out.toString())
             return try {
@@ -122,6 +136,9 @@ object ExecuteCodeTool {
         script.start()
         script.join(WALL_CLOCK_MS)
         if (script.isAlive) {
+            // [T-execute-code-abandoned] 先断掉桥，再取快照：弃车后脚本线程不得再
+            // 发起真实工具调用（也不再把输出往 out 里塞）。
+            bridge.abandoned = true
             val partial = bridge.out.toString().take(MAX_STDOUT)
             val text = buildString {
                 append("execute_code timed out after ${WALL_CLOCK_MS / 1000}s — script abandoned")

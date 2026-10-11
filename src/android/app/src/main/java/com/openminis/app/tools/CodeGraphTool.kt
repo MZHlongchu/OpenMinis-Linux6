@@ -42,8 +42,12 @@ object CodeGraphTool {
     }
 
     private fun detectRoot(resolvePath: (String) -> String?): String? {
+        // [T-walk-cage-single-resolve] resolvePath 回传的已经是复检 + canonical 化过的宿主
+        // 路径（PRootKernel.resolveSessionHostPath）。这里再 `canonicalFile` 一次就是在
+        // 「复检」与「以它为根建索引」之间插入第二次解析——guest 只要在这两次之间把中间
+        // 分量换成软链，索引器就会以新目标为根。直接用回传值。
         val candidates = listOf("/var/minis/workspace", "/var/minis/shared", ".")
-        return candidates.asSequence().mapNotNull(resolvePath).map { File(it).canonicalFile }
+        return candidates.asSequence().mapNotNull(resolvePath).map { File(it) }
             .firstOrNull { it.isDirectory }?.path
     }
 

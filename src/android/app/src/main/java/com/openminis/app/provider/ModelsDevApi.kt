@@ -38,6 +38,18 @@ object ModelsDevApi {
 
     private var cachedRegistry: Map<String, ProviderEntry>? = null
     private var cacheTimestamp: Long = 0L
+
+    /**
+     * [T-model-release-ranking] Bumped on every [installRegistry] (disk load,
+     * bundled fallback, background network refresh). [ModelReleaseIndex] reads
+     * this instead of being told to `invalidate()`: installRegistry runs while
+     * holding this object's monitor, and taking ModelReleaseIndex's monitor
+     * from there would invert the lock order (ensureIndex → registrySnapshot →
+     * loadRegistry) and risk a deadlock.
+     */
+    @Volatile
+    private var registryGeneration: Long = 0L
+
     private val isRefreshing = AtomicBoolean(false)
     private var appContext: Context? = null
     // [T-modelsdev-id-normalization] Memoized stage-2 winner per normalized id.
@@ -493,10 +505,18 @@ object ModelsDevApi {
      */
     fun registrySnapshot(): Map<String, ProviderEntry> = loadRegistry() ?: emptyMap()
 
+    /**
+     * [T-model-release-ranking] Monotonic id of the currently installed
+     * catalog. Deliberately NOT synchronized: readers must be able to observe a
+     * refresh without contending for (or nesting on) this monitor.
+     */
+    fun currentRegistryGeneration(): Long = registryGeneration
+
     @Synchronized
     private fun installRegistry(parsed: Map<String, ProviderEntry>, timestamp: Long) {
         cachedRegistry = parsed
         cacheTimestamp = timestamp
+        registryGeneration++
         cachedStage2Index = null
         stage2IndexBuiltFrom = null
     }

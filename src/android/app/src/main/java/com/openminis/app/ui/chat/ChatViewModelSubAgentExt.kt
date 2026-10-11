@@ -411,22 +411,34 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
         } else {
             spawns.map { null }
         }
-        val batch = com.openminis.app.tools.SubAgentBatchRegistry.begin(
-            sessionId = ownerSession,
-            context = context,
-            toolId = toolId,
-            assistantId = assistantId,
-            background = detached,
-            seeds = spawns.mapIndexed { i, s ->
-                com.openminis.app.tools.SubAgentBatchRegistry.LaneSeed(
-                    index = i + 1,
-                    kind = s.kind,
-                    title = s.title.ifBlank { s.kind },
-                    prompt = s.prompt,
-                    planId = planIds[i],
-                )
-            },
-        )
+        // [T-batch-registry-corrupt] 注册表损坏 / 读不动时 begin() 抛 IOException（不再
+        // 静默开一张空表、再被下一次写入覆盖掉全部台账）。这里显式失败一次：坏文件已被
+        // 改名留证（batches.json.corrupt），重试即从新表开始。
+        val batch = runCatching {
+            com.openminis.app.tools.SubAgentBatchRegistry.begin(
+                sessionId = ownerSession,
+                context = context,
+                toolId = toolId,
+                assistantId = assistantId,
+                background = detached,
+                seeds = spawns.mapIndexed { i, s ->
+                    com.openminis.app.tools.SubAgentBatchRegistry.LaneSeed(
+                        index = i + 1,
+                        kind = s.kind,
+                        title = s.title.ifBlank { s.kind },
+                        prompt = s.prompt,
+                        planId = planIds[i],
+                    )
+                },
+            )
+        }.getOrElse { e ->
+            return ToolExecutionResult(
+                "Error: sub-agent dispatch blocked — ${e.message}",
+                false,
+                errorCode = com.openminis.app.tools.ToolErrorCode.EXECUTION_FAILED,
+                recoveryHint = "Delete the corrupt batch registry file (or its .corrupt backup), then retry.",
+            )
+        }
         if (detached) {
             return launchDetachedSubAgentBatch(
                 batch = batch,

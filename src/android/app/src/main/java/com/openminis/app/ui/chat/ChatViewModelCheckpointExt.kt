@@ -6,7 +6,10 @@ import com.openminis.app.checkpoint.CheckpointBridge
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.harness.checkpoint.RewindScope
 import com.openminis.app.logging.AppLogger
+import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -68,73 +71,108 @@ internal fun ChatViewModel.rewindToMessage(
     onForked: (String) -> Unit = {},
 ) {
     if (_isStreaming.value) return
+    // [T-truncation-critical-section] 回滚（CODE）也是一次会话行剪裁：与
+    // deleteFromMessage 同属「剪裁者」，在飞剪裁期间拒绝并发 —— 两次交叠的剪裁会
+    // 各自锚在对方半应用的 sort_order 区间上（行会丢）。写入者（send/retry）不受
+    // 影响：它们等的是同一个临界区（TruncationInterlock.awaitIdle）。
+    // admitCutter = 准入 + 被拒留痕（fail-closed，但不静默）。
+    if (!TruncationInterlock.admitCutter("rewindToMessage(scope=$scope)", truncationJob)) return
     val sid = activeSessionId
-    viewModelScope.launch(Dispatchers.IO) {
-        // 同一锚点可能有多个轮（用户重试过）：取最新的一个，它的轮初快照
-        // 才是当前磁盘状态的正确回滚点。
-        val turn = CheckpointBridge.checkpoints(context, sid)
-            .lastOrNull { it.anchorMessageId == messageId }
-        if (turn == null) {
-            RewindEvents.emit(sid, context.getString(R.string.chat_rewind_no_checkpoint))
-            return@launch
-        }
-        runCatching {
-            val controller = CheckpointBridge.controller(context, chatRepository)
-            val plan = controller.prepare(sid, turn.turn, scope)
-            // workspace 参数在宿主侧承载 sessionId —— 见 AppRewindFileAccess.withBase。
-            val result = controller.commit(plan, workspace = sid)
-            // [T-code-rewind-context-trim] CODE 模式顺带截断模型上下文（用户指示的
-            // 产品行为）：文件回到过去 + 模型忘记之后的轮次。与 deleteFromMessage
-            // 同一套截断：锚点 = checkpoint 的 anchorMessageId 自身 DB 行（1:1，
-            // 永不错位）——UI 截到锚、DB 删行、agentHistory 重建、压缩标记对账、
-            // 会话预览刷新。CONVERSATION/BOTH 不在此列：它们派生 fork 会话，
-            // 上下文天然就是分支点的消息。
-            if (scope == RewindScope.CODE && result.forkedSessionId == null) {
-                val anchorSort = runCatching { chatRepository.dao.sortOrderOf(messageId) }.getOrNull()
-                if (anchorSort != null) {
-                    chatRepository.deleteMessagesAfter(sid, anchorSort + 1)
-                }
-                withContext(Dispatchers.Main) {
-                    val idx = _messages.value.indexOfFirst { it.id == messageId }
-                    if (idx >= 0) {
-                        for (m in _messages.value.subList(idx + 1, _messages.value.size)) {
-                            m.queuedPromptId?.let { pid -> forgetQueuedPrompt(pid) }
-                        }
-                        _messages.value = _messages.value.subList(0, idx + 1)
+    // [T-truncation-critical-section] CODE 是唯一会剪裁会话行的 scope（非 CODE 由
+    // RewindController.commit 派生 fork 会话，见 RewindController.kt:90），因此只有
+    // 它需要登记；登记必须**早于数秒级的文件回滚**（controller.commit）。旧实现在
+    // 回滚之后才登记，而且复核与登记之间还夹了一次挂起的 `dao.sortOrderOf` ——
+    // 整个回滚窗口里第二个剪裁入口照旧放行，两次交叠的剪裁各自锚在对方半应用的
+    // sort_order 区间上（正是 KDoc 警告的「行会丢」）。LAZY + 先登记后 start 与
+    // deleteFromMessage 同口径：临界区在本协程任何挂起点之前就已可见；收尾在
+    // finally 里按 identity 摘除，不会摘掉别人的剪裁。
+    val job = viewModelScope.launch(
+        Dispatchers.IO + CoroutineName("truncation:code-rewind"),
+        start = CoroutineStart.LAZY,
+    ) {
+        try {
+            // 同一锚点可能有多个轮（用户重试过）：取最新的一个，它的轮初快照
+            // 才是当前磁盘状态的正确回滚点。
+            val turn = CheckpointBridge.checkpoints(context, sid)
+                .lastOrNull { it.anchorMessageId == messageId }
+            if (turn == null) {
+                RewindEvents.emit(sid, context.getString(R.string.chat_rewind_no_checkpoint))
+                return@launch
+            }
+            runCatching {
+                val controller = CheckpointBridge.controller(context, chatRepository)
+                val plan = controller.prepare(sid, turn.turn, scope)
+                // workspace 参数在宿主侧承载 sessionId —— 见 AppRewindFileAccess.withBase。
+                val result = controller.commit(plan, workspace = sid)
+                // [T-code-rewind-context-trim] CODE 模式顺带截断模型上下文（用户指示的
+                // 产品行为）：文件回到过去 + 模型忘记之后的轮次。与 deleteFromMessage
+                // 同一套截断：锚点 = checkpoint 的 anchorMessageId 自身 DB 行（1:1，
+                // 永不错位）——UI 截到锚、DB 删行、agentHistory 重建、压缩标记对账、
+                // 会话预览刷新。CONVERSATION/BOTH 不在此列：它们派生 fork 会话，
+                // 上下文天然就是分支点的消息。
+                // [T-truncation-critical-section] `!_isStreaming.value` 是**剪裁前复核**：
+                // 本协程入口的那次检查发生在文件回滚之前，而回滚（controller.commit）
+                // 可能耗时数秒 —— 期间 resume 这类把 `_isStreaming` 置位的入口
+                // 可能已经启动了新回合（send/retry 会先 join 临界区，不受影响）。
+                // 绝不能把剪裁落在活着的 loop 下面（那正是「删除把 agent loop 的行删掉」
+                // 的现场）：回合在飞就放弃这次**上下文**剪裁，文件回滚照常生效、会话内容
+                // 保持不动 —— 比删掉活回合的行安全得多。
+                if (scope == RewindScope.CODE && result.forkedSessionId == null && !_isStreaming.value) {
+                    // 本协程在入口处已把**自己**登记为 truncationJob（见函数头），所以
+                    // 这次剪裁从一开始就在共享临界区里：写入者落库前会 join、并发的
+                    // 剪裁入口会被拒 —— 下面的锚点查询即使挂起也不再有交叠剪裁的窗口。
+                    val anchorSort = runCatching { chatRepository.dao.sortOrderOf(messageId) }.getOrNull()
+                    if (anchorSort != null) {
+                        chatRepository.deleteMessagesAfter(sid, anchorSort + 1)
                     }
+                    withContext(Dispatchers.Main) {
+                        val idx = _messages.value.indexOfFirst { it.id == messageId }
+                        if (idx >= 0) {
+                            for (m in _messages.value.subList(idx + 1, _messages.value.size)) {
+                                m.queuedPromptId?.let { pid -> forgetQueuedPrompt(pid) }
+                            }
+                            _messages.value = _messages.value.subList(0, idx + 1)
+                        }
+                    }
+                    val tail = awaitBoundedHistoryRebuild(sid)
+                    // [T-truncation-digest-clear] 撤回截断了上下文；digest 摘录里
+                    // 被裁掉行的痕迹一并清空，防已删内容继续注入。
+                    clearHistoryDigestState()
+                    reconcileCompactMarkerAfterTruncation()
+                    runCatching {
+                        chatRepository.updateSessionPreview(sid, tail.lastOrNull()?.partsJson ?: "[]")
+                    }
+                    AppLogger.info(
+                        ChatViewModel.TAG,
+                        "[T-code-rewind-context-trim] CODE rewind also trimmed context: " +
+                            "cut at sortOrder=${anchorSort ?: -1}, ${tail.size} message(s) remain",
+                    )
                 }
-                val tail = awaitBoundedHistoryRebuild(sid)
-                // [T-truncation-digest-clear] 撤回截断了上下文；digest 摘录里
-                // 被裁掉行的痕迹一并清空，防已删内容继续注入。
-                clearHistoryDigestState()
-                reconcileCompactMarkerAfterTruncation()
-                runCatching {
-                    chatRepository.updateSessionPreview(sid, tail.lastOrNull()?.partsJson ?: "[]")
-                }
-                AppLogger.info(
-                    ChatViewModel.TAG,
-                    "[T-code-rewind-context-trim] CODE rewind also trimmed context: " +
-                        "cut at sortOrder=${anchorSort ?: -1}, ${tail.size} message(s) remain",
+                RewindEvents.emit(
+                    sid,
+                    buildString {
+                        append(context.getString(R.string.chat_rewind_done, result.filesRestored, result.filesDeleted))
+                        if (result.forkedSessionId != null) {
+                            append(" · ").append(context.getString(R.string.chat_rewind_switched))
+                        }
+                        result.note?.let { append("\n").append(it) }
+                    },
+                )
+                result.forkedSessionId?.let(onForked)
+            }.onFailure { throwable ->
+                RewindEvents.emit(
+                    sid,
+                    context.getString(R.string.chat_rewind_failed, throwable.message ?: "unknown"),
                 )
             }
-            RewindEvents.emit(
-                sid,
-                buildString {
-                    append(context.getString(R.string.chat_rewind_done, result.filesRestored, result.filesDeleted))
-                    if (result.forkedSessionId != null) {
-                        append(" · ").append(context.getString(R.string.chat_rewind_switched))
-                    }
-                    result.note?.let { append("\n").append(it) }
-                },
-            )
-            result.forkedSessionId?.let(onForked)
-        }.onFailure { throwable ->
-            RewindEvents.emit(
-                sid,
-                context.getString(R.string.chat_rewind_failed, throwable.message ?: "unknown"),
-            )
+        } finally {
+            // [T-truncation-critical-section] 临界区收尾：只摘自己登记的那一份
+            // （identity 守卫与 deleteFromMessage 同口径），别摘掉别人的剪裁。
+            if (truncationJob === coroutineContext[Job]) truncationJob = null
         }
     }
+    if (scope == RewindScope.CODE) truncationJob = job
+    job.start()
 }
 
 /**

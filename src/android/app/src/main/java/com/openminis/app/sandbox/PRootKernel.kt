@@ -12,6 +12,7 @@ import com.openminis.app.data.FileMentionIndex
 import com.openminis.app.data.MountedFoldersStore
 import java.io.File
 import java.util.TimeZone
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlinx.coroutines.launch
 
@@ -46,8 +47,17 @@ object PRootKernel {
     /** Custom environment variables injected into every proot command. */
     val customEnvironment: MutableMap<String, String> = mutableMapOf()
 
-    /** Bind mounts: Linux path -> host filesystem path. */
-    val bindMounts: MutableMap<String, String> = linkedMapOf()
+    /**
+     * Bind mounts: Linux path -> host filesystem path.
+     *
+     * [T-b4-#2] 改用 ConcurrentHashMap：这张表会被主线程
+     * （TerminalSession.buildTermuxArgs、WebAppPathResolver.inferScope）与 IO 线程
+     * （建壳时 buildSessionBindMounts(publish = true) → [addBindMount]）同时
+     * 遍历/写入。原来的 linkedMapOf 会让遍历方抛 CME（Compose 路径上就是闪退），
+     * 排序后按键取值还可能 NPE。插入顺序从来不是契约的一部分：需要顺序的调用方
+     * 自行排序（如 [resolveHostPath] 按 key 长度降序）。
+     */
+    val bindMounts: MutableMap<String, String> = ConcurrentHashMap()
 
     /**
      * Initialize the PRoot environment: install rootfs and proot binary.
@@ -276,7 +286,8 @@ object PRootKernel {
 
     // Sentinel in the read-only write-guard wrapper scripts so we can recognize
     // and remove our own wrappers (vs a user/busybox binary of the same name).
-    private const val GUARD_MARKER = "minis-mount-readonly-guard"
+    // [T-s6-#6] 哨兵与脚本模板同源，见 [MountWriteGuardScript.MARKER]。
+    private const val GUARD_MARKER = MountWriteGuardScript.MARKER
 
     /**
      * Reference to the user-mounted folders store, set by [MinisApp] at
@@ -303,12 +314,20 @@ object PRootKernel {
     fun applyMountedFoldersSnapshot(context: Context) {
         val store = mountedFoldersStore
         val desired = mutableMapOf<String, String>()
+        // [T-b4-#4] store 里仍然存在的条目名。占位目录回收必须以它为准，而不是以
+        // `desired`（本轮 SAF 解析成功的条目）为准——解析只是暂时失败时，旧逻辑
+        // 会删掉仍在使用的挂载目标目录。
+        val liveEntryNames = mutableSetOf<String>()
         if (store != null) {
             for (entry in store.entries.value) {
+                liveEntryNames += entry.name
                 val host = resolveTreeUriToHostPath(entry.treeUri, context) ?: continue
                 desired["$MOUNTS_LINUX_PREFIX${entry.name}"] = host
             }
         }
+        // [T-b4-#6] 重建挂载表是共享存储探测的既有失效点（启动 / 开机 / 挂载 CRUD），
+        // 先失效缓存，下面派生出的计划才会拿到新鲜值。
+        invalidateSharedStorageProbe()
         applySharedStorageBinds(context, desired)
 
         // Remove stale /var/minis/mounts/* keys not in desired.
@@ -326,7 +345,7 @@ object PRootKernel {
         // inside the rootfs as a real directory; otherwise PRoot silently skips
         // the bind. Materialize a placeholder dir for each /var/minis/mounts/<name>
         // (and clean up stale ones) so the bind actually takes effect.
-        materializeMountTargets(context, desired.keys)
+        materializeMountTargets(context, desired.keys, liveEntryNames)
 
         // T219-4: raw shell writes (touch/cp/mv/tee/… and `>` redirects) bypass
         // the FileWriteTool/FileEditTool read-only guard because proot `-b` has no
@@ -334,6 +353,8 @@ object PRootKernel {
         // target lands under an effectively-read-only mount, so the agent gets a
         // clear "read-only mounted folder" error in the shell instead of a write
         // that silently no-ops (Android 10 shadow FUSE) or a confusing raw EACCES.
+        // [T-s6-#5] 覆盖面仅限 wrapper 检查的 argv 目标（见
+        // [installMountWriteGuards]）：`>` 重定向与非白名单命令仍写得进去。
         val readOnlyLinuxPrefixes = store?.entries?.value.orEmpty()
             .filter { it.name in desired.keys.map { k -> k.removePrefix(MOUNTS_LINUX_PREFIX) } }
             .filterNot { it.effectiveWritable }
@@ -385,11 +406,35 @@ object PRootKernel {
     }
 
     private fun sharedStoragePlan(context: Context, userNamedSdcard: Boolean): Map<String, String> {
+        // [T-b4-#6] 下面的探测（appops 权限查询 + canRead() stat）原先每条 execute
+        // 的挂载陈旧检测都要跑一次，即使挂载集合一个字节都没变。改为缓存，失效契约
+        // 见 [SharedStorageProbeCache]。
+        // [T-b4-#6-negative] 但"未授权"的负数命中要先复检一次实时权限位：offload 路径
+        // （`OffloadPermissionManager.requestAndroidPermission`）刚授权时缓存还是
+        // granted=false，/sdcard 会被摘到下次前台。这里用同一个 hasSharedStorageAccess
+        // 判据复检——"有权限但缓存说没有"就强制重探。已授权时零额外开销。
+        val probe = SharedStorageProbeCache.resolve(
+            permissionGranted = { hasSharedStorageAccess(context) },
+            probe = { probeSharedStorage(context) },
+        )
+        return SharedStorageBindPlan.plan(if (probe.granted) probe.host else null, userNamedSdcard)
+    }
+
+    private fun probeSharedStorage(context: Context): SharedStorageProbeCache.Probe {
         val host = Environment.getExternalStorageDirectory()?.absolutePath
         val granted = !host.isNullOrBlank() &&
             hasSharedStorageAccess(context) &&
             File(host).canRead()
-        return SharedStorageBindPlan.plan(if (granted) host else null, userNamedSdcard)
+        return SharedStorageProbeCache.Probe(host, granted)
+    }
+
+    /**
+     * [T-b4-#6] 失效共享存储探测缓存。所有"答案可能变化"的时点都要调用：挂载 CRUD /
+     * 开机（经 [applyMountedFoldersSnapshot]）以及应用回到前台（用户可能刚在系统
+     * 设置里改动「所有文件访问」，或刚答完存储运行时权限弹窗）。
+     */
+    fun invalidateSharedStorageProbe() {
+        SharedStorageProbeCache.invalidate()
     }
 
     private fun syncSharedStorageBindMounts(plan: Map<String, String>, userNamedSdcard: Boolean) {
@@ -443,12 +488,18 @@ object PRootKernel {
     }
 
     /**
-     * Ensure each `/var/minis/mounts/<name>` has a real (empty) directory
-     * inside the rootfs that PRoot can bind onto. Also removes stale
-     * placeholder dirs whose mount entry was unmounted, so old names don't
-     * keep appearing in `ls /var/minis/mounts/`.
+     * 保证每个 `/var/minis/mounts/<name>` 在 rootfs 里都有一个真实（空）目录供
+     * PRoot `-b` 绑定；同时清理 store 里确实已删除的陈旧占位目录，避免旧名字
+     * 一直出现在 `ls /var/minis/mounts/` 里。
+     *
+     * [liveEntryNames] 是仍在 [mountedFoldersStore] 里的条目名：名字还在其中时，
+     * 即使本轮解析宿主路径失败也绝不删除该目录（见 [MountPlaceholderPolicy]）。
      */
-    private fun materializeMountTargets(context: Context, desiredLinuxPaths: Set<String>) {
+    private fun materializeMountTargets(
+        context: Context,
+        desiredLinuxPaths: Set<String>,
+        liveEntryNames: Set<String>,
+    ) {
         val rootfs = try {
             RootfsManager.getInstance(context).rootfsDir
         } catch (t: Throwable) {
@@ -466,10 +517,22 @@ object PRootKernel {
         }
 
         // Clean placeholder dirs that no longer correspond to a mount.
+        // [T-b4-#4] 只删「store 里已无此条目」且为空的目录。旧写法
+        // `f.name !in desiredNames → deleteRecursively()` 会把"本轮解析失败"的挂载
+        // 目标目录（卡未挂好 / readdir EACCES / pre-R 卷取不到路径）连同 guest 已经
+        // 写进去的文件一起删掉。
         val desiredNames = desiredLinuxPaths.map { it.removePrefix(MOUNTS_LINUX_PREFIX) }.toSet()
         mountsRoot.listFiles()?.forEach { f ->
-            if (f.isDirectory && f.name !in desiredNames) {
-                f.deleteRecursively()
+            if (!f.isDirectory) return@forEach
+            val known = f.name in desiredNames || f.name in liveEntryNames
+            val empty = f.list()?.isEmpty() == true
+            if (MountPlaceholderPolicy.isRemovable(f.name, desiredNames, liveEntryNames, empty)) {
+                if (!f.delete()) {
+                    Log.w(TAG, "materializeMountTargets: could not remove stale placeholder ${f.absolutePath}")
+                }
+            } else if (!known) {
+                // 不是已知挂载、但里面有文件：保留，宁可留个空壳也不删数据。
+                Log.w(TAG, "materializeMountTargets: keeping non-empty dir ${f.absolutePath} (not an empty placeholder)")
             }
         }
     }
@@ -482,8 +545,11 @@ object PRootKernel {
      *
      * The shell can technically still write through a PRoot bind because
      * `-b` has no read-only modifier — that's why the mount-detail screen
-     * uses honest "Locked / Unlocked" wording. Defense-in-depth via a
-     * shell-level wrapper is tracked as T219-4 follow-up (optional).
+     * uses honest "Locked / Unlocked" wording, and why the shell-level
+     * wrappers exist as argv-only best-effort ([installMountWriteGuards],
+     * scope spelled out in [T-d10-os-ro]). [T-d10-doc] 旧注释还写着"shell 级
+     * wrapper 是 T219-4 的可选后续项"——它早已随本函数一起装好，这里改成
+     * 现在的真实状态（本方法仍是唯一对文件工具生效的硬约束）。
      */
     fun isLinuxPathUnderReadOnlyMount(linuxPath: String): Boolean {
         if (!linuxPath.startsWith(MOUNTS_LINUX_PREFIX)) return false
@@ -541,7 +607,15 @@ object PRootKernel {
             val relPath = parts.getOrNull(1).orEmpty()
             val volumeRoot = resolveVolumeRoot(volumeId, context)
             if (volumeRoot == null) {
-                Log.w(TAG, "resolveTreeUriToHostPath: unknown volume '$volumeId' for $treeUriString")
+                // [T-b4-#9] 区分"没有这个卷"与"卷存在但拿不到 POSIX 路径"：旧文案
+                // 把两者都写成 unknown volume，会把诊断引向错误方向。
+                val reason = if (isKnownVolume(volumeId, context)) {
+                    "volume '$volumeId' is recognized but has no POSIX path on this device " +
+                        "(sdk=${Build.VERSION.SDK_INT}) — mount skipped"
+                } else {
+                    "unknown volume '$volumeId' — mount skipped"
+                }
+                Log.w(TAG, "resolveTreeUriToHostPath: $reason for $treeUriString")
                 null
             } else {
                 val candidate = if (relPath.isEmpty()) File(volumeRoot) else File(volumeRoot, relPath)
@@ -621,12 +695,25 @@ object PRootKernel {
             for (volume in sm.storageVolumes) {
                 if (volume.uuid?.equals(volumeId, ignoreCase = true) == true) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        return volume.directory?.absolutePath
+                        volume.directory?.absolutePath?.let { return it }
                     }
+                    // [T-b4-#9] StorageVolume.directory 是 API 30+ 成员（本仓 minSdk 26），
+                    // 所以 Android 8–10 上旧代码对任何可移动卷都会落到 `return null`，
+                    // SD 卡挂载被静默丢弃。这里复用 MountedFoldersStore.resolveVolumeRoot
+                    // 的回退：uuid 已识别的卷，其挂载点就是 /storage/<uuid>。
+                    val fallback = File("/storage/$volumeId")
+                    return if (fallback.isDirectory) fallback.absolutePath else null
                 }
             }
         }
         return null
+    }
+
+    /** [T-b4-#9] 只用于诊断，见 [resolveTreeUriToHostPath] 里的调用点。 */
+    private fun isKnownVolume(volumeId: String, context: Context): Boolean {
+        if (volumeId.equals("primary", ignoreCase = true) || volumeId.isEmpty()) return true
+        val sm = context.getSystemService(Context.STORAGE_SERVICE) as? StorageManager ?: return false
+        return sm.storageVolumes.any { it.uuid?.equals(volumeId, ignoreCase = true) == true }
     }
 
     /**
@@ -835,14 +922,46 @@ object PRootKernel {
      *
      * Falls back to [resolveHostPath] for paths this layout does not own
      * (rootfs files, external SAF mounts).
+     *
+     * [T-walk-cage-single-resolve] Returns the **canonical** path the ownership
+     * check was made against ([SessionWorkspace.verifiedCanonical]), not the
+     * lexical `/var/minis/...` translation. Callers that walk or open the result
+     * must use it as-is: resolving it a second time is what let a guest re-point
+     * an intermediate component between "verified" and "walked" and have the
+     * tools operate on a root nobody had checked. For a path that does not exist
+     * yet (creating a new file) canonicalisation is impossible, so the
+     * lexical-normalised path is returned — same value as before this change.
      */
     fun resolveSessionHostPath(sessionId: String, linuxPath: String, context: Context): File? {
         val resolved = SessionWorkspace.resolveGuestPath(context.filesDir, sessionId, linuxPath)
             ?: resolveHostPath(linuxPath)
             ?: return null
-        return resolved.takeIf {
-            SessionWorkspace.acceptsResolved(context.filesDir, sessionId, it)
-        }
+        return SessionWorkspace.verifiedCanonical(
+            context.filesDir,
+            sessionId,
+            resolved,
+            externalHostRoots(),
+        )
+    }
+
+    /**
+     * [T-file-tool-symlink-jail] Host trees a resolved guest path may point into
+     * besides `minis-sessions`/`minis-workspaces`/`minis-global`: the rootfs and
+     * every bind-mount host base (external SAF folders, shared storage).
+     *
+     * Passed INTO [SessionWorkspace.acceptsResolved] instead of letting the
+     * sandbox package call back into this object. The list is only consulted
+     * for paths that fall outside every Minis tree, and each entry is
+     * canonicalised at that point, so building it is allocation-cheap.
+     */
+    private fun externalHostRoots(): List<File> {
+        // Snapshot for the same reason resolveHostPath does: the live map is
+        // mutated by shell (re)creation and mount CRUD.
+        val mounts = bindMounts.toMap()
+        val roots = ArrayList<File>(mounts.size + 1)
+        rootfsManagerRef?.let { roots.add(it.rootfsDir) }
+        for (hostPath in mounts.values) roots.add(File(hostPath))
+        return roots
     }
 
     /**
@@ -852,11 +971,14 @@ object PRootKernel {
      * read another's private tree).
      */
     fun resolveHostPath(linuxPath: String): File? {
-        // Check bind mounts (longest prefix match)
-        val sorted = bindMounts.keys.sortedByDescending { it.length }
+        // Check bind mounts (longest prefix match).
+        // [T-b4-#2] 先做快照：其它线程（建壳 / 挂载 CRUD）仍可能在排序与取值之间改动
+        // 这张表，旧写法 `bindMounts[mountPoint]!!` 会在这里抛 NPE。
+        val snapshot = bindMounts.toMap()
+        val sorted = snapshot.keys.sortedByDescending { it.length }
         for (mountPoint in sorted) {
             if (linuxPath == mountPoint || linuxPath.startsWith("$mountPoint/")) {
-                val hostBase = bindMounts[mountPoint]!!
+                val hostBase = snapshot[mountPoint] ?: continue
                 val relativePath = linuxPath.removePrefix(mountPoint).removePrefix("/")
                 val file = if (relativePath.isEmpty()) File(hostBase) else File(hostBase, relativePath)
                 return file.takeIf { SessionWorkspace.staysInside(File(hostBase), it) }
@@ -1019,10 +1141,60 @@ object PRootKernel {
      * the wrappers are removed entirely so they add zero overhead in the common
      * case (every argument would pass the check anyway).
      *
-     * Coverage note: this catches the argv-target commands agents actually use
-     * (touch/cp/mv/tee/mkdir/rm/…). Pure shell `>` redirects are handled by the
-     * OS itself — proot forwards the open(2) to the host FS, which returns EACCES
-     * for a read-only mount — so those already fail truthfully.
+     * [T-s6-#5] 这是 best-effort 的 argv 级防护，**不是权限边界**。旧注释声称
+     * `>` 重定向"由 OS 返回 EACCES 所以已经真实失败"——那只对 **OS 级只读**
+     * （SAF 授权本身不含写权限，宿主 open(2) 真的被拒）成立；用户级锁
+     * （`effectiveWritable == false`）既不改宿主目录权限，PRoot `-b` 也没有只读
+     * 修饰符，shell 照样写得进去（完整覆盖面清单见 [T-d10-os-ro]）。所以用户级锁实际
+     * 只约束本 App 的文件工具（[isLinuxPathUnderReadOnlyMount]），UI 也如实披露了
+     * 这一点（strings.xml `mount_add_allow_writes_desc`：the shell can still bypass this）。
+     * 因此没有"按 store 收紧 `-b`"这条路：把 `effectiveWritable == false` 的挂载从
+     * bind 集合里拿掉（或换成影子目录）会连**读**一起丢掉，而 Locked 挂载必须仍然
+     * 可读；`setWritable(false,false)` 在 FUSE/emulated 存储上通常无效。
+     *
+     * [T-s6-#6] 写目标在 argv 里的位置逐命令定义——`cp`/`ln` 的源是读操作、`dd`
+     * 只有 `of=` 是写——见 [MountWriteGuardScript]。
+     *
+     * [T-b4-#3] 只重写带 [GUARD_MARKER] 的自家 wrapper：用户 `make install` 放进
+     * `/usr/local/bin`（PATH 中先于 `/bin`）的真实二进制绝不覆盖，与下面的删除
+     * 路径判据一致。
+     *
+     * [T-b4-#3-cover] 但"同名即跳过"会让用户的二进制把这条命令的写防护整个吃掉，
+     * 而失败面是**静默**的（写只读挂载不再报错）。所以安装位置改由纯逻辑
+     * [MountWriteGuardTargets.pick] 决定，判据只有一条：**PATH 里更靠前的目录**有没有
+     * 被别人的同名二进制占住。
+     *
+     * [T-d10-guard-pick-doc] 旧注释写成"两个目录都被占住才算这条命令的防护不可用"，
+     * 与 `pick` 的实际判据不一致（文档漂移），这里按实现改正：
+     *  - `/usr/local/bin` 被占住、`/usr/local/sbin` 可用 ⇒ 装进 `/usr/local/sbin`。
+     *    sbin 在同一份默认 PATH 里排在前面，防护照样生效（上一轮静默失效的正是这条路径）；
+     *  - `/usr/local/sbin` 被占住 ⇒ `pick` 直接返回 null，这条命令的防护**不可用**：
+     *    装到 `/usr/local/bin` 也会被 sbin 里的同名二进制先命中。此时与 `/usr/local/bin`
+     *    里是什么无关（那里空着也一样不可用），写 [MountWriteGuardStatus] 状态文件
+     *    （guest 可 `cat`）并升级到 `Log.e`，不再只留一行 `Log.w`。
+     *
+     * [T-d10-os-ro] 关于"用户级锁（`userAllowWrite = false`）要不要加一层 OS 级只读兜底"
+     * （对宿主挂载目录 chmod 0555 + 解锁/退出恢复 + 崩溃后启动期按持久化记录恢复）——
+     * **评估结论是不实现**，理由三条：
+     *  1. 覆盖不到真正需要它的路径。挂载只可能来自 SAF 的 externalstorage 树 URI
+     *     （[resolveTreeUriToHostPath] 的 authority 判据），解出的宿主路径恒在
+     *     `/storage/<volume>` 这类共享卷上，由 MediaProvider 的 FUSE 视图呈现，权限位是
+     *     合成的、对持有它的应用不构成内核判据（同一原因使 `chmod +x` 在 /sdcard 上一直是
+     *     空操作）——0555 只是把"能写"伪装成"只读"；
+     *  2. 真生效就是全局副作用。那个目录同时属于用户和别的应用（文件管理器、相册），
+     *     chmod 与恢复之间任何一次崩溃/被杀都让**用户自己**也写不进去，而 App 侧没有
+     *     任何 UI 能把权限改回来；
+     *  3. 恢复本身要靠"chmod 之前先落盘记录"，记录写失败或进程被杀就留下一个必须靠
+     *     启动期修复的破坏性状态。用一次权限修改换一层不可靠的防护，风险大于收益。
+     *
+     * 于是，**用户级锁只有 argv 级 best-effort 防护**，这是本函数的边界，不是"还没做"：
+     * 它拦不住红色 `>`/`>>` 重定向（重定向由 shell 在 execve **之前**自己 open(2)，
+     * 无法从命令路径上拦）、`sed -i`/`truncate`/`rsync`/解释器内写、`/bin/busybox <cmd>`
+     * 这类绝对路径绕过，以及相对路径目标（先 `cd` 进挂载目录再 `touch f`）。
+     * 真正由内核拒绝的只有 **OS 级只读**（SAF 授权本身不含写权限，
+     * `MountedFoldersStore` 的 `probeWritable` 为 false）——那一层与本函数无关。
+     * UI 与文案如实披露同一件事（strings.xml `mount_add_allow_writes_desc`：
+     * the shell can still bypass this）。
      */
     private fun installMountWriteGuards(context: Context, readOnlyLinuxPrefixes: List<String>) {
         val rootfs = try {
@@ -1030,18 +1202,26 @@ object PRootKernel {
         } catch (t: Throwable) {
             return
         }
-        val binDir = File(rootfs, "usr/local/bin").also { it.mkdirs() }
-        val guardedCmds = listOf("touch", "tee", "cp", "mv", "mkdir", "rm", "rmdir", "ln", "dd")
-        val configFile = File(rootfs, "var/minis/.mount-readonly-prefixes")
+        val guardedCmds = MountWriteGuardScript.commands
+        // [T-s6-#6] 脚本在 guest 命名空间里 source 这个路径，宿主侧由 CONFIG_PATH
+        // 派生，避免两处各写一份常量。
+        val configFile = File(rootfs, MountWriteGuardScript.CONFIG_PATH.removePrefix("/"))
+        val binDir = File(rootfs, MountWriteGuardTargets.BIN).also { it.mkdirs() }
+        val sbinDir = File(rootfs, MountWriteGuardTargets.SBIN).also { it.mkdirs() }
 
         if (readOnlyLinuxPrefixes.isEmpty()) {
             // No read-only mounts — remove the config + wrappers so plain busybox
             // commands run unimpeded.
             runCatching { configFile.delete() }
-            for (name in guardedCmds) {
-                val w = File(binDir, name)
-                if (w.exists() && w.readText().contains(GUARD_MARKER)) w.delete()
+            for (dir in listOf(binDir, sbinDir)) {
+                for (name in guardedCmds) clearOurWrapper(File(dir, name))
             }
+            writeMountGuardStatus(
+                rootfs,
+                uncovered = emptyList(),
+                total = guardedCmds.size,
+                active = false,
+            )
             Log.i(TAG, "installMountWriteGuards: no read-only mounts, guards cleared")
             return
         }
@@ -1049,38 +1229,90 @@ object PRootKernel {
         configFile.parentFile?.mkdirs()
         configFile.writeText(readOnlyLinuxPrefixes.joinToString("\n", postfix = "\n"))
 
+        val uncovered = mutableListOf<String>()
         for (name in guardedCmds) {
-            val wrapper = File(binDir, name)
-            wrapper.writeText(
-                """#!/bin/sh
-                |# $GUARD_MARKER — reject writes into read-only mounted folders.
-                |# Auto-installed by MinisApp PRootKernel (T219-4).
-                |cfg=/var/minis/.mount-readonly-prefixes
-                |if [ -f "${'$'}cfg" ]; then
-                |    for arg in "${'$'}@"; do
-                |        case "${'$'}arg" in
-                |            -*) continue;;  # skip flags
-                |        esac
-                |        while IFS= read -r prefix; do
-                |            [ -z "${'$'}prefix" ] && continue
-                |            case "${'$'}arg" in
-                |                "${'$'}prefix"|"${'$'}prefix"/*)
-                |                    echo "$name: ${'$'}arg: read-only mounted folder — writes are disabled (toggle in Settings → Mount External Folders)" >&2
-                |                    exit 1;;
-                |            esac
-                |        done < "${'$'}cfg"
-                |    done
-                |fi
-                |exec /bin/busybox $name "${'$'}@"
-                |""".trimMargin(),
-            )
+            val binFile = File(binDir, name)
+            val sbinFile = File(sbinDir, name)
+            // [T-b4-#3-cover] 见 [MountWriteGuardTargets]：优先历史位置 /usr/local/bin，
+            // 被用户的同名二进制占住时兜底到 PATH 更靠前的 /usr/local/sbin。
+            val target = MountWriteGuardTargets.pick(guardSlot(binFile), guardSlot(sbinFile))
+            if (target == null) {
+                uncovered += name
+                Log.e(
+                    TAG,
+                    "installMountWriteGuards: $name is shadowed by a user binary that precedes every " +
+                        "guard directory — writes into read-only mounts via $name are NOT blocked " +
+                        "(see ${MountWriteGuardStatus.GUEST_PATH})",
+                )
+                continue
+            }
+            val wrapper = if (target == MountWriteGuardTargets.SBIN) sbinFile else binFile
+            val other = if (target == MountWriteGuardTargets.SBIN) binFile else sbinFile
+            // 另一个目录里自家留下的同名 wrapper 已被 PATH 上更靠前的那个盖住，留着
+            // 只会让"防护装在哪"有两个答案；只删带哨兵的自家文件。
+            clearOurWrapper(other)
+            // [T-s6-#6] 每命令一套写目标语义（源 vs 目标、`dd of=`、`-t DIR`），
+            // 模板与语义表都在 MountWriteGuardScript 里，便于单元测试。
+            val script = MountWriteGuardScript.wrapperScript(name)
+            val existing = if (wrapper.exists()) runCatching { wrapper.readText() }.getOrNull() else null
+            // 内容没变就不重复写盘（9 个文件 × 每次挂载 CRUD），但要保证可执行位还在
+            // （App 更新后可能丢）。
+            if (existing == script) {
+                wrapper.setExecutable(true, false)
+                continue
+            }
+            wrapper.writeText(script)
             wrapper.setExecutable(true, false)
         }
+
+        writeMountGuardStatus(rootfs, uncovered = uncovered, total = guardedCmds.size, active = true)
+        // 先算好后缀：`+ if (…) … else … +` 的优先级会让 else 分支吞掉后半段日志。
+        val uncoveredSuffix =
+            if (uncovered.isEmpty()) "" else " — uncovered=${uncovered.joinToString(",")}"
         Log.i(
             TAG,
-            "installMountWriteGuards: installed for ${guardedCmds.size} cmds, " +
-                "readOnlyPrefixes=${readOnlyLinuxPrefixes.joinToString(",")}",
+            "installMountWriteGuards: installed for ${guardedCmds.size - uncovered.size}/${guardedCmds.size} cmds" +
+                "$uncoveredSuffix, readOnlyPrefixes=${readOnlyLinuxPrefixes.joinToString(",")}",
         )
+    }
+
+    /** 目录里同名文件与我们的关系：不存在 / 自家 wrapper / 别人的二进制。 */
+    private fun guardSlot(file: File): MountWriteGuardTargets.Slot {
+        if (!file.exists()) return MountWriteGuardTargets.Slot.FREE
+        val text = runCatching { file.readText() }.getOrNull()
+        return if (text != null && text.contains(GUARD_MARKER)) {
+            MountWriteGuardTargets.Slot.OURS
+        } else {
+            // 读不出来 ⇒ 不是我们的。判据与 T-b4-#3 一致：绝不覆盖用户的同名二进制。
+            MountWriteGuardTargets.Slot.FOREIGN
+        }
+    }
+
+    /** 删掉自家哨兵 wrapper；用户的同名二进制一律不动。 */
+    private fun clearOurWrapper(file: File) {
+        if (guardSlot(file) != MountWriteGuardTargets.Slot.OURS) return
+        runCatching { file.delete() }
+    }
+
+    /**
+     * [T-b4-#3-cover] 把写防护的可用性写进 guest 可见的 `/run` 状态文件：某条命令的
+     * wrapper 被用户二进制从 PATH 上整个盖住时，防护在那条命令上**不可用**，这件事
+     * 必须能从 guest 侧查证（`cat /run/minis-mount-guards.txt`），而不是只留一行日志。
+     * 与 HostStatusPublisher 的 `/run/minis-host-status.json` 同一约定。
+     */
+    private fun writeMountGuardStatus(
+        rootfs: File,
+        uncovered: List<String>,
+        total: Int,
+        active: Boolean,
+    ) {
+        val runDir = File(rootfs, "run").also { it.mkdirs() }
+        val target = File(runDir, MountWriteGuardStatus.FILE_NAME)
+        val text = MountWriteGuardStatus.text(total = total, uncovered = uncovered, active = active)
+        runCatching {
+            if (target.isFile && target.readText() == text) return@runCatching
+            target.writeText(text)
+        }.onFailure { Log.w(TAG, "writeMountGuardStatus failed: ${it.message}") }
     }
 
     /**
@@ -1091,5 +1323,83 @@ object PRootKernel {
         val tmpDir = File(context.cacheDir, "proot-tmp")
         tmpDir.mkdirs()
         return tmpDir
+    }
+}
+
+/**
+ * [T-b4-#3-cover] 只读挂载写防护 wrapper 的安装位置（按 guest PATH 顺序）。
+ *
+ * 背景：`/usr/local/bin` 在默认 PATH 里先于 `/bin`，又是 `make install` 的默认落点，
+ * 用户完全可能往那儿放一个真实的 `cp`/`rm`/`dd`。上一轮（[T-b4-#3]）为了避免销毁
+ * 用户二进制改成"同名文件不是自己装的就跳过"，但那让这条命令的写防护**静默失效**
+ * （写只读挂载照样成功，用户/agent 无从得知）。
+ *
+ * 这里恢复覆盖：`/usr/local/sbin` 在同一份默认 PATH 里排在 `/usr/local/bin` **之前**
+ * （见 [PRootKernel.boot] 注入的 PATH、RootfsManager 的 default_mount、
+ * McpNativeBridge 与 TerminalSession 的 env，四处一致），wrapper 兜底装到那里就既能
+ * 保住用户的二进制、又保住防护。只有 PATH 里更靠前的目录被用户的同名二进制占住时，
+ * 这条命令的写防护才是真的不可用——那时由 [MountWriteGuardStatus] 写成显式状态。
+ *
+ * 抽成纯逻辑是为了让"装到哪"能被测试固定住（见 `MountWriteGuardTargetsTest`）。
+ */
+internal object MountWriteGuardTargets {
+
+    /** 历史落点（T219-4 一直用这里），PATH 中先于 `/usr/bin:/bin`。 */
+    const val BIN = "usr/local/bin"
+
+    /** 兜底落点：同一份默认 PATH 里排在 [BIN] 之前。 */
+    const val SBIN = "usr/local/sbin"
+
+    /** 目录里同名文件与我们的关系。 */
+    enum class Slot { OURS, FREE, FOREIGN }
+
+    /**
+     * 返回该命令的 wrapper 应该装到哪个目录（相对 rootfs 的路径）。
+     * null = 这条命令的写防护在本机不可用：PATH 中更靠前的目录被用户的同名二进制
+     * 占住，wrapper 装到哪儿都会被它盖掉。
+     */
+    fun pick(bin: Slot, sbin: Slot): String? = when {
+        // sbin 先于 bin：它被别人的同名二进制占住时，我们没有更靠前的落点。
+        sbin == Slot.FOREIGN -> null
+        // bin 被占住 ⇒ 用更靠前的 sbin 兜底（正是 T-b4-#3 静默失效的那条路径）。
+        bin == Slot.FOREIGN -> SBIN
+        else -> BIN
+    }
+}
+
+/**
+ * [T-b4-#3-cover] 写防护可用性的 guest 可见状态（`/run/minis-mount-guards.txt`）。
+ *
+ * 为什么要有这个文件：防护被用户的同名二进制盖住时，唯一的失败面是"写只读挂载不再
+ * 报错"——静默的 fail-open。日志在 App 侧，agent 与用户都看不到，所以把结论落到
+ * guest 可读的文件里（与 [HostStatusPublisher] 的 `/run/minis-host-status.json` 同一
+ * 约定），任何 `cat` 都能查证"哪些命令没有防护、为什么"。
+ */
+internal object MountWriteGuardStatus {
+
+    const val FILE_NAME = "minis-mount-guards.txt"
+    const val GUEST_PATH = "/run/$FILE_NAME"
+
+    /** 纯文本、逐行 key=value，便于 `grep`/`cut` 这类最小工具箱消费。 */
+    fun text(total: Int, uncovered: List<String>, active: Boolean): String = buildString {
+        append("# written by MinisApp PRootKernel.installMountWriteGuards — do not edit\n")
+        append("guard_active=$active\n")
+        append("guard_command_total=$total\n")
+        append("guard_command_uncovered_count=${uncovered.size}\n")
+        append("guard_command_uncovered=${uncovered.joinToString(",")}\n")
+        append(
+            "note=" + when {
+                // 没有只读挂载时 wrapper 全部卸掉（见 installMountWriteGuards 的早退分支）：
+                // 状态文件必须如实说明"没装"，不能写成"全都装好了"。
+                !active -> "no read-only mounted folder: guards are not installed (nothing to protect)\n"
+                uncovered.isEmpty() ->
+                    "every guarded command resolves to a Minis write guard on the default PATH " +
+                        "(/usr/local/sbin:/usr/local/bin:…)\n"
+                else ->
+                    // 说明为什么这些命令没有防护：PATH 里更靠前的同名用户二进制把 wrapper 盖住了。
+                    "a user binary with the same name precedes /usr/local/sbin and " +
+                        "/usr/local/bin, so writes into read-only mounts via those commands are NOT blocked\n"
+            },
+        )
     }
 }

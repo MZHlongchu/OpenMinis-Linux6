@@ -47,12 +47,18 @@ internal fun OpenAIProvider.buildCodexImageBody(messages: List<LLMMessage>): JSO
  */
 internal fun OpenAIProvider.detectImageMime(data: ByteArray): String {
     if (data.size < 4) return "image/png"
-    val b = data.map { it.toInt() and 0xFF }
+    // [T-b11-detect-image-mime-alloc] 只看前 4 字节，不能用 `data.map{}`：那会按
+    // ByteArray.map 解析成 List<Int>，每个元素装箱 + ArrayList 扩容，8MB 图像（Codex
+    // 后端确实会回整张 ~8MB 图）瞬时多分配上百 MB。直接索引原数组，零分配。
+    val b0 = data[0].toInt() and 0xFF
+    val b1 = data[1].toInt() and 0xFF
+    val b2 = data[2].toInt() and 0xFF
+    val b3 = data[3].toInt() and 0xFF
     return when {
-        b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47 -> "image/png"
-        b[0] == 0xFF && b[1] == 0xD8 -> "image/jpeg"
-        b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46 -> "image/webp" // RIFF (WebP)
-        b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46 -> "image/gif"
+        b0 == 0x89 && b1 == 0x50 && b2 == 0x4E && b3 == 0x47 -> "image/png"
+        b0 == 0xFF && b1 == 0xD8 -> "image/jpeg"
+        b0 == 0x52 && b1 == 0x49 && b2 == 0x46 && b3 == 0x46 -> "image/webp" // RIFF (WebP)
+        b0 == 0x47 && b1 == 0x49 && b2 == 0x46 -> "image/gif"
         else -> "image/png"
     }
 }

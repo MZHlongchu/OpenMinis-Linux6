@@ -513,7 +513,13 @@ private suspend fun ChatViewModel.speakModel(
         // [T-stream-stall-watchdog] Same two-phase bound as the main agent
         // loop: a group speaker whose stream goes quiet mid-sentence must not
         // wedge the round for the length of a transport read timeout.
-        val firstEventTimeoutMs = if (thinkingLevel.isEnabled) 90_000L else 45_000L
+        // [T-stream-watchdog-budget-parity / #188] Phase 1 shares the provider's
+        // own pre-first-chunk budget when it declares one (OpenAI: upload cap +
+        // TTFB) — otherwise this 45s/90s window fires first and the provider's
+        // internal TTFB/upload watches never get to act. Phase 2 stays keyed on
+        // the base budget so mid-stream stalls keep surfacing at 90s/180s.
+        val baseFirstEventTimeoutMs = if (thinkingLevel.isEnabled) 90_000L else 45_000L
+        val firstEventTimeoutMs = provider.streamFirstEventBudgetMs(baseFirstEventTimeoutMs)
         provider.streamMessage(
             messages = history,
             systemPrompt = system,
@@ -523,7 +529,7 @@ private suspend fun ChatViewModel.speakModel(
             thinkingLevel = thinkingLevel,
         ).streamStallWatchdog(
             firstEventTimeoutMs,
-            idleTimeoutMs = firstEventTimeoutMs * 2,
+            idleTimeoutMs = baseFirstEventTimeoutMs * 2,
         ).collect { chunk ->
             when (chunk) {
                 is LLMStreamChunk.Started -> onStatus(

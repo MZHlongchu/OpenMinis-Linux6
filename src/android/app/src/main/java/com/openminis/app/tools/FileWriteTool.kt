@@ -10,6 +10,13 @@ import org.json.JSONObject
 object FileWriteTool {
     const val NAME = "file_write"
 
+    /**
+     * [T-b15-diff-preimage-cap] diff 前像读取上限（与 CheckpointStore.SNAPSHOT_MAX_BYTES
+     * 同量级）：前像只喂 4KB 截断的 EditDiffSection，为它把几百 MB 旧文件读成 String
+     * 是纯浪费 + OOM 入口（`catch (e: Exception)` 接不住 `Error`）。
+     */
+    private const val DIFF_PREIMAGE_MAX_BYTES = 1L * 1024L * 1024L
+
     fun definition(): AgentToolDefinition = AgentToolDefinition(
         name = NAME,
         description = "Write content to a file on the Linux filesystem. Faster than shell_execute for writing files. Creates the file if it doesn't exist. Use append mode to add to existing files.",
@@ -83,7 +90,14 @@ object FileWriteTool {
             // 回读确认。落盘前读旧内容（仅文件已存在时；新文件保持纯字节计数，
             // file_edit 对不存在的文件本就报错，没有「新增文件」diff 惯例）。
             // AtomicFileWrite.read 取 per-path 锁，读取方式与 file_edit 一致。
-            val previousContent = if (file.exists()) AtomicFileWrite.read(file) else null
+            // [T-b15-diff-preimage-cap] 超限旧文件不再整份读进内存（这一读发生在 append
+            // 分支判断之前，"往大日志尾巴追加一行"同样命中）——diff 退回纯字节计数，
+            // 与新文件路径同款。
+            val previousContent = if (file.exists()) {
+                AtomicFileWrite.read(file, DIFF_PREIMAGE_MAX_BYTES)
+            } else {
+                null
+            }
 
             // T123: mirror iOS AIChatViewModel L8339 — auto-create the
             // parent dir whenever it doesn't exist, regardless of the
@@ -131,7 +145,9 @@ object FileWriteTool {
             // 盘面 == content，after 直接用 content 不再重读；append 模式落盘
             // 结果是「旧内容 + content」，从盘上重读。diff 走 file_edit 同一套
             // EditDiffSection（4KB 截断有标注）；盘读失败回退纯字节计数。
-            val finalContent = if (append) AtomicFileWrite.read(file) else content
+            // [T-b15-diff-preimage-cap] append 模式的后像同样受前像上限约束：超大
+            // 文件读不进来就不生成 diff（前像必为 null），而不是再整份读一遍。
+            val finalContent = if (append) AtomicFileWrite.read(file, DIFF_PREIMAGE_MAX_BYTES) else content
             val diff = if (previousContent != null && finalContent != null) {
                 EditDiffSection.render(path, previousContent, finalContent).orEmpty()
             } else {

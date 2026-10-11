@@ -84,6 +84,91 @@ class GeminiProviderTest {
     }
 
     @Test
+    fun `sendMessage folds thinking tokens into output`() = runBlocking {
+        val responseBody = """
+        {
+            "candidates": [{
+                "content": {"parts": [{"text": "done"}], "role": "model"},
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 8,
+                "candidatesTokenCount": 4,
+                "thoughtsTokenCount": 6,
+                "cachedContentTokenCount": 3
+            }
+        }
+        """.trimIndent()
+
+        server.enqueue(MockResponse().setBody(responseBody))
+
+        val response = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+        // [T-gemini-usage-thoughts] 思考 token 单独计数，必须并入输出用量。
+        assertEquals(10, response.usage?.outputTokens)
+        // [T-b15-usage-fresh-input] promptTokenCount(8) 已含缓存(3)，inputTokens 只能
+        // 报 fresh 部分（8-3=5）——写回 8 会让下游按 fresh+cache 不相交求和/求率时
+        // 重复计入缓存前缀（命中率 3/8=37.5% 被压到 3/11=27%）。
+        assertEquals(5, response.usage?.inputTokens)
+        assertEquals(3, response.usage?.cacheReadInputTokens)
+        // 上下文占用取完整 prompt —— dynamicMaxTokens / ContextPolicy 依赖它。
+        assertEquals(8, response.usage?.latestContextTokens)
+    }
+
+    @Test
+    fun `sendMessage does not double count a fully cached prompt`() = runBlocking {
+        // 100% 命中：fresh 必须是 0，下游命中率才不会显示成 ~50%。
+        val responseBody = """
+        {
+            "candidates": [{
+                "content": {"parts": [{"text": "cached"}], "role": "model"},
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 1200,
+                "candidatesTokenCount": 4,
+                "cachedContentTokenCount": 1200
+            }
+        }
+        """.trimIndent()
+
+        server.enqueue(MockResponse().setBody(responseBody))
+
+        val usage = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024).usage!!
+        assertEquals("a fully cached prompt carries no fresh input", 0, usage.inputTokens)
+        assertEquals(1200, usage.cacheReadInputTokens)
+        assertEquals(1200, usage.latestContextTokens)
+        // 下游 ChatViewModelAgentLoopExt 的 [T-cache-hit-rate] 就是这个比值。
+        val total = usage.inputTokens + (usage.cacheReadInputTokens ?: 0)
+        assertEquals(1.0, (usage.cacheReadInputTokens ?: 0).toDouble() / total, 0.0001)
+    }
+
+    @Test
+    fun `sendMessage keeps fresh input non-negative when a relay over-reports the cache`() = runBlocking {
+        // 网关把 cachedContentTokenCount 报得比 promptTokenCount 还大（实测有的
+        // 中继会这样）—— 减出负数会把 inputTokens 变成负值，污染所有用量/预算
+        // 记账，所以负数时回退成完整 prompt，与 OpenAIProviderUsage 的守卫一致。
+        val responseBody = """
+        {
+            "candidates": [{
+                "content": {"parts": [{"text": "odd"}], "role": "model"},
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 5,
+                "candidatesTokenCount": 1,
+                "cachedContentTokenCount": 9
+            }
+        }
+        """.trimIndent()
+
+        server.enqueue(MockResponse().setBody(responseBody))
+
+        val usage = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024).usage!!
+        assertEquals(5, usage.inputTokens)
+        assertEquals(5, usage.latestContextTokens)
+    }
+
+    @Test
     fun `sendMessage maps MAX_TOKENS to max_tokens`() = runBlocking {
         val responseBody = """
         {
@@ -354,7 +439,9 @@ class GeminiProviderTest {
 
         val usageChunks = chunks.filterIsInstance<LLMStreamChunk.Usage>()
         assertEquals(1, usageChunks.size)
+        // 无缓存字段 → 与修复前逐字节一致（fresh 回退成完整 prompt）。
         assertEquals(10, usageChunks[0].usage.inputTokens)
+        assertEquals(10, usageChunks[0].usage.latestContextTokens)
         assertEquals(3, usageChunks[0].usage.outputTokens)
     }
 

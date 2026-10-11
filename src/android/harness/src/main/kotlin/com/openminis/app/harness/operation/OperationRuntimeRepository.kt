@@ -31,6 +31,18 @@ interface OperationRuntimeRepository {
 
     suspend fun findOperation(operationId: String): HarnessOperationEntity?
 
+    /**
+     * [T-b18-op-lookup-session-domain] 会话域查询：operation 行落在
+     * `<root>/<sessionId>.json` 里，带上 sessionId 就只读这一个文件。
+     *
+     * 为什么必须加：文件实现原先只有 [findOperation]（只有 id），只能靠
+     * 「扫全目录 + 解码每个会话文件」实现，而协调器每个工具轮要查 8 次
+     * （每次转移都 requireOperation + emitFor 各一次），并且与所有会话的
+     * 台账写共用一把全局锁 → 跨会话互相排队。协调器所有已知 sessionId
+     * 的路径都走这条；[findOperation] 只留给跨会话恢复查询。
+     */
+    suspend fun findOperation(sessionId: String, operationId: String): HarnessOperationEntity?
+
     suspend fun listActiveOperations(sessionId: String): List<HarnessOperationEntity>
 
     /** 原子：追加用户消息 entry + 挂 operation + 移动 lane 叶子。 */

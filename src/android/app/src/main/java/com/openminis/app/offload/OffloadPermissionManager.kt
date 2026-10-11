@@ -4,12 +4,9 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.openminis.app.sandbox.SessionAccessPolicy
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.coroutines.resume
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Manages offload permissions for privacy-sensitive agent tools.
@@ -123,22 +120,31 @@ object OffloadPermissionManager {
      *  "Allow in this session" dialog response. Cleared when the
      *  hosting session ends (or process death — see
      *  OFFLOAD_GLOBAL_SESSION_ID for offload-CLI-backed tools, which
-     *  share one process-lifetime slot). */
-    private val sessionGrants = mutableMapOf<String, MutableSet<String>>() // sessionId -> set of toolNames
+     *  share one process-lifetime slot).
+     *
+     *  [T-android-permission-prompt-queue] ConcurrentHashMap + newKeySet
+     *  而不是 `mutableMapOf`: 写方来自多个线程（offload handler 的
+     *  runBlocking 工作线程、聊天页工具协程、并行子代理），`getOrPut` 的
+     *  "读-改-写"不是原子的 —— 两个并发调用者可能各建一个 set 再互相覆盖。 */
+    private val sessionGrants = ConcurrentHashMap<String, MutableSet<String>>() // sessionId -> set of toolNames
 
     /** T338: session-scoped denials. Populated by the "Deny in this
      *  session" dialog response. Once a tool is in here for a given
-     *  session, [checkPermission] returns false without re-prompting
+     *  session, [checkPermission] returns [PromptDecision.DENIED] without re-prompting
      *  — prevents the agent from spamming the user with the same
      *  request after they already said no. Cleared with
      *  [clearSessionGrants]. */
-    private val sessionDenials = mutableMapOf<String, MutableSet<String>>() // sessionId -> set of toolNames
+    private val sessionDenials = ConcurrentHashMap<String, MutableSet<String>>() // sessionId -> set of toolNames
 
-    /** Active permission request waiting for user response. */
-    private val _pendingRequest = MutableStateFlow<PermissionRequest?>(null)
-    val pendingRequest: StateFlow<PermissionRequest?> = _pendingRequest.asStateFlow()
+    /** ASK_ONCE 提示槽：同一时刻只显示一张，其余 FIFO 排队（见 [OffloadPromptQueue]）。 */
+    private val promptQueue = OffloadPromptQueue<PermissionRequest, Response>(
+        label = { "${it.toolName} (${it.sessionId})" },
+    )
 
-    private var pendingContinuation: kotlin.coroutines.Continuation<Response>? = null
+    /** Active permission request waiting for user response — the one prompt
+     *  currently on screen (see [OffloadPromptQueue.pending] for the identity
+     *  [respondToRequest] requires back). */
+    internal val pendingRequest: StateFlow<PendingPrompt<PermissionRequest>?> = promptQueue.pending
 
     // ── Android system runtime permission request (for location etc.) ──────────
 
@@ -172,10 +178,10 @@ object OffloadPermissionManager {
 
     data class AndroidPermissionRequest(val permissions: List<String>)
 
-    private val _pendingAndroidPermission = MutableStateFlow<AndroidPermissionRequest?>(null)
-    val pendingAndroidPermission: StateFlow<AndroidPermissionRequest?> = _pendingAndroidPermission.asStateFlow()
+    /** 系统运行时权限对话框的槽（单槽 + 身份校验，见 [SingleFlightSlot]）。 */
+    private val androidPermissionSlot = SingleFlightSlot<AndroidPermissionRequest, AndroidPermissionResult>()
 
-    private var androidPermissionContinuation: kotlin.coroutines.Continuation<AndroidPermissionResult>? = null
+    internal val pendingAndroidPermission: StateFlow<PendingPrompt<AndroidPermissionRequest>?> = androidPermissionSlot.pending
 
     /**
      * Ask the UI layer to drive the system runtime-permission flow for the
@@ -193,37 +199,21 @@ object OffloadPermissionManager {
      */
     suspend fun requestAndroidPermission(permissions: List<String>): AndroidPermissionResult {
         val timed = withTimeoutOrNull(SYSTEM_DIALOG_TIMEOUT_MS) {
-            suspendCancellableCoroutine<AndroidPermissionResult> { cont ->
-                androidPermissionContinuation = cont
-                _pendingAndroidPermission.value = AndroidPermissionRequest(permissions)
-                cont.invokeOnCancellation {
-                    _pendingAndroidPermission.value = null
-                    androidPermissionContinuation = null
-                }
-            }
+            androidPermissionSlot.await(AndroidPermissionRequest(permissions))
         }
-        if (timed == null) {
-            // Timed out — clear the pending request so the UI doesn't fire a
-            // stale permission dialog later.
-            _pendingAndroidPermission.value = null
-            androidPermissionContinuation = null
-            return AndroidPermissionResult.TIMEOUT
-        }
-        return timed
+        // null = 没等到应答（超时 / 调用方取消）。槽由 [SingleFlightSlot] 的身份校验
+        // 自行清理，不会抹掉并发后来者的注册 —— 旧实现在这条路径上无条件清空整个槽。
+        // [T-android-permission-prompt-queue]
+        return timed ?: AndroidPermissionResult.TIMEOUT
     }
 
-    /** Called from UI after the system permission dialog returns. */
-    fun respondToAndroidPermission(result: AndroidPermissionResult) {
-        _pendingAndroidPermission.value = null
-        androidPermissionContinuation?.resume(result)
-        androidPermissionContinuation = null
-    }
+    /** [T-android-prompt-identity] 应答必须带上在屏那张提示的 [PendingPrompt.id]，见 [SingleFlightSlot.respond]。 */
+    fun respondToAndroidPermission(requestId: Long, result: AndroidPermissionResult): Boolean =
+        androidPermissionSlot.respond(requestId, result)
 
     /** Overload kept for callers that only have a granted/denied bool. */
-    fun respondToAndroidPermission(granted: Boolean) =
-        respondToAndroidPermission(
-            if (granted) AndroidPermissionResult.GRANTED else AndroidPermissionResult.DENIED
-        )
+    fun respondToAndroidPermission(requestId: Long, granted: Boolean): Boolean =
+        respondToAndroidPermission(requestId, if (granted) AndroidPermissionResult.GRANTED else AndroidPermissionResult.DENIED)
 
     // ── In-app "go to settings" gate ───────────────────────────────────────────
 
@@ -256,10 +246,10 @@ object OffloadPermissionManager {
     /** What the UI actor decided after the dialog closed. */
     enum class SettingsGateDecision { OPEN, CANCEL }
 
-    private val _pendingSettingsGate = MutableStateFlow<SettingsGateRequest?>(null)
-    val pendingSettingsGate: StateFlow<SettingsGateRequest?> = _pendingSettingsGate.asStateFlow()
+    /** "去设置页"对话框的槽（单槽 + 身份校验，见 [SingleFlightSlot]）。 */
+    private val settingsGateSlot = SingleFlightSlot<SettingsGateRequest, SettingsGateDecision>()
 
-    private var settingsGateContinuation: kotlin.coroutines.Continuation<SettingsGateDecision>? = null
+    internal val pendingSettingsGate: StateFlow<PendingPrompt<SettingsGateRequest>?> = settingsGateSlot.pending
 
     /**
      * Show an in-app dialog explaining why a settings trip is needed, then
@@ -277,14 +267,9 @@ object OffloadPermissionManager {
         request: SettingsGateRequest,
         check: () -> Boolean,
     ): AndroidPermissionResult {
-        val decision = suspendCancellableCoroutine<SettingsGateDecision> { cont ->
-            settingsGateContinuation = cont
-            _pendingSettingsGate.value = request
-            cont.invokeOnCancellation {
-                _pendingSettingsGate.value = null
-                settingsGateContinuation = null
-            }
-        }
+        // [T-android-permission-prompt-queue] 槽位清理由 [SingleFlightSlot] 的身份校验
+        // 负责：调用方超时/取消只会撤下自己那一槽，不会抹掉并发后来者的注册。
+        val decision = settingsGateSlot.await(request)
         if (decision == SettingsGateDecision.CANCEL) return AndroidPermissionResult.DENIED
 
         val granted = withTimeoutOrNull(SETTINGS_GATE_TIMEOUT_MS) {
@@ -321,12 +306,9 @@ object OffloadPermissionManager {
         return granted == true
     }
 
-    /** Called from UI after the in-app "go to settings" dialog closes. */
-    fun respondToSettingsGate(decision: SettingsGateDecision) {
-        _pendingSettingsGate.value = null
-        settingsGateContinuation?.resume(decision)
-        settingsGateContinuation = null
-    }
+    /** [T-android-prompt-identity] 同 [respondToAndroidPermission]：应答带上在屏那张的身份。 */
+    fun respondToSettingsGate(requestId: Long, decision: SettingsGateDecision): Boolean =
+        settingsGateSlot.respond(requestId, decision)
 
     /**
      * Android's `shouldShowRequestPermissionRationale` returns false in two
@@ -392,61 +374,58 @@ object OffloadPermissionManager {
 
     /**
      * Check permission for a tool in the given session.
-     * For ASK_ONCE, suspends until user responds via the dialog.
-     * Returns true if allowed.
+     * For ASK_ONCE, suspends until the user responds via the dialog (or this
+     * call gives up — see [OffloadPromptQueue.await]). Returns [PromptDecision].
      */
-    suspend fun checkPermission(toolName: String, toolTitle: String, sessionId: String): Boolean {
+    suspend fun checkPermission(toolName: String, toolTitle: String, sessionId: String): PromptDecision {
         val level = getLevel(toolName)
         return when (level) {
-            PermissionLevel.BYPASS -> true
-            PermissionLevel.NOT_ALLOWED -> false
+            PermissionLevel.BYPASS -> PromptDecision.ALLOWED
+            PermissionLevel.NOT_ALLOWED -> PromptDecision.DENIED
             PermissionLevel.ASK_ONCE -> {
                 // T338: a prior "Deny in this session" short-circuits
                 // before any grants check or dialog so the agent can't
                 // spam the user.
-                val denials = sessionDenials.getOrPut(sessionId) { mutableSetOf() }
-                if (toolName in denials) return false
+                val denials = sessionDenials.computeIfAbsent(sessionId) { ConcurrentHashMap.newKeySet<String>() }
+                if (toolName in denials) return PromptDecision.DENIED
 
-                val grants = sessionGrants.getOrPut(sessionId) { mutableSetOf() }
-                if (toolName in grants) return true
+                val grants = sessionGrants.computeIfAbsent(sessionId) { ConcurrentHashMap.newKeySet<String>() }
+                if (toolName in grants) return PromptDecision.ALLOWED
 
-                // Show dialog and wait for response.
+                // Show the prompt and wait for a response.
+                // [T-android-permission-prompt-queue][T-android-prompt-identity] `null` =
+                // 没人应答（排队超时 / 队列已满）→ fail-closed，且要和"用户拒绝"分开报。
                 val info = toolRegistry.find { it.toolName == toolName }
-                val response = suspendCancellableCoroutine<Response> { cont ->
-                    pendingContinuation = cont
-                    _pendingRequest.value = PermissionRequest(
+                val response = promptQueue.await(
+                    PermissionRequest(
                         toolName = toolName,
                         toolTitle = toolTitle,
                         description = "Allow ${info?.displayName ?: toolName} access?",
                         sessionId = sessionId,
-                    )
-                    cont.invokeOnCancellation {
-                        _pendingRequest.value = null
-                        pendingContinuation = null
-                    }
-                }
+                    ),
+                ) ?: return PromptDecision.UNANSWERED
 
                 when (response) {
                     Response.ALLOW_SESSION -> {
                         grants.add(toolName)
-                        true
+                        PromptDecision.ALLOWED
                     }
-                    Response.ALLOW_ONCE -> true  // no caching; next call re-prompts
+                    Response.ALLOW_ONCE -> PromptDecision.ALLOWED  // no caching; next call re-prompts
                     Response.DENY_SESSION -> {
                         denials.add(toolName)
-                        false
+                        PromptDecision.DENIED
                     }
                 }
             }
         }
     }
 
-    /** Called from UI when user responds to the permission dialog. */
-    fun respondToRequest(response: Response) {
-        _pendingRequest.value = null
-        pendingContinuation?.resume(response)
-        pendingContinuation = null
-    }
+    /** Called from UI when user responds to the permission dialog.
+     *
+     *  [T-android-prompt-identity] 必须回传 UI 看到的那张提示的 [requestId]；身份不匹配
+     *  （旧提示已被超时/取消撤下并 promote 了下一张）时丢弃，不会批准下一张提示。 */
+    fun respondToRequest(requestId: Long, response: Response): Boolean =
+        promptQueue.respond(requestId, response)
 
     /** Clear session grants AND denials (call when a session ends). */
     fun clearSessionGrants(sessionId: String) {

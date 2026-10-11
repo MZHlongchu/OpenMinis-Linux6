@@ -51,6 +51,30 @@ object Admission {
         }
     }
 
+    /**
+     * [T-admission-not-empty] 先等一下再试一次。
+     *
+     * 进程级预算只是并发提示，**不是**「这次操作没有数据」：
+     * [com.openminis.app.data.repository.ChatRepository.loadBoundedMessageRange] 的
+     * 注释记着这个教训——把一次暂时拒绝当成空结果，让 loadSession 清空两端游标、
+     * 把长会话的中段永久搁浅。所以本方法返回 false 时，调用方必须继续用**有界**的
+     * 查询/逐页读，绝不能返回空结果或静默截断。
+     */
+    suspend fun awaitAdmit(
+        bytes: Long,
+        waitMillis: Long = 250L,
+        stepMillis: Long = 50L,
+    ): Boolean {
+        if (tryAdmit(bytes)) return true
+        var waited = 0L
+        while (waited < waitMillis) {
+            kotlinx.coroutines.delay(stepMillis)
+            waited += stepMillis
+            if (tryAdmit(bytes)) return true
+        }
+        return false
+    }
+
     fun remaining(): Long = remaining.get()
 
     /** Drop cached reservations. Does not raise the absolute ceiling. */

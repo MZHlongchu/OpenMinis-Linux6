@@ -16,6 +16,11 @@ import kotlinx.coroutines.sync.withLock
  * **提交时机**：下载成功才写 prefs（确认前不写）——确认弹窗取消 = 事务未
  * 开启，天然无需回滚；下载中取消 = [rollback] abort 在飞下载 + 清半成品。
  *
+ * **清半成品只清「本次缺失侧」**（[T-lang-switch-txn]）：事务在下载前用
+ * [missingSides] 快照 `to` 尚缺的标签侧，回滚/失败清理只允许动这些侧。
+ * 「只改目标语言」时源侧包仍被已生效语言对使用（en→zh 生效时切 en→ja，
+ * 取消不该动 en）——原先无条件删两侧会让实时翻译静默失效。
+ *
  * **锁分层**（关键）：[stateMutex] 只护状态迁移，**不跨下载**；下载在
  * [QUEUE] 全局串行队列里跑。否则 rollback 抢不到锁，「下载中取消」会阻塞
  * 到下载结束才生效。事务身份靠**代际令牌** [generation]：下载返回后比对
@@ -32,9 +37,25 @@ class LanguageSwitchController(
     private val readEffective: () -> LangPair,
     private val writeEffective: (LangPair) -> Unit,
     private val isPairReady: suspend (LangPair) -> Boolean,
+    /**
+     * [T-lang-switch-txn] 快照 `to` 中**本地尚缺**的标签侧（下载前调用；查询失败
+     * 返回空集 = 本次不允许清理）。只有这些侧可能被本次事务新增。
+     */
+    private val missingSides: suspend (LangPair) -> Set<String>,
     private val downloadPack: suspend (LangPair) -> Unit,
-    private val abortDownload: (LangPair) -> Unit,
-    private val clearPartial: suspend (LangPair) -> Unit,
+    /**
+     * [T-cancel-cleanup-sides] abort 在飞下载，第二参数 = 本次缺失侧（与
+     * [clearPartial] 同口径）：实现方据此收窄"取消后仍下完"的游离包清理面，
+     * 别删已生效语言对仍在用的侧。
+     */
+    private val abortDownload: (LangPair, Set<String>) -> Unit,
+    /**
+     * [T-lang-switch-txn] 清半成品，实参 = (to, 本次缺失侧)：**只清列出的侧**。
+     * 空集 = 本次无新增包 ⇒ **不清任何语言包**；但实现方仍要把该语言对的状态机
+     * 复位到「本地实况」（[T-packstate-settle]：Failed/陈旧 Downloading 否则永久
+     * 粘住，卡片一直显示「失败: cancelled」+ 多余的下载按钮）。
+     */
+    private val clearPartial: suspend (LangPair, Set<String>) -> Unit,
 ) {
 
     data class LangPair(val src: String, val tgt: String)
@@ -42,11 +63,26 @@ class LanguageSwitchController(
     sealed class SwitchState {
         data object Idle : SwitchState()
         /** 进行中：from=已生效基准，to=目标，phase 区分确认前/下载中。 */
-        data class Pending(val from: LangPair, val to: LangPair, val phase: Phase) : SwitchState() {
+        data class Pending(
+            val from: LangPair,
+            val to: LangPair,
+            val phase: Phase,
+            /**
+             * [T-lang-switch-txn] 下载前快照的「`to` 尚缺侧」：清理半成品只许动
+             * 这些侧（确认前相位为空集——此时还没发起下载，本就无事可清）。
+             */
+            val partial: Set<String> = emptySet(),
+        ) : SwitchState() {
             enum class Phase { CONFIRMING, DOWNLOADING }
         }
         /** 回滚失败（abort 后半成品清理抛异常）：UI 错误落点态。 */
-        data class RollbackFailed(val from: LangPair, val to: LangPair, val message: String) : SwitchState()
+        data class RollbackFailed(
+            val from: LangPair,
+            val to: LangPair,
+            val message: String,
+            /** [T-lang-switch-txn] 保留失败时的缺失侧快照，重试清理仍只动这些侧。 */
+            val partial: Set<String> = emptySet(),
+        ) : SwitchState()
     }
 
     enum class SwitchResult { COMMITTED, FAILED, ROLLED_BACK }
@@ -83,9 +119,13 @@ class LanguageSwitchController(
             g
         }
         if (isPairReady(to)) return commit(gen, to)
+        // [T-lang-switch-txn] 下载前快照「尚缺侧」：只有这些侧可能被本次事务新增，
+        // 故清理半成品只允许动它们——共用侧（只改目标语言时的源侧）绝不动。
+        // 快照本身失败 = 不放行任何清理（保守：宁留游离包，不误删在用包）。
+        val partial: Set<String> = runCatching { missingSides(to) }.getOrDefault(emptySet())
         stateMutex.withLock {
             if (activeGen == gen) {
-                _state.value = SwitchState.Pending(from, to, SwitchState.Pending.Phase.DOWNLOADING)
+                _state.value = SwitchState.Pending(from, to, SwitchState.Pending.Phase.DOWNLOADING, partial)
             }
         }
         val ok = try {
@@ -111,7 +151,7 @@ class LanguageSwitchController(
                 else -> {
                     activeGen = -1
                     _state.value = SwitchState.Idle
-                    runCatching { clearPartial(to) } // 失败路径尽力清半成品
+                    runCatching { clearPartial(to, partial) } // 失败路径尽力清本次新增的半成品
                     SwitchResult.FAILED
                 }
             }
@@ -119,23 +159,26 @@ class LanguageSwitchController(
     }
 
     /**
-     * 取消回滚：丢弃 pending，abort 在飞下载，清半成品。prefs 未动（提交
-     * 时机=下载成功后），无需写回。清理失败 → RollbackFailed 落点态。
+     * 取消回滚：丢弃 pending，abort 在飞下载，清半成品（只清本次缺失侧，
+     * 见 [SwitchState.Pending.partial]）。prefs 未动（提交时机=下载成功后），
+     * 无需写回。清理失败 → RollbackFailed 落点态。
      * 在飞事务凭代际令牌自动放弃提交，故本函数**不等下载结束**。
      */
     suspend fun rollback(): SwitchResult {
         val st = _state.value
-        val to = (st as? SwitchState.Pending)?.to ?: (st as? SwitchState.RollbackFailed)?.to
-            ?: return SwitchResult.ROLLED_BACK
-        val from = (st as? SwitchState.Pending)?.from
-            ?: (st as? SwitchState.RollbackFailed)?.from ?: readEffective()
+        val pending = st as? SwitchState.Pending
+        val failed = st as? SwitchState.RollbackFailed
+        val to = pending?.to ?: failed?.to ?: return SwitchResult.ROLLED_BACK
+        val from = pending?.from ?: failed?.from ?: readEffective()
+        // [T-lang-switch-txn] 重试清理仍沿用原快照：只动本次缺失的侧。
+        val partial = pending?.partial ?: failed?.partial ?: emptySet()
         return stateMutex.withLock {
             activeGen = -1 // 先吊销令牌：在飞事务回来即作废
-            abortDownload(to)
-            runCatching { clearPartial(to) }.fold(
+            abortDownload(to, partial)
+            runCatching { clearPartial(to, partial) }.fold(
                 onSuccess = { _state.value = SwitchState.Idle; SwitchResult.ROLLED_BACK },
                 onFailure = {
-                    _state.value = SwitchState.RollbackFailed(from, to, it.message ?: "rollback failed")
+                    _state.value = SwitchState.RollbackFailed(from, to, it.message ?: "rollback failed", partial)
                     SwitchResult.FAILED
                 },
             )
@@ -158,14 +201,14 @@ class LanguageSwitchController(
 
     /**
      * 回滚在飞事务（事务内部路径，调用方持 [stateMutex]）：吊销令牌 + abort +
-     * 尽力清半成品（连切路径，旧事务清理失败不挡新事务；严格清理由
-     * [rollback] 自己承担并落 RollbackFailed）。
+     * 尽力清半成品——只清本次缺失侧（连切路径，旧事务清理失败不挡新事务；
+     * 严格清理由 [rollback] 自己承担并落 RollbackFailed）。
      */
     private suspend fun rollbackLocked(): Boolean {
         activeGen = -1
         val pending = _state.value as? SwitchState.Pending ?: return false
-        abortDownload(pending.to)
-        runCatching { clearPartial(pending.to) }
+        abortDownload(pending.to, pending.partial)
+        runCatching { clearPartial(pending.to, pending.partial) }
         _state.value = SwitchState.Idle
         return true
     }

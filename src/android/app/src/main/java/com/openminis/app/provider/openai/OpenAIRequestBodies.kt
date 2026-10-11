@@ -1342,34 +1342,164 @@ internal class OpenAIRequestBodies(
     }
 
     /**
+     * [T-prompt-cache-key-truncation] 每个会话的截断水位：[lastLen] 是上一次请求的历史
+     * 长度（正常对话只往尾部追加，所以单调增长）。本次长度相对它变小 = 发生了截断 /
+     * 回退 / 重放，[epoch] 这时才 +1，并把水位落到新长度——否则截断后历史每长一条都
+     * 比旧水位短，会连着轮转很多次。
+     *
+     * 水位的作用域是 provider 实例（进程内）：重建实例 / 重启进程后 epoch 归零，key 会
+     * 回到更早的值。分区键是 [conversationIdentity]（行 id + 首条消息结构指纹），
+     * epoch 只是"截断后立刻断开 relay 旧 thread"的尽力而为。
+     *
+     * [T-prompt-cache-key-chat-identity] 这里的 getOrPut 只有在**分区键真的按会话分开**
+     * 时才是「本会话水位」：分区键若退化成常量（旧实现里首条 user 文本为空时就是
+     * `sha256("")`），不相关的会话会共用一条 lastLen——A 涨到 50 条后 B 的首次 3 条请
+     * 求即触发 epoch++，B 的 key 在会话内部翻转。
+     */
+    private class CacheKeyWatermark(var lastLen: Int = 0, var epoch: Int = 0)
+
+    /** [T-prompt-cache-key-truncation] 水位表容量，见 [cacheKeyWatermarks]。 */
+    private val cacheKeyChatCap = 64
+
+    /**
+     * 有界（最近 [cacheKeyChatCap] 个会话）—— provider 实例被 ProviderFactory
+     * 记忆化后跨会话共享（[T-android-provider-memo]），所以水位必须按会话指纹分开存。
+     */
+    private val cacheKeyWatermarks = object : LinkedHashMap<String, CacheKeyWatermark>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CacheKeyWatermark>): Boolean =
+            size > cacheKeyChatCap
+    }
+
+    /**
+     * [T-prompt-cache-key-truncation] 截断信号：只在历史长度相对本会话水位**变小**时
+     * 轮转 epoch。
+     */
+    private fun truncationEpoch(chatId: String, historyLen: Int): Int =
+        synchronized(cacheKeyWatermarks) {
+            val mark = cacheKeyWatermarks.getOrPut(chatId) { CacheKeyWatermark(lastLen = historyLen) }
+            if (historyLen < mark.lastLen) mark.epoch++
+            mark.lastLen = historyLen
+            mark.epoch
+        }
+
+    private fun sha256Hex(text: String): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(text.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+    /** [T-prompt-cache-key-chat-identity] 二进制附件参与指纹的最大字节数。 */
+    private val cacheKeyFingerprintBytes = 64 * 1024
+
+    /**
+     * [T-prompt-cache-key-chat-identity] 附件内容摘要有界化：只喂前
+     * [cacheKeyFingerprintBytes] 字节。身份指纹每次请求都要算，而首条消息的图片在
+     * 长会话里会被重算上千次——全量哈希几 MB 附件是把成本挂在每个请求上；「类型 +
+     * 精确字节长度 + 前缀摘要」三者同时相同的两张真实图片实际不存在。
+     */
+    private fun sha256HexPrefix(bytes: ByteArray): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        digest.update(bytes, 0, minOf(bytes.size, cacheKeyFingerprintBytes))
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun fingerprintOf(data: ByteArray): String =
+        if (data.isEmpty()) "" else sha256HexPrefix(data).take(16)
+
+    private fun fingerprintOf(text: String): String =
+        if (text.isEmpty()) "" else sha256Hex(text.take(cacheKeyFingerprintBytes)).take(16)
+
+    /**
+     * [T-prompt-cache-key-chat-identity] 会话身份指纹——`prompt_cache_key` 与截断
+     * 水位表 [cacheKeyWatermarks] 的分区键。
+     *
+     * 旧实现只哈希首条 user 消息的**文本**，于是「图片直发 / 无 caption」这类首条无
+     * 文本的会话恒为 `sha256("")`：两张这样的会话拿到**完全相同**的 key，而且还共用
+     * 同一份水位——A 涨到 50 条后，B 的首次 3 条请求读到的 lastLen 是 50 → epoch++
+     * → B 的 key 在自己会话内部翻转。"distinct between chats" 与「同会话跨轮稳定」
+     * 同时失效。
+     *
+     * 身份现在由两部分组成：
+     *  - [LLMMessage.dbMessageId]：发送前就已落库的会话级行 id，同一会话跨轮不变、
+     *    跨会话不可能相同；它让「把同一张截图分别发进两个 chat」这种结构完全一致的
+     *    会话也不再撞 key / 撞水位。
+     *  - 首条消息的结构指纹：文本 + 每个 part 的种类/类型/长度 + 二进制附件的有界内容
+     *    摘要。它兜住合成消息（dbMessageId 为 null 的 tool_result、Continue 提醒）以及
+     *    「首条消息被就地编辑」——签名变了 key 就跟着变，relay 把 key 当 thread id 时
+     *    不会继续拿编辑前的上下文。
+     *
+     * 字段用 \u0001 分隔，用户可控文本无法伪造出字段边界。
+     *
+     * 稳定性约束（与 [T-prompt-cache-key-truncation] 同一诉求）：签名只能依赖首条
+     * 消息自身，不能依赖 `messages.size` / 末条消息——那两者在同一次用户回合里每发起
+     * 一次 LLM 调用都会变，会让 key 每个调用都翻转。
+     */
+    private fun conversationIdentity(messages: List<LLMMessage>): String {
+        // 锚点与旧实现一致：首条 user 消息；没有 user 消息（纯 assistant 历史 /
+        // 空列表）时退回首条消息，保证 key 仍是确定值而不是随机值。
+        val anchor = messages.firstOrNull { it.role == LLMMessage.Role.USER }
+            ?: messages.firstOrNull()
+            ?: return "empty"
+        val sb = StringBuilder(256)
+        anchor.dbMessageId?.takeIf { it.isNotEmpty() }?.let {
+            sb.append("db=").append(it).append('\u0001')
+        }
+        sb.append("role=").append(anchor.role.value).append('\u0001')
+        val text = anchor.contentParts.filterIsInstance<AgentContentPart.Text>()
+            .joinToString("") { it.text }
+            .ifEmpty { anchor.content }
+        sb.append("text=").append(text).append('\u0001')
+        for (part in anchor.contentParts) {
+            when (part) {
+                // 已并入上面的 text，这里不再重复计入（否则同一段文本有两种编码）。
+                is AgentContentPart.Text -> Unit
+                is AgentContentPart.ImageData -> sb.append("image=").append(part.mimeType)
+                    .append(':').append(part.data.size).append(':')
+                    .append(fingerprintOf(part.data)).append('\u0001')
+                is AgentContentPart.ToolUse -> sb.append("tool_use=").append(part.id)
+                    .append(':').append(part.name).append('\u0001')
+                is AgentContentPart.ToolResult -> sb.append("tool_result=").append(part.id)
+                    .append(':').append(part.name).append(':').append(part.content.length)
+                    .append('\u0001')
+            }
+        }
+        // 顶层附件（legacy 形状：图片不走 contentParts，只挂在 LLMMessage 上）。
+        for (p in anchor.imageParts) {
+            sb.append("image_part=").append(p.mimeType).append(':').append(p.data.size)
+                .append(':').append(fingerprintOf(p.data)).append('\u0001')
+        }
+        for (a in anchor.audioParts) {
+            sb.append("audio=").append(a.format).append(':').append(a.base64Data.length)
+                .append(':').append(fingerprintOf(a.base64Data)).append('\u0001')
+        }
+        return sb.toString()
+    }
+
+    /**
      * Derives a stable per-conversation `prompt_cache_key` for the Responses
-     * API. Mirrors iOS derivePromptCacheKey (OpenAIAgentProvider.swift:515).
-     * The first user message is re-sent verbatim on every turn → its hash is
-     * stable across turns within the same chat, distinct between chats.
-     * Falls back to a random UUID when there is no user text yet (first
-     * turn with attachments-only input, etc.).
+     * API. Mirrors iOS derivePromptCacheKey (OpenAIAgentProvider.swift:515) in
+     * intent: the conversation's opening turn is re-sent verbatim on every turn,
+     * so its identity is stable across turns within the same chat and distinct
+     * between chats.
+     *
+     * [T-prompt-cache-key-chat-identity] The identity is no longer "the first
+     * user message's TEXT" alone — a text-less opening turn (image-only send
+     * with no caption) degenerated to `sha256("")` for every such chat, identical
+     * keys and a SHARED truncation watermark across unrelated conversations. See
+     * [conversationIdentity] for the identity actually used.
      */
     private fun derivePromptCacheKey(messages: List<LLMMessage>): String {
-        // [T-prompt-cache-key-truncation] SHAPE fingerprint: first user
-        // message + current message count + last user text. A mid-chat
-        // truncation (delete-from-here / rewind / model switching) changes
-        // count or last-user text -> the key rotates and relays that treat
-        // prompt_cache_key as a thread id can no longer serve the
-        // pre-truncation context. Within an untruncated chat every field is
-        // byte-stable per turn, so prompt-cache hit rates are unchanged.
-        val firstUser = messages.firstOrNull { it.role == LLMMessage.Role.USER }?.let { msg ->
-            (msg.contentParts.filterIsInstance<AgentContentPart.Text>().joinToString("") { it.text }
-                .ifEmpty { msg.content })
-        }.orEmpty()
-        val lastUser = messages.lastOrNull { it.role == LLMMessage.Role.USER }?.let { msg ->
-            (msg.contentParts.filterIsInstance<AgentContentPart.Text>().joinToString("") { it.text }
-                .ifEmpty { msg.content })
-        }.orEmpty()
-        val fingerprint = firstUser.length.toString() + ":" + messages.size.toString() + ":" + firstUser + "|" + lastUser
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(fingerprint.toByteArray(Charsets.UTF_8))
-        val hex = digest.joinToString("") { "%02x".format(it) }
-        return "minis-" + hex.take(32)
+        // [T-prompt-cache-key-truncation] 这里是「会话指纹 + 截断 epoch」，**不再**把
+        // `messages.size` 与「最后一条 user 文本」拼进 key：
+        //   - size 在同一次用户回合里每发起一次 LLM 调用就 +2 以上（追加 assistant 与
+        //     tool_result），跨轮严格单调增长 ⇒ key 每个调用都翻转；
+        //   - 工具轮的 `lastUser` 落到被转成 function_call_output 的 tool_result 消息上
+        //     （无 Text 部件、content 也是空）⇒ 同样的不稳定因子。
+        // 两者叠加把跨轮路由亲和性（T126 想要的 prompt cache 命中率）彻底打掉，而旧注释
+        // 还宣称"轮间字节稳定"。截断敏感性改由 epoch 承担：只有历史变短才换 key，
+        // relay 把 prompt_cache_key 当 thread id 时不会再拿到截断前的上下文。
+        val chatId = sha256Hex(conversationIdentity(messages)).take(16)
+        val epoch = truncationEpoch(chatId, messages.size)
+        return "minis-" + sha256Hex("$chatId:$epoch").take(32)
     }
 
     /**

@@ -8,8 +8,11 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -39,6 +42,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -357,16 +361,42 @@ private fun GalleryPage(
                 // so the parent pager doesn't change pages while the user
                 // is panning around inside a magnified image. Mirrors iOS
                 // UIScrollView naturally blocking the parent TabView swipe.
+                //
+                // [T-b1-gallery-swipe] detectTransformGestures could not do
+                // that: once a gesture passes touch slop it consumes EVERY
+                // positionChanged change, including an unzoomed single-finger
+                // swipe (foundation 1.9.1 bytecode — the consume loop is not
+                // gated on zoom/pan being non-zero and cannot see `scale`).
+                // This node sits below the pager, so it won the Main pass and
+                // HorizontalPager never paged. Own the gesture instead and
+                // consume only multi-finger gestures, or single-finger drags
+                // while the image is actually magnified.
                 .pointerInput(Unit) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        scale = (scale * zoom).coerceIn(1f, 8f)
-                        if (scale > 1f) {
-                            offsetX += pan.x
-                            offsetY += pan.y
-                        } else {
-                            offsetX = 0f
-                            offsetY = 0f
-                        }
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        do {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.count { it.pressed }
+                            val zoom = event.calculateZoom()
+                            val pan = event.calculatePan()
+                            if (pressed > 1 || scale > 1f) {
+                                val newScale = (scale * zoom).coerceIn(1f, 8f)
+                                if (newScale > 1f) {
+                                    offsetX += pan.x
+                                    offsetY += pan.y
+                                } else {
+                                    offsetX = 0f
+                                    offsetY = 0f
+                                }
+                                scale = newScale
+                                // Only claim the stream when this really is a
+                                // transform; an unzoomed single finger stays
+                                // unconsumed so the pager can take it.
+                                if (pressed > 1 || zoom != 1f || pan != Offset.Zero) {
+                                    event.changes.forEach { it.consume() }
+                                }
+                            }
+                        } while (event.changes.any { it.pressed })
                     }
                 }
                 .pointerInput(Unit) {

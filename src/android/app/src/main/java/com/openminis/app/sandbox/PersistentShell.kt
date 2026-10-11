@@ -45,6 +45,14 @@ class PersistentShell(
          */
         private const val OUTPUT_HEAD_MAX = 1024
         private const val OUTPUT_TAIL_MAX = 2048
+
+        /**
+         * [T-p1-3-shell-auth-frames] bootstrap 探针的明文前缀：guest 现算
+         * `cksum("p" + 会话秘密)` 回显一次，宿主用 PosixCksum 对照。只有对得上
+         * 才启用带标签的帧——guest 侧 cksum/cut 缺失时若照旧发标签帧，每条命令
+         * 的 DONE 都配不上，命令会一路挂到墙钟预算（最坏 600s）才返回。
+         */
+        private const val TAG_PROBE_PLAIN = "p"
     }
 
     @Volatile
@@ -64,7 +72,9 @@ class PersistentShell(
      * 首条命令的 bootstrap 行生成（`$RANDOM`×4 ≈ 60bit），并以
      * `__MINIS_AUTH_<hex>__` 回显一次。它从不过 stdin 之外的通道，也从不进入
      * 子进程 environ（未 export）——竞争读取 stdin 的后台进程（`cat &` 继承
-     * fd 0）偷得到命令文本，偷不到秘密，因此**伪造不出合法的 GO/DONE 帧**。
+     * fd 0）偷得到命令文本，偷不到秘密：每条命令的帧标签
+     * `cksum(nonce + 秘密)` 由 **guest 侧**算给 DONE 帧，命令文本里只有 nonce，
+     * 因此伪造不出合法的 GO/DONE 帧。
      * null = 尚未握手；握手失败一率降级 legacyFraming（保持旧行为，不破坏可用性）。
      */
     @Volatile
@@ -87,6 +97,16 @@ class PersistentShell(
     val isAlive: Boolean
         get() = process?.isAlive == true
 
+    /**
+     * [T-b10-shell-create-off-lock] True while [ensureStarted] owns the spawn
+     * (the `isStarting` CAS). ExecutionCoordinator needs to tell "registered
+     * but still spawning" from "dead" now that the spawn no longer runs under
+     * its global lock — without it a concurrent caller would judge the freshly
+     * registered instance dead and build a second shell for the same session.
+     */
+    val isStartingUp: Boolean
+        get() = isStarting.get()
+
     /** [diag] Read back the mount this shell was started with (frozen at boot). */
     fun debugBindMount(linuxPath: String): String? = sessionBindMounts[linuxPath]
 
@@ -95,11 +115,20 @@ class PersistentShell(
 
     private class CommandCallback(
         val marker: String,
+        /** [T-p1-3-shell-auth-frames] 期望的 guest 侧帧标签，null = legacy 无标签帧。 */
+        frameTag: String?,
+        /**
+         * [T-android-shell-reader-ownership] 这条回调属于哪个进程实例。
+         * 旧进程的 reader 线程只允许认领/完成自己那个进程的回调——同一个
+         * PersistentShell 实例先后拥有两个进程时（旧进程被超时 stop() 掉、
+         * 新进程已起来），旧 reader 读到 EOF 后不得把"shell 已死"灌给新命令。
+         */
+        val owner: Process,
         val output: BoundedOutputBuffer = BoundedOutputBuffer(),
         val lineCallback: ((String) -> Unit)?,
         var onComplete: ((String, Int) -> Unit)? = null,
     ) {
-        val framer = MarkerFramer(marker)
+        val framer = MarkerFramer(marker, frameTag)
         val heartbeat = SilentOutputHeartbeat()
         fun appendOutput(text: String) {
             if (text.isNotEmpty()) heartbeat.onOutput()
@@ -432,8 +461,12 @@ class PersistentShell(
     /** One decoder per process so a UTF-8 sequence split across reads survives. */
     private var utf8 = Utf8ChunkDecoder()
 
-    private fun dispatchDecoded(text: String, endOfInput: Boolean = false) {
+    private fun dispatchDecoded(text: String, owner: Process, endOfInput: Boolean = false) {
         val cb = pendingCallback ?: return
+        // [T-android-shell-reader-ownership] 只有"回调属于本 reader 的进程"时才
+        // 继续。旧进程的 reader 线程可能是最后一个醒来的人（超时 stop() 已把
+        // process 置空、新命令已挂上新回调），它的 EOF/late 字节不得动新命令。
+        if (cb.owner !== owner) return
         if (text.isEmpty() && !endOfInput) return
         val step = cb.framer.push(text, endOfInput)
         if (step.output.isNotEmpty()) {
@@ -456,19 +489,21 @@ class PersistentShell(
                 if (n < 0) break
                 val text = decoder.decode(buffer, n)
                 if (text.isNotEmpty()) appendTail(text)
-                dispatchDecoded(text)
+                dispatchDecoded(text, p)
             }
             val tail = decoder.finish()
             if (tail.isNotEmpty()) appendTail(tail)
-            dispatchDecoded(tail, endOfInput = true)
+            dispatchDecoded(tail, p, endOfInput = true)
         } catch (e: Exception) {
             Log.d(TAG, "Reader loop ended: ${e.message}")
         }
 
-        // Process exited. Only complete the callback this loop still owns —
-        // a timeout may already have cleared it and started a new shell.
+        // Process exited. Only complete the callback that belongs to THIS
+        // process and is still the current one — a timeout may already have
+        // cleared it and started a new shell with its own callback.
+        // [T-android-shell-reader-ownership]
         val cb = pendingCallback
-        if (cb != null && pendingCallback === cb) {
+        if (cb != null && cb.owner === p && pendingCallback === cb) {
             cb.onComplete?.invoke(
                 cb.output.toString() + "\n[shell died before the command finished; later clauses did not run]",
                 -1,
@@ -529,6 +564,8 @@ class PersistentShell(
      *
      * Wraps the command with a unique marker to detect output boundaries:
      *   {command}; echo "__MINIS_DONE_{marker}_EXIT_$?__"
+     * [T-p1-3-shell-auth-frames] 认证建立后 DONE 帧尾追加 guest 侧现算的标签
+     * （`{marker}_EXIT_$?_{tag}`），marker 仍只是本条命令的 nonce。
      *
      * @return Pair of (output, exitCode)
      */
@@ -592,7 +629,10 @@ class PersistentShell(
         ensureStarted()
 
         val writer = stdinWriter
-        if (writer == null || !isAlive) {
+        // [T-android-shell-reader-ownership] 取一次进程快照：本命令的回调归属
+        // （owner）与 stdin 写目标必须是同一个进程实例，reader 认领回调时按它过滤。
+        val liveProcess = process
+        if (writer == null || liveProcess == null || !liveProcess.isAlive) {
             // [T-android-shell-death-diagnosability] Surface WHY the shell is
             // down, not just that it is. The exit code and proot's own last
             // words (captured by outputTail; stderr is merged into stdout in
@@ -614,34 +654,38 @@ class PersistentShell(
         if (timeout != armed) {
             Log.w(TAG, "caller timeout ${timeout}ms ignored; armed ${armed}ms class=${budget.workClass}")
         }
-        // [T-p1-3-shell-auth-frames] 帧标签：认证建立后 marker = "<nonce>-<tag>"，
-        // tag = cksum(nonce + 会话秘密)。秘密只存在于 guest 的未导出变量里，wrapper
-        // 在 guest 侧现算标签——竞争读者（`cat &` 偷 stdin）偷不到秘密，伪造的
-        // GO/DONE 永远配不上 framer 的字面匹配。握手完成前 / 降级时保持旧格式。
+        // [T-p1-3-shell-auth-frames] 帧标签：认证建立后 DONE 帧尾携带
+        // tag = cksum(nonce + 会话秘密)，由 **guest 侧**现算（__minis_tag）。
+        // 写给 stdin 的文本里只有 nonce（GO 行、DONE 的格式串都只有 nonce），
+        // 秘密与标签都不到命令文本里——偷读 fd 0 的竞争进程（`cat &`）拿到
+        // 命令文本也伪造不出合法 DONE 帧。握手完成前 / 降级时退回无标签旧格式。
         val auth = if (legacyFraming) null else sessionAuth
         val nonce = UUID.randomUUID().toString().take(8)
         val tagCompute: String
-        val marker: String
+        val frameTag: String?
         if (auth != null) {
-            val tag = PosixCksum.cksum(nonce + auth).toString()
+            frameTag = PosixCksum.cksum(nonce + auth).toString()
             // 标签在 guest 侧重算一次（nonce 是本条命令的新值；秘密不出现在
             // 命令文本里，出现在未导出变量的引用中）。
             tagCompute = "__minis_tag=\$(printf '%s' '$nonce'\"\$__minis_auth\" | cksum | cut -d' ' -f1)\n"
-            marker = "$nonce-$tag"
         } else {
+            frameTag = null
             tagCompute = ""
-            marker = nonce
         }
+        val marker = nonce
         // [T-p1-3-shell-auth-frames] 首条命令先握手：guest 生成未导出的
         // __minis_auth 并回显一次（字节落在 GO 之前的 pre-BEGIN 窗口，由
-        // MarkerFramer 捕获）。秘密从不过 stdin 之外的通道；握手结果在命令
-        // 结束后回填 sessionAuth。
+        // MarkerFramer 捕获）。同一条 bootstrap 顺带做一次 TAGPROBE：用真正
+        // 会用的那条管道算一个含秘密的值，宿主对照自己的 PosixCksum 验证
+        // guest 侧 cksum|cut 确实可用，验不过就永久降级 legacy（而不是让每条
+        // 命令的 DONE 都配不上、挂到墙钟预算）。握手结果在命令结束后回填。
         val bootstrap = if (sessionAuth == null && !legacyFraming) {
             // printf %05d 定宽拼接：恰好 20 位数字，长度确定（framer 的 AUTH
             // 正则与跨读 hold 都依赖可预期形状；$RANDOM 裸拼可能短于正则下限）。
             "if [ -z \"\${__minis_auth:-}\" ]; then " +
                 "__minis_auth=\$(printf '%05d%05d%05d%05d' \$RANDOM \$RANDOM \$RANDOM \$RANDOM); " +
-                "echo \"__MINIS_AUTH_\${__minis_auth}__\"; fi\n"
+                "echo \"__MINIS_AUTH_\${__minis_auth}__\"; " +
+                "echo \"__MINIS_TAGPROBE_\$(printf '%s' '$TAG_PROBE_PLAIN'\"\${__minis_auth}\" | cksum | cut -d' ' -f1)__\"; fi\n"
         } else {
             ""
         }
@@ -669,8 +713,9 @@ class PersistentShell(
             // one command's full result re-delivered under four different
             // later tool-call ids because those bytes were never gated off.
             //
-            // [T-p1-3-shell-auth-frames] 认证建立后 GO/DONE 的 marker 携带
-            // guest 侧现算的帧标签（__minis_tag），字面匹配天然拒绝伪造帧。
+            // [T-p1-3-shell-auth-frames] 认证建立后 GO 行只有 nonce，DONE 帧尾
+            // 追加 guest 侧现算的帧标签（__minis_tag）：两者都不含秘密，标签也
+            // 不在命令文本里，字面匹配天然拒绝偷读 stdin 者的伪造帧。
             append(tagCompute)
             append("echo \"__MINIS_GO_${marker}__\"\n")
             // Supervisor re-arm. Not a subshell around the command, not a trap,
@@ -679,7 +724,17 @@ class PersistentShell(
             append("__minis_rc=\$?\n")
             append("kill -KILL \${__minis_cmd_wd:-} 2>/dev/null\n")
             append("if [ ! -d \"\$PWD\" ]; then cd /var/minis/workspace 2>/dev/null || cd / ; fi\n")
-            append("echo \"__MINIS_DONE_${marker}_EXIT_\${__minis_rc}__\"\n")
+            if (frameTag != null) {
+                // [T-p1-3-shell-auth-frames] 标签由 guest 现算（__minis_tag），
+                // 宿主命令文本里只有 nonce；printf 而不是 echo 是为了让 GO/DONE
+                // 两行的形状与 legacy 一致（行尾单个 \n，无 CR）。
+                append(
+                    "printf '__MINIS_DONE_%s_EXIT_%s_%s__\\n' '$nonce' " +
+                        "\"\$__minis_rc\" \"\$__minis_tag\"\n"
+                )
+            } else {
+                append("echo \"__MINIS_DONE_${marker}_EXIT_\${__minis_rc}__\"\n")
+            }
         }
 
         return withContext(Dispatchers.IO) {
@@ -695,6 +750,8 @@ class PersistentShell(
                 coroutineScope {
                 val callback = CommandCallback(
                     marker = marker,
+                    frameTag = frameTag,
+                    owner = liveProcess,
                     lineCallback = lineCallback,
                 )
                 cb = callback
@@ -770,20 +827,33 @@ class PersistentShell(
             } finally {
                 // [T-p1-3-shell-auth-frames] 握手回填/降级判定在两条出路（完成/超时）
                 // 上都要走：AUTH 字节先于 GO 到达，超时命令也可能已完成握手。
-                if (expectedAuth) {
+                // 启用带标签帧的条件是**两条**协议行都到齐且探针与本机 cksum 对得上
+                // ——guest 侧 cksum/cut 不可用时照旧发标签帧会让每条命令都配不上
+                // DONE、一路挂到墙钟预算，所以宁可就地降级 legacy。
+                if (expectedAuth && sessionAuth == null && !legacyFraming) {
                     val seen = authSeen
-                    if (seen != null && sessionAuth == null) {
-                        sessionAuth = seen
-                        com.openminis.app.logging.AppLogger.info(
-                            TAG,
-                            "shell frame auth established (session=$sessionId)",
-                        )
-                    } else if (seen == null && sessionAuth == null && !legacyFraming) {
-                        legacyFraming = true
-                        com.openminis.app.logging.AppLogger.warning(
-                            TAG,
-                            "shell frame auth handshake failed — falling back to legacy unauthenticated framing (session=$sessionId)",
-                        )
+                    val probe = cb?.framer?.tagProbe
+                    val expectedProbe = seen?.let { PosixCksum.cksum(TAG_PROBE_PLAIN + it).toString() }
+                    when {
+                        seen != null && probe != null && probe == expectedProbe -> {
+                            sessionAuth = seen
+                            com.openminis.app.logging.AppLogger.info(
+                                TAG,
+                                "shell frame auth established (session=$sessionId)",
+                            )
+                        }
+                        else -> {
+                            val why = when {
+                                seen == null -> "no AUTH line"
+                                probe == null -> "no TAGPROBE line"
+                                else -> "cksum probe mismatch (guest=$probe host=$expectedProbe)"
+                            }
+                            legacyFraming = true
+                            com.openminis.app.logging.AppLogger.warning(
+                                TAG,
+                                "shell frame auth handshake failed ($why) — falling back to legacy unauthenticated framing (session=$sessionId)",
+                            )
+                        }
                     }
                 }
                 SandboxWorkload.clearDeadline(process)
@@ -845,7 +915,21 @@ class PersistentShell(
         if (p != null) com.openminis.app.service.ActiveRunRegistry.unregisterProcess(sessionId, p)
         if (p != null) com.openminis.app.service.ActiveRunContext.current()?.unregisterProcess(p)
         p?.destroyForcibly()
-        runCatching { p?.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS) }
+        val reaped = runCatching { p?.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS) }
+            .getOrNull() ?: true
+        if (p != null && !reaped) {
+            // [T-android-shell-reader-ownership] destroyForcibly 后 500ms 仍未回收：
+            // 逃逸出进程组的 guest 还攥着 stdout 管道的写端，reader 线程会一直阻塞
+            // 在 read() 上（线程 + fd 双泄漏），旧实现对此完全静默。这里关掉本端
+            // 句柄释放 fd，并把这件事写进文件日志——Linux 上 close 不保证唤醒阻塞中
+            // 的 read，所以不宣称线程一定回收，但泄漏面与发生事实都必须可见。
+            runCatching { p.inputStream?.close() }
+            runCatching { p.errorStream?.close() }
+            com.openminis.app.logging.AppLogger.warning(
+                TAG,
+                "shell process not reaped after SIGKILL+500ms; closing pipe ends to release reader thread (session=$sessionId)",
+            )
+        }
         if (process === p) process = null
         if (cb != null && pendingCallback === cb) {
             cb.onComplete?.invoke(

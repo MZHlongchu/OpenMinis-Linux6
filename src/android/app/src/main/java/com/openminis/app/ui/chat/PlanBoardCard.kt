@@ -96,7 +96,15 @@ fun SessionPlanBoardCard(
     // 等待窗口内写入的新任务会被复查挡下，不误清新轮次。isStreaming 进 key：
     // 轮次进行中不清，流结束（key 翻转）才起算。
     LaunchedEffect(allDone, isStreaming, sessionId) {
-        if (!allDone || plans.isEmpty()) return@LaunchedEffect
+        // [T-plan-board-autoclear-streaming] key 只负责重启计时，函数体此前没有任何
+        // 流状态守卫：轮次仍在流式时，上面 2s 轮询把 allDone 翻 true 就起跑 4s 倒计时，
+        // 到点复查 latest 全 done 即 clear —— 落盘任务板被抹掉（与 :96 注释自述的
+        // "轮次进行中不清"相反）。现在先等流结束（isStreaming 是 key，翻转即重启），
+        // 且用**实时台账**而不是渲染快照判断"有没有板/是否全完成"。
+        if (isStreaming) return@LaunchedEffect
+        if (!allDone) return@LaunchedEffect
+        val live = AgentPlanStore.list(sessionId, context)
+        if (live.isEmpty() || !live.all { it.status == "done" }) return@LaunchedEffect
         kotlinx.coroutines.delay(4_000)
         val latest = AgentPlanStore.list(sessionId, context)
         if (latest.isNotEmpty() && latest.all { it.status == "done" }) {

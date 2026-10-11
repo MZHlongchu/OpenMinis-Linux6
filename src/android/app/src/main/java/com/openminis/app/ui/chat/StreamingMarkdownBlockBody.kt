@@ -42,6 +42,10 @@ internal fun MarkdownBlockBody(
     // with a bounded plain-text preview in the meantime — same structure as
     // the live branch below.
     if (!isStreaming) {
+        // [T-android-freeze-edge-offmain-inline] 主题色快照提到分支最前：冻结边的
+        // 「blocks 缓存命中」分支要用同一份 palette 做 off-main 权威预暖（键必须与
+        // RenderBlock 稍后查的完全一致），下面的冷 MISS 分支继续复用它。
+        val mdColors = currentMdColors()
         val cached = remember(rawText) { MarkdownParseCaches.cachedBlocks(rawText) }
         // [T-android-longtext-anr] Synchronous render ONLY on a real cache HIT.
         // The old `|| rawText.length <= COLD_PARSE_OFFMAIN_THRESHOLD_CHARS` clause
@@ -57,12 +61,53 @@ internal fun MarkdownBlockBody(
         // many fragments miss at once. Cache HITs (scroll-back, re-entry, prewarmed
         // rows) stay synchronous and flicker-free.
         if (cached != null) {
+            // [T-android-freeze-edge-offmain-inline] 冻结边的**主线程全量 inline
+            // 解析**必须消失。命中来源是流式分支的 `putBlocks` 交接：那一帧的
+            // `prewarmLiveTail` 只暖了增量键（[T-android-incremental-cache-key] 规定
+            // 增量结果不得占权威键），所以这里 `RenderBlock` 走权威路径时
+            // `inline(raw)` / `mathLatex(raw)` 必 MISS → 合成线程跑完整 parseInline
+            // （历史上 81% 卡顿栈就在这层）。两步收口：
+            //   1) off-main 预暖权威键 —— `prewarm` 对已暖的块只是锁内查表，真正冷的
+            //      只有流末那个 Paragraph，它的一次全量解析留在 Default 线程；
+            //   2) 权威键补好之前，流末 Paragraph 这一帧走增量入口 —— 流末 tick 刚
+            //      算过同样的 (raw, colors)，命中即零解析；画出来的对象与上一帧像素
+            //      级一致（parity 由 safeInlineSplitOffset 镜像 parseInline 保证），
+            //      所以既没有主线程解析，也没有 F2(a) 要消灭的纯文本预览闪一下。
+            //      这里的键必然命中：沉积 blocks 的那次 off-main tick 在**同一个
+            //      `also` 块里**先 `prewarmLiveTail`（写增量键）再 `putBlocks`
+            //      （见本文件流式分支），而被命中的文本恒是最后那次 tick 的文本，
+            //      所以增量条目就是最新条目、不会被 256K 预算挤掉；万一真被挤掉，
+            //      `inlineIncremental` 也只是回落成「切点 + 前缀/尾段」解析（仍 ≤ 原
+            //      全量解析），不会比修前更差。
+            // `authoritativeReady` 只在组合里读，用来在预暖完成后触发一次重组，
+            // 让该块改读权威值（[T-android-incremental-cache-key] 的「增量结果不当
+            // 权威结果」在此仍然成立：增量值只经由增量入口送到渲染层）。
+            var authoritativeReady by remember(rawText) { mutableStateOf(false) }
+            LaunchedEffect(rawText) {
+                withContext(Dispatchers.Default) {
+                    MarkdownParseCaches.prewarm(cached, mdColors)
+                }
+                coroutineContext.ensureActive()
+                authoritativeReady = true
+            }
             Column(modifier = modifier) {
-                cached.forEach { RenderBlock(it) }
+                val lastIdx = cached.size - 1
+                cached.forEachIndexed { idx, block ->
+                    val freezeEdgeHandoff = !authoritativeReady &&
+                        idx == lastIdx &&
+                        block is MdBlock.Paragraph &&
+                        !MarkdownParseCaches.isAuthoritativeParseCached(block.raw, mdColors)
+                    if (freezeEdgeHandoff) {
+                        androidx.compose.runtime.CompositionLocalProvider(
+                            LocalLiveIncremental provides true,
+                        ) { RenderBlock(block) }
+                    } else {
+                        RenderBlock(block)
+                    }
+                }
             }
             return
         }
-        val mdColors = currentMdColors()
         var parsed by remember(rawText) { mutableStateOf<List<MdBlock>?>(null) }
         LaunchedEffect(rawText) {
             val tStartNs = System.nanoTime()

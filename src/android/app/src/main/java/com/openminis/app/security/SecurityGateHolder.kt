@@ -166,6 +166,7 @@ object SecurityGateHolder {
                     id,
                     canonical,
                     preview,
+                    sessionId = callerSessionId,
                 )
                 val approved = ApprovalGate.waitFor(id, callerSessionId)
                 ApprovalNotifier.cancelApproval(context, id)

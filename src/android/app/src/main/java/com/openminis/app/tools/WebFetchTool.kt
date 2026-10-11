@@ -5,6 +5,8 @@ import com.openminis.app.data.model.AgentToolParam
 import com.openminis.app.network.guardedDohDns
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.ResponseBody
+import okio.Buffer
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
@@ -20,6 +22,30 @@ import java.util.concurrent.TimeoutException
 object WebFetchTool {
     const val NAME = "web_fetch"
     private const val MAX_OUTPUT = 8_000
+
+    /**
+     * [T-web-fetch-oom] 响应体字节硬上限（4 MiB）。
+     *
+     * web_fetch 曾是唯一没有体积护栏的网络工具：`resp.body?.string()` 把整个响应体
+     * 一次读进内存（OkHttp 还会透明解压 gzip），大页面 / 压缩炸弹打穿的是
+     * OutOfMemoryError——Error 不是 Exception，工具内的 catch(Exception)、ToolRetry、
+     * agent 循环都拦不住。上限由 [readBody] 结构性保证，不依赖底层读取粒度。
+     */
+    const val MAX_BODY_BYTES: Long = 4L * 1024 * 1024
+
+    /** [T-web-fetch-oom] 有界读取的结果：正文，以及正文是否被上限切断。 */
+    data class CappedBody(val text: String, val truncated: Boolean)
+
+    /**
+     * [T-web-fetch-oom] 响应声明的 Content-Length 本身已超上限：不读正文，确定性失败。
+     *
+     * 刻意**不**继承 IOException：这不是网络瞬态，[errorCodeFor] 必须把它归到
+     * EXECUTION_FAILED，否则 ToolRetry 会退避重试同一个大页面（确定性失败重试无意义）。
+     */
+    class ResponseTooLargeException(
+        val declaredBytes: Long,
+        val limitBytes: Long,
+    ) : Exception("response body is too large: $declaredBytes bytes declared (limit $limitBytes)")
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -84,9 +110,18 @@ object WebFetchTool {
                         toolTitle = toolTitle,
                     )
                 }
-                val raw = resp.body?.string().orEmpty()
-                val text = htmlToText(raw).take(MAX_OUTPUT)
-                ToolExecutionResult("URL: $finalUrl\n\n$text", true, toolTitle = toolTitle)
+                // [T-web-fetch-oom] 有界读取 + [T-web-fetch-truncation] 显式截断标注：
+                // 旧实现 `resp.body?.string()` 先物化整份正文，再 `.take(MAX_OUTPUT)`
+                // 静默裁掉尾部，模型会把半页当整页。
+                val capped = resp.body?.let { readBody(it) } ?: CappedBody("", false)
+                val text = clampOutput(htmlToText(capped.text))
+                val bodyNote = if (capped.truncated) {
+                    "\n\n[truncated: the response body exceeded $MAX_BODY_BYTES bytes, so only its " +
+                        "first part was parsed; the text above is incomplete]"
+                } else {
+                    ""
+                }
+                ToolExecutionResult("URL: $finalUrl\n\n$text$bodyNote", true, toolTitle = toolTitle)
             }
         } catch (e: Exception) {
             ToolExecutionResult(
@@ -96,6 +131,55 @@ object WebFetchTool {
             )
         }
     }
+
+    /**
+     * [T-web-fetch-oom] / [T-web-fetch-cap-structural] 读响应体，返回的字节数**结构上**
+     * 不超过 [cap]。
+     *
+     * 做法是显式循环，每轮只向底层要「距离 cap 还差多少、最多 cap+1」：多要的那 1 字节
+     * 只用于确认「后面还有」，所以无论 Source 是一个 Buffer（`String.toResponseBody()`
+     * 这种整体可用）、真实连接的分段读，还是会短读的自定义 Source，进内存的字节数都被
+     * 这里钳住（OOM 不可能发生，而不是「通常不会」）。
+     *
+     * 刻意不用 `source.request(cap)` + `readByteArray(source.buffer.size)`：request 只是
+     * 可用性检查、不搬数据，Buffer 承载时会把整份正文物化，短读的 Source 又只交出第一个
+     * 分段——上限会退化成底层读取粒度，等于没护栏。
+     *
+     * 声明的 Content-Length 已超上限时抛 [ResponseTooLargeException]（读之前失败）。
+     * 正文不被关闭：调用方（`Response.use`）持有生命周期。
+     */
+    internal fun readBody(body: ResponseBody, cap: Long = MAX_BODY_BYTES): CappedBody {
+        val declared = body.contentLength()
+        if (declared > cap) throw ResponseTooLargeException(declared, cap)
+
+        val source = body.source()
+        val buffer = Buffer()
+        var total = 0L
+        while (total <= cap) {
+            val n = source.read(buffer, cap + 1 - total)
+            // -1 = EOF（正文正好读完）；0 = 不推进的异常 Source，退出避免自旋。
+            if (n <= 0L) break
+            total += n
+        }
+        val truncated = total > cap
+        val bytes = ByteArray(minOf(total, cap).toInt())
+        buffer.readFully(bytes)
+        // cap 切在多字节字符中间时，String 解码用替换字符（U+FFFD）收尾，不抛异常。
+        return CappedBody(String(bytes, Charsets.UTF_8), truncated)
+    }
+
+    /**
+     * [T-web-fetch-truncation] 字符层裁剪不再静默：被切断时明确标注原始长度与下一步
+     * （用 browser_use 打开整页），标注很短，不构成第二份正文。
+     */
+    internal fun clampOutput(text: String, limit: Int = MAX_OUTPUT): String =
+        if (text.length <= limit) {
+            text
+        } else {
+            text.take(limit) +
+                "\n\n[truncated: showing the first $limit of ${text.length} chars; " +
+                "use browser_use to open the full page]"
+        }
 
     /**
      * [T-retry-error-codes] P1-7: 异常 → 错误码分类。超时/IO 是瞬态（退避重试

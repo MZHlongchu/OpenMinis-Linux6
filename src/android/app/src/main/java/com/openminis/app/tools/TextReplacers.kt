@@ -309,6 +309,13 @@ object TextReplacers {
         var run = 0
         while (run < t.length && t[run] == c) run++
         if (run < 2) return null
+        // [T-anchor-pure-run] 整行同一标点（```、###、***、... 等分隔行）时
+        // run == t.length == tail，下面的 substring(run, t.length - tail) 会变成
+        // substring(len, 0) 并抛 StringIndexOutOfBoundsException —— 该异常会从
+        // splitLines 冒到 FileEditTool，使 line-trimmed 与 block-anchor 两级降级
+        // 整体失效。纯分隔行没有中间的 label，直接给出无尾串的锚 token（该形态
+        // 只由本分支产生，不会与带 label 的锚线如 `### title ###` 混淆）。
+        if (run >= t.length) return "$c$run:0"
         var tail = 0
         while (tail < t.length && t[t.length - 1 - tail] == c) tail++
         val middle = t.substring(run, t.length - tail)

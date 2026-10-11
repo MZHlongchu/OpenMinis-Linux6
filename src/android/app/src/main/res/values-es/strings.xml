@@ -72,6 +72,7 @@
     <string name="resume_action">Reanudar</string>
     <string name="search_chats_placeholder">Buscar conversaciones…</string>
     <string name="search_no_results">Sin resultados para \"%1$s\"</string>
+    <string name="search_truncated_notice">Solo se muestran los %1$d resultados más recientes; afina la búsqueda para ver más.</string>
     <string name="stop_tool">Detener herramienta</string>
     <string name="mic_permission_title">Se necesita permiso de micrófono</string>
     <string name="mic_permission_message">La entrada de voz necesita permiso de micrófono. Toca Abrir ajustes para permitirlo en Minis Ultra.</string>

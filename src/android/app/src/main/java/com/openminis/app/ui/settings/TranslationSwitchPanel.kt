@@ -42,7 +42,8 @@ import kotlinx.coroutines.launch
  *
  * **双槽直接映射到 UI**：下拉框显示已生效槽（prefs 当前值），进行中槽由状态条
  * 呈现（「正在切换到 X…」+ 取消）。prefs 只在下载成功后由控制器写入，所以
- * 确认弹窗点取消 = 事务从未开启，天然无需回滚；下载中取消 = abort + 清半成品。
+ * 确认弹窗点取消 = 事务从未开启，天然无需回滚；下载中取消 = abort + 清半成品
+ * （只清本次新增的侧，[LanguageSwitchController] 持有下载前的缺失侧快照）。
  *
  * **连切不禁用**：新选择直接开新事务，控制器先回滚在飞的旧事务，且回滚基准是
  * 已生效槽（不是被顶掉的 pending）。因此这里**不**加 busy 门禁拦第二次点击——
@@ -72,11 +73,19 @@ internal fun TranslationSwitchPanel() {
             writeEffective = { p ->
                 TranslationPrefs.setStreamSource(context, p.src)
                 TranslationPrefs.setStreamTarget(context, p.tgt)
+                // [T-cancel-refcheck] 提交即登记「已生效语言对」：删除前复核据此保护
+                // 生效语言对仍在用的侧（比如新对快路径提交后，旧取消监听仍想删共用包）。
+                MlKitTranslationEngine.markEffectivePair(p.src, p.tgt)
             },
             isPairReady = { p -> MlKitTranslationEngine.isPairReady(p.src, p.tgt) },
+            missingSides = { p -> MlKitTranslationEngine.missingLanguages(p.src, p.tgt) },
             downloadPack = { p -> MlKitTranslationEngine.downloadPack(context, p.src, p.tgt) },
-            abortDownload = { p -> MlKitTranslationEngine.cancelActiveDownload(p.src, p.tgt) },
-            clearPartial = { p -> MlKitTranslationEngine.deletePack(p.src, p.tgt) },
+            // [T-cancel-cleanup-sides] 取消时"仍被 GMS 下完"的游离包也只清本次
+            // 缺失侧——与 clearPartial 同口径，避免删掉已生效语言对仍在用的侧。
+            abortDownload = { p, sides -> MlKitTranslationEngine.cancelActiveDownload(p.src, p.tgt, sides) },
+            // [T-lang-switch-txn] 只清本次事务新增的侧：只改目标语言时源侧包仍被
+            // 已生效语言对使用，原先的 deletePack 会连它一起删（实时翻译静默失效）。
+            clearPartial = { p, sides -> MlKitTranslationEngine.deletePackSides(p.src, p.tgt, sides) },
         )
     }
     val switchState by controller.state.collectAsState()

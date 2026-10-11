@@ -48,7 +48,13 @@ object UiSkillTool {
         propertyOrdering = listOf("tool_title", "action", "name", "instruction"),
     )
 
-    fun execute(argsJson: String, store: A11ySkillStore?): ToolExecutionResult {
+    /**
+     * @param sessionId 调用方所在的会话 id。[T-a11y-cli-guest] replay 期间
+     *   `openApp` 需要 guest 持久 shell（`android-shizuku-cli` 只存在于 rootfs，
+     *   宿主没有 /bin/bash），没有它这一步会显式失败而不是假装执行过。未知时
+     *   可传 null —— 其余步骤都用进程内的无障碍 API，不依赖会话。
+     */
+    fun execute(argsJson: String, store: A11ySkillStore?, sessionId: String? = null): ToolExecutionResult {
         val obj = runCatching { JSONObject(argsJson) }.getOrElse {
             return ToolExecutionResult("Error: invalid args: ${it.message}", false,
                 errorCode = ToolErrorCode.INVALID_ARGUMENTS)
@@ -62,7 +68,7 @@ object UiSkillTool {
         return when (action) {
             "list" -> list(store, toolTitle)
             "match" -> match(obj, store, toolTitle)
-            "replay" -> replay(obj, store, toolTitle)
+            "replay" -> replay(obj, store, toolTitle, sessionId)
             "save" -> save(obj, store, toolTitle)
             "delete" -> delete(obj, store, toolTitle)
             else -> ToolExecutionResult(
@@ -101,7 +107,12 @@ object UiSkillTool {
         )
     }
 
-    private fun replay(obj: JSONObject, store: A11ySkillStore, toolTitle: String): ToolExecutionResult {
+    private fun replay(
+        obj: JSONObject,
+        store: A11ySkillStore,
+        toolTitle: String,
+        sessionId: String?,
+    ): ToolExecutionResult {
         val name = obj.optString("name").trim()
         val instruction = obj.optString("instruction").trim()
         val skill = when {
@@ -129,7 +140,7 @@ object UiSkillTool {
                 "Error: accessibility service not running — enable Minis under Settings → Accessibility",
                 false, errorCode = ToolErrorCode.PERMISSION_DENIED, toolTitle = toolTitle,
             )
-        val engine = SkillReplayEngine(ServiceA11yActor(svc), store)
+        val engine = SkillReplayEngine(ServiceA11yActor(svc, sessionId), store)
         val result = engine.replay(skill)
         return ToolExecutionResult(result.toString(), result.success,
             errorCode = if (result.success) null else ToolErrorCode.EXECUTION_FAILED,

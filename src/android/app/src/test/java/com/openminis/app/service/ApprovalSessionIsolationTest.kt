@@ -23,16 +23,22 @@ class ApprovalSessionIsolationTest {
         assertFalse(ApprovalGate.isToolAllowedForSession("shell_exec", "b"))
     }
 
-    @Test fun pendingRequestsAndResolutionsStayWithTheirSession() = runBlocking {
-        val a = ApprovalGate.requestApproval("a", "file_write", "a", false)
-        val b = ApprovalGate.requestApproval("b", "file_write", "b")
-        assertEquals(setOf(a), ApprovalGate.pendingApprovals("a").value.keys)
-        assertEquals(setOf(b), ApprovalGate.pendingApprovals("b").value.keys)
-        ApprovalGate.approve(a, "b")
-        assertTrue(ApprovalGate.pendingApprovals("a").value.containsKey(a))
-        ApprovalGate.approve(a, "a")
-        assertFalse(ApprovalGate.pendingApprovals("a").value.containsKey(a))
-        ApprovalGate.deny(b, "b")
+    // [T-junit-void] approve/deny 返回 Boolean（ApprovalGate.kt:151-152），表达式体
+    // `= runBlocking { … }` 会把 T 推断成 Boolean，编译出的方法返回值非 void，
+    // JUnit4 直接报 initializationError（Method …() should be void）。改成块体后
+    // 语句与断言语义不变，只是丢弃 runBlocking 的返回值。
+    @Test fun pendingRequestsAndResolutionsStayWithTheirSession() {
+        runBlocking {
+            val a = ApprovalGate.requestApproval("a", "file_write", "a", false)
+            val b = ApprovalGate.requestApproval("b", "file_write", "b")
+            assertEquals(setOf(a), ApprovalGate.pendingApprovals("a").value.keys)
+            assertEquals(setOf(b), ApprovalGate.pendingApprovals("b").value.keys)
+            ApprovalGate.approve(a, "b")
+            assertTrue(ApprovalGate.pendingApprovals("a").value.containsKey(a))
+            ApprovalGate.approve(a, "a")
+            assertFalse(ApprovalGate.pendingApprovals("a").value.containsKey(a))
+            ApprovalGate.deny(b, "b")
+        }
     }
 
     @Test fun parallelSessionsCanRequestIndependently() = runBlocking {

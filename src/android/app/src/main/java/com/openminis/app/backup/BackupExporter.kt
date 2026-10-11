@@ -128,9 +128,17 @@ class BackupExporter(
 
                 if (BackupCategory.CHATS in options.categories) {
                     onProgress?.invoke("Exporting chats…")
-                    stats[BackupCategory.CHATS.key] =
-                        exportChats(dataDir, trees, options.snapshotAtMillis)
-                    exportBodyBlobs(blobStore, fileIndex)
+                    // [T-bodies-gc-backup-align] 正文快照必须先于会话行冻结。反过来的话，
+                    // 这一轮导出期间被删掉的会话会让它们的正文在"行已写出、库引用已消失"
+                    // 的窗口里被回收/被过滤掉，包里就出现「有行无正文」。见 BackupBodySnapshot。
+                    val bodies = BackupBodySnapshot.take(db.chatDao(), db.messageVersionDao())
+                    try {
+                        stats[BackupCategory.CHATS.key] =
+                            exportChats(dataDir, trees, options.snapshotAtMillis, bodies)
+                        exportBodyFiles(File(context.filesDir, "bodies"), blobStore, fileIndex, bodies)
+                    } finally {
+                        bodies.release()
+                    }
                 }
                 if (BackupCategory.SHARED_FILES in options.categories) {
                     onProgress?.invoke("Exporting shared files…")
@@ -260,6 +268,7 @@ class BackupExporter(
         dataDir: File,
         trees: BackupFileTreeExporter,
         snapshotAtMillis: Long,
+        bodies: BackupBodySnapshot,
     ): BackupManifest.CategoryStat {
         val dao = db.chatDao()
         var messageCount = 0
@@ -293,6 +302,9 @@ class BackupExporter(
                                 for (msg in page) {
                                     if (msg.createdAt <= snapshotAtMillis) {
                                         messages.write("MessageV2", 1, messageRecord(msg))
+                                        // [T-bodies-gc-backup-align] 真写进包的行引用并进快照，
+                                        // 保证"包里的每一行都有正文"。
+                                        bodies.recordWritten(msg.bodyRef)
                                         messageCount += 1
                                     }
                                 }
@@ -380,31 +392,6 @@ class BackupExporter(
      * restoring it would resurrect a red error badge against a message that
      * never failed for this install.
      */
-    private fun exportBodyBlobs(blobStore: BackupBlobStore, fileIndex: BackupFileIndexWriter) {
-        val root = File(context.filesDir, "bodies")
-        if (!root.isDirectory) return
-        for (body in root.listFiles().orEmpty()) {
-            if (!body.isFile || body.name.endsWith(".tmp")) continue
-            runCatching {
-                when (val outcome = blobStore.addFile(body, "chats/_bodies/${body.name}")) {
-                    is BackupBlobStore.Outcome.Stored, is BackupBlobStore.Outcome.Duplicate -> {
-                        val sha = when (outcome) {
-                            is BackupBlobStore.Outcome.Stored -> outcome.sha256
-                            is BackupBlobStore.Outcome.Duplicate -> outcome.sha256
-                            else -> return@runCatching
-                        }
-                        fileIndex.write(BackupFileIndexEntry.file(
-                            "chats/_bodies/${body.name}", body.length(), sha, BackupCategory.CHATS
-                        ))
-                    }
-                    is BackupBlobStore.Outcome.SkippedTooLarge -> fileIndex.write(
-                        BackupFileIndexEntry.sizeSkipped("chats/_bodies/${body.name}", body.length(), BackupCategory.CHATS)
-                    )
-                }
-            }
-        }
-    }
-
     private fun messageRecord(m: MessageEntity): JsonElement = buildJsonObject {
         put("id", JsonPrimitive(m.id))
         put("sessionId", JsonPrimitive(m.sessionId))

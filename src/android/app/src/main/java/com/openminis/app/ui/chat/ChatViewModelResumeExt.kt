@@ -43,43 +43,102 @@ fun ChatViewModel.resume() {
     // behind the input bar.
     _forceScrollToBottom.tryEmit(Unit)
 
-    // If history ends with assistant (Case 2: text-cancel committed a
-    // partial assistant turn), append a continue reminder as a user
-    // message. If it ends with user tool_result (Case 1), it's already
-    // a valid starting point for the next API call — no reminder needed.
-    val historyEndsWithAssistant =
-        agentHistory.lastOrNull()?.role == LLMMessage.Role.ASSISTANT
-    if (historyEndsWithAssistant) {
-        val reminder =
-            "<system-reminder>The user stopped the previous response but now wants to continue. Pick up exactly where you left off.</system-reminder>"
-        val parts = listOf<AgentContentPart>(AgentContentPart.Text(reminder))
-        appendBoundedHistory(
-            LLMMessage(
-                role = LLMMessage.Role.USER,
-                content = reminder,
-                contentParts = parts,
-            )
-        )
-        viewModelScope.launch(Dispatchers.IO) {
-            val partsJson = """[{"type":"text","value":${escapeJson(reminder)}}]"""
-            val persisted = chatRepository.appendMessage(activeSessionId, "user", partsJson)
-            withContext(Dispatchers.Main.immediate) {
-                notePersistedUiRow(null, persisted.id)
-            }
-        }
-    }
+    // [T-truncation-critical-section] resume 也是会话行的**写入者**：下面把
+    // `<system-reminder>` 当 user 行追加进 agentHistory 与 DB。原先 `_isStreaming`
+    // 的置位在协程里、还在 buildSystemPrompt() 之后 —— 剪裁在飞时点「继续」，这条
+    // reminder 行的 sort_order 大于剪裁锚点，会被剪裁的
+    // `deleteMessagesAfter(sort_order >= cutoff)` 顺手删掉（T-delete-from-here-inflight
+    // 的现场：气泡消失、agentHistory 里没有这一行）。同步置位与 send/retry 的 T145
+    // 同口径：剪裁入口一律以 `_isStreaming == false` 为前置条件，从这一刻起不会有
+    // 新剪裁被放行；**已经**放行的那一次由下面协程的 awaitIdle 等它收尾（剪裁侧
+    // 从不等待写入者，不会死锁）。
+    AppLogger.info(ChatViewModel.TAG_STREAM, "resume _isStreaming=true (sync, sid=$activeSessionId)")
+    _isStreaming.value = true
+
+    // [T-resume-prompt-scope] systemPrompt 必须在 awaitIdle + reminder 追加**之后**
+    // 才 build（buildSystemPrompt 读的是重建后的 agentHistory），但使用点在下面的
+    // streamJob 里 —— 所以在这里声明、在 try 块里赋值，而不是在 try 内 `val`。
+    var systemPrompt: String? = null
 
     viewModelScope.launch {
-        val baseSystemPrompt = buildSystemPrompt()
-        val systemPrompt =
-            if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
-                val prefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
-                if (baseSystemPrompt?.startsWith(prefix) == true) baseSystemPrompt
-                else "$prefix\n\n${baseSystemPrompt ?: ""}"
-            } else baseSystemPrompt
+        try {
+            // [T-truncation-critical-section] 写入者准入：等在飞剪裁收尾再碰
+            // agentHistory / DB。没有剪裁时 awaitIdle 不挂起（本协程在
+            // Main.immediate 上内联执行到第一个挂起点），所以常见的无剪裁路径
+            // 不引入任何额外调度。
+            TruncationInterlock.awaitIdle(truncationJob)
 
-        AppLogger.info(ChatViewModel.TAG_STREAM, "resume _isStreaming=true (sid=$activeSessionId)")
-        _isStreaming.value = true
+            // If history ends with assistant (Case 2: text-cancel committed a
+            // partial assistant turn), append a continue reminder as a user
+            // message. If it ends with user tool_result (Case 1), it's already
+            // a valid starting point for the next API call — no reminder needed.
+            // [T-truncation-critical-section] 判定 + 追加 + 落库全部挪到
+            // awaitIdle 之后：剪裁收尾的 awaitBoundedHistoryRebuild 会从 DB 重建
+            // agentHistory，先追加的 reminder 会被那次重建抹掉。
+            if (agentHistory.lastOrNull()?.role == LLMMessage.Role.ASSISTANT) {
+                val reminder =
+                    "<system-reminder>The user stopped the previous response but now wants to continue. Pick up exactly where you left off.</system-reminder>"
+                val parts = listOf<AgentContentPart>(AgentContentPart.Text(reminder))
+                appendBoundedHistory(
+                    LLMMessage(
+                        role = LLMMessage.Role.USER,
+                        content = reminder,
+                        contentParts = parts,
+                    )
+                )
+                // DB 侧落库是 best-effort（与改动前一致：写失败不该连带取消整次
+                // resume —— reminder 已经在上下文里，这一轮照常继续）。
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        val partsJson = """[{"type":"text","value":${escapeJson(reminder)}}]"""
+                        val persisted = chatRepository.appendMessage(activeSessionId, "user", partsJson)
+                        withContext(Dispatchers.Main.immediate) {
+                            notePersistedUiRow(null, persisted.id)
+                        }
+                    }
+                }.onFailure { e ->
+                    if (e is CancellationException) throw e
+                    AppLogger.warning(
+                        ChatViewModel.TAG,
+                        "resume: reminder row not persisted (${e.javaClass.simpleName}: ${e.message}) — continuing in-memory",
+                    )
+                }
+            }
+
+            val baseSystemPrompt = buildSystemPrompt()
+            systemPrompt =
+                if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
+                    val prefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
+                    if (baseSystemPrompt?.startsWith(prefix) == true) baseSystemPrompt
+                    else "$prefix\n\n${baseSystemPrompt ?: ""}"
+                } else baseSystemPrompt
+        } catch (e: CancellationException) {
+            // [T-truncation-critical-section] `_isStreaming` 是同步置位的（见函数头），
+            // 前导阶段（等剪裁 / 追加 reminder / 建 prompt）任何失败或取消都必须把它
+            // 复位：否则一次失败的 resume 会把会话永久锁在「进行中」——发送改走排队、
+            // 剪裁入口全被拒。
+            AppLogger.warning(
+                ChatViewModel.TAG_STREAM,
+                "resume preamble CANCELLED (${e.javaClass.simpleName}) — resetting _isStreaming",
+            )
+            _isStreaming.value = false
+            throw e
+        } catch (e: Exception) {
+            AppLogger.error(
+                ChatViewModel.TAG_STREAM,
+                "resume preamble EXCEPTION ${e.javaClass.simpleName}: ${e.message}",
+            )
+            _isStreaming.value = false
+            setInlineError(e.message ?: "Unknown error")
+            return@launch
+        }
+
+        // [T-truncation-critical-section] `_isStreaming` 已在函数入口**同步**置位
+        // （见函数头），这里不再重复 claim —— 只留一条日志。
+        AppLogger.info(
+            ChatViewModel.TAG_STREAM,
+            "resume stream launch (sid=$activeSessionId, streaming flag already claimed)",
+        )
         streamJob = launchActiveRun(activeSessionId, Dispatchers.IO, ownerSessionIds = setOf(activeSessionId, sessionId, realSessionId), beforeStart = { streamJob = it }) {
             AppLogger.info(ChatViewModel.TAG_STREAM, "resume streamJob ENTER sid=$activeSessionId")
             try {

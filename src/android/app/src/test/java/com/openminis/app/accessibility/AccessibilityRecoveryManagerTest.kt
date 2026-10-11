@@ -1,5 +1,8 @@
 package com.openminis.app.accessibility
 
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -107,6 +110,60 @@ class AccessibilityRecoveryManagerTest {
         // throw or resume a dead continuation.
         AccessibilityRecoveryManager.respond(AccessibilityRecoveryManager.Decision.CANCEL)
         AccessibilityRecoveryManager.respond(AccessibilityRecoveryManager.Decision.REPAIR)
+        assertEquals(null, AccessibilityRecoveryManager.pendingPrompt.value)
+    }
+
+    // ── [T-a11y-prompt-single-flight] 并发调用共享同一次询问 ──────────────
+    //
+    // 并发入口真实存在：MCP 服务端 4 线程池并发处理 shell_exec / ui_action、
+    // 并行子代理各跑一条 a11y 命令。旧实现是单槽 Continuation：后到者覆盖前者，
+    // 且 invokeOnCancellation 无条件清空整个槽——先到者超时会把后到者的注册一起
+    // 抹掉，用户点了"修复"也送不回去。
+
+    private val repairDecision = AccessibilityRecoveryManager.Decision.REPAIR
+
+    private fun prompt(shizuku: Boolean) =
+        AccessibilityRecoveryManager.RepairPrompt(shizukuAvailable = shizuku)
+
+    @Test
+    fun `parallel callers share one prompt and one decision`() = runBlocking {
+        // UNDISPATCHED：body 跑到第一个挂起点（对话框挂上）才交还控制权，
+        // 于是断言不依赖 sleep 时序。
+        val owner = async(start = CoroutineStart.UNDISPATCHED) {
+            AccessibilityRecoveryManager.awaitDecision(prompt(shizuku = true))
+        }
+        assertEquals(true, AccessibilityRecoveryManager.pendingPrompt.value?.shizukuAvailable)
+
+        // 后到者带 shizukuAvailable=false：如果它自己抢槽弹了第二个对话框，
+        // StateFlow 的值就会变——这正是"覆盖前者"的旧行为。
+        val joiner = async(start = CoroutineStart.UNDISPATCHED) {
+            AccessibilityRecoveryManager.awaitDecision(prompt(shizuku = false))
+        }
+        assertEquals(true, AccessibilityRecoveryManager.pendingPrompt.value?.shizukuAvailable)
+
+        AccessibilityRecoveryManager.respond(repairDecision)
+        // 两个调用者拿到同一个决定（旧实现里后到者的槽被清掉，只能等满 60s 拿 CANCEL）。
+        assertEquals(repairDecision, owner.await())
+        assertEquals(repairDecision, joiner.await())
+        assertEquals(null, AccessibilityRecoveryManager.pendingPrompt.value)
+    }
+
+    @Test
+    fun `cancelling one caller keeps the shared prompt alive`() = runBlocking {
+        val owner = async(start = CoroutineStart.UNDISPATCHED) {
+            AccessibilityRecoveryManager.awaitDecision(prompt(shizuku = true))
+        }
+        val joiner = async(start = CoroutineStart.UNDISPATCHED) {
+            AccessibilityRecoveryManager.awaitDecision(prompt(shizuku = true))
+        }
+        // 取消后到者：旧实现里它的 invokeOnCancellation 会无条件把对话框抹掉，
+        // 用户的点击落空、owner 还要再等满 60s。
+        joiner.cancel()
+        joiner.join()
+        assertTrue(AccessibilityRecoveryManager.pendingPrompt.value != null)
+
+        AccessibilityRecoveryManager.respond(repairDecision)
+        assertEquals(repairDecision, owner.await())
         assertEquals(null, AccessibilityRecoveryManager.pendingPrompt.value)
     }
 }

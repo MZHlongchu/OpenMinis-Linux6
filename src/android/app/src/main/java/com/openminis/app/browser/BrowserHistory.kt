@@ -2,6 +2,9 @@ package com.openminis.app.browser
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -17,6 +20,13 @@ class BrowserHistoryStore private constructor(private val context: Context) {
         private const val TAG = "BrowserHistory"
         private const val MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000L // 7 days
         private const val FILENAME = "browser_history.json"
+
+        /**
+         * [T-browser-history-save-debounce-android] record() 由 onPageFinished
+         * （UI 线程）调用，原来每次都整表序列化 + writeText。改为脏快照 +
+         * debounce 后在 IO 上落盘；一次导航里的连续记录只写一次。
+         */
+        private const val SAVE_DEBOUNCE_MS = 500L
 
         @Volatile
         private var instance: BrowserHistoryStore? = null
@@ -37,6 +47,20 @@ class BrowserHistoryStore private constructor(private val context: Context) {
     )
 
     private val entries = mutableListOf<Entry>()
+
+    /** [T-browser-history-save-debounce-android] 落盘用的 IO scope（单例，进程级）。 */
+    private val saveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * [T-browser-save-single-writer-android] 单写者 debounce 落盘器：快照在
+     * **调用者线程**上取（[entries] 只在调用者线程被改，跨线程读会 CME），写盘
+     * 在 [saveScope] 的 IO 上，500ms 内的连续请求合并成一次写。旧实现"先置快照、
+     * 再看 saveJob?.isActive"在 job 已越过 delay、正在写旧快照的窗口里会丢更新
+     * （新快照已置脏但没人落盘），队列化后不再存在该窗口。
+     */
+    private val saveWriter = DebouncedSnapshotWriter<String>(
+        saveScope, Dispatchers.IO, SAVE_DEBOUNCE_MS,
+    ) { writeJson(it) }
 
     init {
         load()
@@ -90,7 +114,10 @@ class BrowserHistoryStore private constructor(private val context: Context) {
 
     fun clear() {
         entries.clear()
-        save()
+        // 用户主动清空：立即同步落盘，不留 debounce 窗口（否则进程被杀会看到历史
+        // "回魂"）。flush 会等在飞的 debounce 写者写完再写这份空快照，因此不会再
+        // 出现"旧快照后落盘把清空结果盖掉"。[T-browser-save-single-writer-android]
+        saveWriter.flush(buildSnapshot())
     }
 
     private fun pruneOld() {
@@ -98,20 +125,33 @@ class BrowserHistoryStore private constructor(private val context: Context) {
         entries.removeAll { it.timestamp < cutoff }
     }
 
+    /**
+     * [T-browser-history-save-debounce-android] 请求落盘。快照在**调用者线程**上取
+     * （[entries] 只在调用者线程被改，跨线程读会 CME），落盘交给 [saveWriter] 的
+     * 单写者队列（500ms 内的多次请求合并成一次写）。
+     */
     private fun save() {
+        saveWriter.request(buildSnapshot())
+    }
+
+    private fun buildSnapshot(): String {
+        val array = JSONArray()
+        for (entry in entries) {
+            val obj = JSONObject()
+            obj.put("id", entry.id)
+            obj.put("url", entry.url)
+            obj.put("title", entry.title)
+            obj.put("timestamp", entry.timestamp)
+            obj.put("domain", entry.domain)
+            array.put(obj)
+        }
+        return array.toString()
+    }
+
+    private fun writeJson(json: String) {
         try {
             val file = File(context.filesDir, FILENAME)
-            val array = JSONArray()
-            for (entry in entries) {
-                val obj = JSONObject()
-                obj.put("id", entry.id)
-                obj.put("url", entry.url)
-                obj.put("title", entry.title)
-                obj.put("timestamp", entry.timestamp)
-                obj.put("domain", entry.domain)
-                array.put(obj)
-            }
-            file.writeText(array.toString())
+            file.writeText(json)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to save history: ${e.message}")
         }

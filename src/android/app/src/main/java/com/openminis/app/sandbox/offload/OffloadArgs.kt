@@ -10,6 +10,12 @@ package com.openminis.app.sandbox.offload
  *   positional args      [positional]
  *
  * Short flags (`-h`) are matched literally by [hasFlag].
+ *
+ * [T-d11-a11y-cli-dashdash] `--` 是选项终止符：它之后的 token 一律进 [positional]，
+ * 不再看前缀。没有这条终止符，任何**以 `-` 开头的值**都会被摘成 flag ——
+ * `android-a11y-cli input text '-5'` 于是丢掉 positional[2]（handler 恒退 2），
+ * `input text '--clear'` 更糟：值本身被当成真的 clear flag。工具侧
+ * (`OffloadCliSyntax.inputText`) 因此在需要时显式发 `--`。
  */
 internal class OffloadArgs(argv: List<String>, booleanFlags: Set<String> = emptySet()) {
     val positional: List<String>
@@ -28,10 +34,13 @@ internal class OffloadArgs(argv: List<String>, booleanFlags: Set<String> = empty
         val pos = mutableListOf<String>()
         val fs = mutableSetOf<String>()
         val vs = mutableMapOf<String, String>()
+        var endOfOptions = false
         var i = 0
         while (i < argv.size) {
             val a = argv[i]
             when {
+                endOfOptions -> pos.add(a)
+                a == "--" -> endOfOptions = true
                 a.startsWith("--") && a.contains('=') -> {
                     val eq = a.indexOf('=')
                     vs[a.substring(2, eq)] = a.substring(eq + 1)

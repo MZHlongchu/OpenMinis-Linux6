@@ -74,7 +74,21 @@ data class BrowserActionInput(
                     fuzzy = obj.optBoolean("fuzzy", false),
                     itemSelector = obj.optString("item_selector").ifEmpty { null },
                     scrollCount = if (obj.has("scroll_count")) obj.optInt("scroll_count") else null,
-                    timeoutMs = if (obj.has("timeout")) obj.optInt("timeout") else null,
+                    // [T-browser-domstable-timeout-unit] `timeout` 有两个生产方：
+                    // agent 工具的 schema 声明它是**秒**（AgentTools "Timeout in
+                    // seconds … default: 10"），CLI offload 的 `--timeout <ms>` 则是
+                    // **毫秒**（BrowserUseOffloadHandler 帮助文本）。执行器
+                    // （normalizedExecArgs）会把 agent 侧的 `timeout` 按别名补出
+                    // `timeout_seconds`，所以：有 timeout_seconds 就按秒换算，否则
+                    // 保持 `timeout` 的毫秒语义不动（CLI 路径不受影响）。
+                    timeoutMs = if (obj.has("timeout_seconds")) {
+                        // 先夹住再乘，避免恶意/极端秒数把 Int 乘溢出。
+                        obj.optInt("timeout_seconds").takeIf { it > 0 }?.coerceAtMost(3_600)?.times(1000)
+                    } else if (obj.has("timeout")) {
+                        obj.optInt("timeout")
+                    } else {
+                        null
+                    },
                     fullPage = obj.optBoolean("full_page", false),
                     cookies = parseCookies(obj),
                 )

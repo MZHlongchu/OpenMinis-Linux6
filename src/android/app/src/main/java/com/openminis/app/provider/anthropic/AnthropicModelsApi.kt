@@ -109,7 +109,14 @@ object AnthropicModelsApi {
                     request,
                     "AnthropicModels",
                     totalBudgetMillis = ModelListFetchRetry.TOTAL_BUDGET_MILLIS / candidateBases.size,
-                    credentialKey = ProviderKeyGate.credentialKey(candidate.orEmpty(), apiKey),
+                    // [T-llm-error-401-model-scope] Register the credential against the host the
+                    // request actually goes to. `candidate` is null for the official endpoint
+                    // (ProviderConfig.effectiveBaseURL returns null without a custom base URL), and
+                    // hostOf("") == "" — which never matched AnthropicProvider.callGateKey's
+                    // "api.anthropic.com|<fp>" scope, so a later chat-side 401 could not be
+                    // attributed to the model channel. request.url.host is host-identical to the
+                    // candidate (parentPath only strips path segments) and correct for null.
+                    credentialKey = ProviderKeyGate.credentialKey(request.url.host, apiKey),
                 )
             } catch (e: Exception) {
                 android.util.Log.e("AnthropicModels", "Fetch error (level=$idx): ${e.message}")

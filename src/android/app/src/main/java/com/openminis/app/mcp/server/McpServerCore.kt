@@ -291,8 +291,18 @@ object McpServerCore {
         }.getOrNull()
     }
 
-    /** Build a minimal HTTP response string. */
-    fun buildHttpResponse(response: Response): String {
+    /**
+     * Build a minimal HTTP response string.
+     *
+     * [T-b1-mcp-cors] The `Access-Control-Allow-Origin` header is emitted ONLY
+     * for a loopback [origin] (see [loopbackCorsOrigin]) and never as `*`.
+     * The previous unconditional `*` let any web page the user visits read
+     * this server's responses cross-origin: the server binds 127.0.0.1, so a
+     * cross-origin `fetch` reaches it, and a `Content-Type: text/plain` POST
+     * is CORS-safe (no preflight) while [McpHttpServer] parses the body as
+     * JSON regardless of the declared type.
+     */
+    fun buildHttpResponse(response: Response, origin: String? = null): String {
         val sb = StringBuilder()
         sb.append("HTTP/1.1 ${response.statusCode} ")
         sb.append(when (response.statusCode) {
@@ -313,7 +323,7 @@ object McpServerCore {
             val bodyBytes = response.body.toByteArray(Charsets.UTF_8)
             sb.append("Content-Length: ${bodyBytes.size}\r\n")
         }
-        sb.append("Access-Control-Allow-Origin: *\r\n")
+        loopbackCorsOrigin(origin)?.let { sb.append("Access-Control-Allow-Origin: $it\r\n") }
         sb.append("Connection: close\r\n")
         sb.append("\r\n")
         if (response.body.isNotEmpty()) {
@@ -323,7 +333,7 @@ object McpServerCore {
     }
 
     /**
-     * Build an HTTP 405 response with CORS headers.
+     * Build an HTTP 405 response with the Allow header.
      */
     fun methodNotAllowedResponse(allowedMethods: String = "POST, OPTIONS"): String {
         return buildHttpResponse(
@@ -333,17 +343,41 @@ object McpServerCore {
     }
 
     /**
-     * Build an HTTP 200 response for OPTIONS (CORS preflight).
+     * Build an HTTP 204 for an OPTIONS preflight. Only a loopback [origin] is
+     * echoed back as an allowed origin — see [buildHttpResponse].
      */
-    fun corsPreflightResponse(): String {
+    fun corsPreflightResponse(origin: String? = null): String {
         return buildString {
             append("HTTP/1.1 204 No Content\r\n")
-            append("Access-Control-Allow-Origin: *\r\n")
+            loopbackCorsOrigin(origin)?.let { append("Access-Control-Allow-Origin: $it\r\n") }
             append("Access-Control-Allow-Methods: POST, OPTIONS\r\n")
             append("Access-Control-Allow-Headers: Content-Type, Authorization\r\n")
             append("Access-Control-Max-Age: 86400\r\n")
             append("Connection: close\r\n")
             append("\r\n")
         }
+    }
+
+    /**
+     * [T-b1-mcp-cors] The origin to echo in `Access-Control-Allow-Origin`, or
+     * null when the response must not grant cross-origin read access.
+     *
+     * Only loopback origins qualify: this server never serves a web UI, so a
+     * non-loopback Origin can only be a page on another host probing the
+     * device's loopback interface. Anything unparseable is refused rather than
+     * trusted.
+     */
+    fun loopbackCorsOrigin(origin: String?): String? {
+        val raw = origin?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val authority = when {
+            raw.startsWith("http://", ignoreCase = true) -> raw.substring(7)
+            raw.startsWith("https://", ignoreCase = true) -> raw.substring(8)
+            else -> return null
+        }.substringBefore('/')
+        val host = when {
+            authority.startsWith("[") -> authority.substringBefore(']') + "]"
+            else -> authority.substringBefore(':')
+        }.lowercase()
+        return if (host == "127.0.0.1" || host == "localhost" || host == "[::1]") raw else null
     }
 }

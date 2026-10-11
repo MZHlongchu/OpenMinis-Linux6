@@ -104,6 +104,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -170,6 +171,13 @@ class ChatViewModel(
 
     companion object {
         internal const val TAG = "ChatViewModel"
+
+        /**
+         * [T-android-persist-row-refresh-merge] [notePersistedUiRow] 里 DB 侧对账的
+         * 合并窗口：够长以吃下「assistant 行 + 一串 tool_result 行」的一次落库风暴，
+         * 又远短于用户能察觉的列表/边缘状态变化。
+         */
+        private const val PERSISTED_ROW_FLUSH_DELAY_MS = 200L
 
         // ── [T-android-compact-runaway] Compaction budgets ──────────────
         //
@@ -970,6 +978,13 @@ class ChatViewModel(
         llmDigestOmitted = 0
     }
 
+    /**
+     * [T-android-persist-row-refresh-merge] [notePersistedUiRow] 的批处理状态：
+     * 合并窗口内新落库的消息 id，以及该窗口的收尾协程。
+     */
+    private val pendingPersistedRowIds = mutableListOf<String>()
+    private var persistedRowFlushJob: Job? = null
+
     internal fun notePersistedUiRow(uiMessageId: String?, dbMessageId: String) {
         if (uiMessageId != null) {
             _messages.value = _messages.value.map { message ->
@@ -978,21 +993,58 @@ class ChatViewModel(
                 } else message
             }
         }
-        viewModelScope.launch {
-            val sort = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                chatRepository.dao.sortOrderOf(dbMessageId)
+        // [T-android-persist-row-refresh-merge] DB 侧对账按「轮」合并。一个回合会
+        // 连着落好几行（assistant 行 + 每个 tool_result 行），旧实现每行都起一个
+        // 协程跑 sortOrderOf / countMessagesAfterSort / refreshHistoryEdges（3 次
+        // count）= 4~6 次 DAO 查询，全是重复的 IO。这里只登记，让
+        // [PERSISTED_ROW_FLUSH_DELAY_MS] 窗口内的所有落库共用一次对账。
+        //
+        // sourceDbIds 回填保持同步（纯内存、无 IO）：它参与分页合并去重
+        // （mergeTailChunk 等按 sourceDbIds 判重叠）与翻译回写寻址，延后 200ms
+        // 会让刚落库的行被分页结果当成新行重复绘制。
+        pendingPersistedRowIds.add(dbMessageId)
+        if (persistedRowFlushJob?.isActive == true) return
+        persistedRowFlushJob = viewModelScope.launch {
+            delay(PERSISTED_ROW_FLUSH_DELAY_MS)
+            // 边跑边到的行不能漏：排空 → 对账 → 再看一眼。旧实现每行各起一个协程，
+            // 改成合并后必须保证"最后一行"也被这次对账覆盖（否则它的 sort_order
+            // 要等到下一个落库行才推进游标）。
+            while (true) {
+                val batch = pendingPersistedRowIds.toList()
+                pendingPersistedRowIds.clear()
+                if (batch.isEmpty()) break
+                flushPersistedRows(batch)
+                if (pendingPersistedRowIds.isEmpty()) break
             }
-            val newest = timeline.newestSortOrder
-            // count == 1 is this row alone. Anything larger is a gap under it.
-            // Jumping the cursor over that gap would hide the missing rows.
-            val skipped = newest != null && withContext(kotlinx.coroutines.Dispatchers.IO) {
-                chatRepository.dao.countMessagesAfterSort(sessionId, newest) > 1
-            }
-            if (!skipped && sort != null && (newest == null || sort > newest)) {
-                timeline.extendNewest(sort)
-            }
-            refreshHistoryEdges()
         }
+    }
+
+    /**
+     * [T-android-persist-row-refresh-merge] 一批新落库行的对账。
+     *
+     * 批内只查一次 sort_order；能否把 newest 游标推到批内最大值，仍由 **DB 范围**
+     * 判定（[T-android-timeline-ledger]）：批覆盖 (newest, max] 区间的全部行才允许
+     * 前进，否则中间存在还没画出来的行，跳过去就把它们藏了——与旧实现逐行
+     * `countMessagesAfterSort(..) > 1` 的判据等价。
+     */
+    private suspend fun flushPersistedRows(dbMessageIds: List<String>) {
+        val newest = timeline.newestSortOrder
+        val sorts = withContext(Dispatchers.IO) { chatRepository.dao.sortOrdersOf(dbMessageIds) }
+        if (sorts.isNotEmpty()) {
+            val maxSort = sorts.max()
+            val advance = when {
+                newest == null -> true
+                maxSort <= newest -> false
+                else -> {
+                    val ours = sorts.count { it > newest }
+                    withContext(Dispatchers.IO) {
+                        chatRepository.dao.countMessagesInSortRange(sessionId, newest + 1, maxSort + 1) == ours
+                    }
+                }
+            }
+            if (advance) timeline.extendNewest(maxSort)
+        }
+        refreshHistoryEdges()
     }
 
     /**
@@ -1750,7 +1802,8 @@ class ChatViewModel(
     /**
      * Latest compact summary for the current session, loaded from the DB on
      * [loadSession] and re-populated after [compactAll] finishes. When non-null,
-     * [effectiveAgentHistory] prepends it as a `<context-summary>` user message
+     * [effectiveAgentHistory] injects it as a `<context-summary>` part on the
+     * first surviving user turn (v1 markers use a standalone summary message)
      * so the model sees a condensed recap of the turns we folded away while
      * keeping the full [agentHistory] on disk as an audit trail. Mirrors iOS
      * Phase-B compact semantics (summary synthesized at inference time, never
@@ -1862,6 +1915,18 @@ class ChatViewModel(
 
     @Volatile
     internal var stoppedRun: com.openminis.app.service.ActiveRun? = null
+
+    /**
+     * [T-delete-from-here-inflight] The asynchronous truncation started by
+     * `deleteFromMessage`. Published so a concurrent `sendMessage` can wait
+     * for it: the send used to persist its user row while the truncation's
+     * `deleteMessagesAfter(sort_order >= cutoff)` was still in flight, so the
+     * brand-new row was deleted and the model answered a question that was no
+     * longer in [agentHistory]. `@Volatile` for the same cross-coroutine
+     * reason as [streamJob].
+     */
+    @Volatile
+    internal var truncationJob: Job? = null
 
     internal var currentProvider: LLMProvider? = null
     internal var currentModel: LLMModel? = null
@@ -2308,14 +2373,34 @@ class ChatViewModel(
         // guard silently drops a mismatch, and a request filed during the
         // draft window predates the persisted id.
         val sid = ApprovalGate.detailOf(id)?.sessionId ?: realSessionId.ifEmpty { sessionId }
-        ApprovalGate.approve(id, sid)
-        ApprovalNotifier.cancelApproval(context, id)
+        val tapLanded = ApprovalGate.approve(id, sid)
+        clearApprovalEntryIfLanded(id, tapLanded)
     }
 
     fun denyPendingTool(id: String) {
         val sid = ApprovalGate.detailOf(id)?.sessionId ?: realSessionId.ifEmpty { sessionId }
-        ApprovalGate.deny(id, sid)
-        ApprovalNotifier.cancelApproval(context, id)
+        val tapLanded = ApprovalGate.deny(id, sid)
+        clearApprovalEntryIfLanded(id, tapLanded)
+    }
+
+    /**
+     * [T-approval-tap-must-land] 站内横幅的清理判据与通知 receiver、前台服务同源
+     * （[ApprovalNotifier.shouldClearEntryAfterTap]）：只有点击**真的落地**、或请求
+     * 已经不在待审批表里（过期）才清通知条目。此前这里无条件
+     * `cancelApproval` —— 一次被 gate 判为归属不符/并发输掉的点击会连通知一起
+     * 消失，用户的选择被吞、请求挂到 90s 超时才以 "User REJECTED" 回给模型。
+     */
+    private fun clearApprovalEntryIfLanded(id: String, tapLanded: Boolean) {
+        val stillPending = ApprovalGate.detailOf(id) != null
+        if (ApprovalNotifier.shouldClearEntryAfterTap(tapLanded, stillPending)) {
+            ApprovalNotifier.cancelApproval(context, id)
+        } else {
+            Log.w(
+                TAG,
+                "approval tap not applied while id=${id.take(8)}… is still pending; " +
+                    "keeping the notification so the user can retry",
+            )
+        }
     }
 
     /**
@@ -3072,13 +3157,24 @@ class ChatViewModel(
         viewModelScope.launch {
             runCatching {
                 val rows = dbIds.mapNotNull { id ->
-                    val raw = chatRepository.dao.messagePartsJson(id) ?: return@mapNotNull null
+                    // [T-translate-writebody] 读**真身**而不是展示投影：
+                    // dao.messagePartsJson 是 substr(COALESCE(preview, parts_json),1,65536)，
+                    // 对 offload 行只给 8KB 截断的预览，>8KB 正文的 JSONArray 必然
+                    // 解析失败 → 译文根本没写进库（UI 上看着换了，重进会话就没了）。
+                    val raw = chatRepository.loadRawPartsForRow(id) ?: return@mapNotNull null
                     if (runCatching { org.json.JSONArray(raw) }.isFailure) return@mapNotNull null
                     id to raw
                 }
                 for ((id, parts) in AssistantReplyText.rewriteStoredParts(rows, text)) {
-                    chatRepository.dao.updateMessageParts(id, parts)
+                    // [T-translate-writebody] 必须走 repo 包装：它先按
+                    // [T-archive-trimmed-parts] 归档旧版本，再 storeBody + 同步
+                    // body_bytes/body_ref/body_sha/preview 四列。直连
+                    // dao.updateMessageParts 会绕过记账——offload 行的 body_ref 仍指向
+                    // 旧正文，下次水合（含模型上下文）会把译文整个回滚成原文。
+                    chatRepository.updateMessageParts(id, parts)
                 }
+            }.onFailure {
+                AppLogger.warning(TAG, "replaceAssistantOutput: 翻译回写失败: ${it.message}")
             }
         }
     }
@@ -3105,13 +3201,19 @@ class ChatViewModel(
         viewModelScope.launch {
             runCatching {
                 val rows = dbIds.mapNotNull { id ->
-                    val raw = chatRepository.dao.messagePartsJson(id) ?: return@mapNotNull null
+                    // [T-translate-writebody] 同 replaceAssistantOutput：取真身，否则
+                    // offload 行（>8KB 正文）的整段回写会被静默丢弃。
+                    val raw = chatRepository.loadRawPartsForRow(id) ?: return@mapNotNull null
                     if (runCatching { org.json.JSONArray(raw) }.isFailure) return@mapNotNull null
                     id to raw
                 }
                 val updated = AssistantReplyText.replaceVisibleOccurrence(rows, old, text, occurrence)
                     ?: return@runCatching
-                chatRepository.dao.updateMessageParts(updated.first, updated.second)
+                // [T-translate-writebody] 走 repo 包装（归档 + body 四列记账），
+                // 直连 dao.updateMessageParts 会让译文在下次水合时被旧正文覆盖。
+                chatRepository.updateMessageParts(updated.first, updated.second)
+            }.onFailure {
+                AppLogger.warning(TAG, "replaceAssistantTextBlock: 翻译回写失败: ${it.message}")
             }
         }
     }
@@ -3353,7 +3455,7 @@ class ChatViewModel(
 
     /**
      * Assemble the outgoing history for a DETACHED marker: the summary is
-     * inlined as a `<context-summary>` text prefix on the first user message
+     * injected as a `<context-summary>` Text part on the first user message
      * of the tail (same role-alternation-safe technique the v2 branch uses),
      * followed by the tail verbatim. Mirrors
      * [effectiveAgentHistoryUncounted]'s v2 path minus the anchor-based
@@ -4207,13 +4309,23 @@ class ChatViewModel(
         // attachment outlives the share-extension cleanup.
         val durableDir = java.io.File(context.cacheDir, "share_inbound").apply { mkdirs() }
         val durable = java.io.File(durableDir, "${java.util.UUID.randomUUID()}-${file.name}")
-        try {
-            file.inputStream().use { input ->
-                durable.outputStream().use { output -> input.copyTo(output) }
+        // [T-b1-paste-no-recopy] A source already inside our private cache
+        // (the clipboard-paste temp file is `cache/clipboard_paste_*`) can be
+        // renamed instead of read+written a second time. Same volume, so the
+        // rename is atomic; a failure falls back to the full copy.
+        val alreadyPrivate = runCatching {
+            file.canonicalPath.startsWith(context.cacheDir.canonicalPath + java.io.File.separator)
+        }.getOrDefault(false)
+        val renamed = alreadyPrivate && runCatching { file.renameTo(durable) }.getOrDefault(false)
+        if (!renamed) {
+            try {
+                file.inputStream().use { input ->
+                    durable.outputStream().use { output -> input.copyTo(output) }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "failed to copy staged share file ${file.name}: ${e.message}")
+                return null
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "failed to copy staged share file ${file.name}: ${e.message}")
-            return null
         }
         val attachment = InputAttachment(
             fileName = file.name,
@@ -4350,6 +4462,11 @@ class ChatViewModel(
         viewModelScope.launch {
             var streamLaunched = false
             try {
+                // [T-truncation-critical-section] 同一临界区：从工具块重跑也会
+                // deleteMessagesAfter/updateMessageParts。剪裁在飞时先等它收尾，
+                // 否则两边各自锚在半应用的 sort_order 区间上，行会丢。
+                // _isStreaming 上面已同步置位，等待期间不会冒出新剪裁。
+                TruncationInterlock.awaitIdle(truncationJob)
                 val sid = realSessionId.takeIf { it.isNotEmpty() } ?: sessionId
 
                 // Locate the DB assistant row holding the target tool_use, and
@@ -4459,6 +4576,9 @@ class ChatViewModel(
                 // [T-truncation-digest-clear] rerunFromToolBlock 也是截断：
                 // digest 摘录里被裁行（含本次删除区间）的痕迹清空防注入。
                 clearHistoryDigestState()
+                // [T-b1-truncate-compact-reconcile] 截断点落在摘要区间内时，
+                // 压缩标记的锚行已被删除 —— 不对账的话摘要仍在描述不存在的轮次。
+                reconcileCompactMarkerAfterTruncation()
 
                 streamLaunched = runRerunStreamTail(initialProvider, "rerunFromToolBlock")
             } finally {
@@ -4541,6 +4661,12 @@ class ChatViewModel(
             // unhappy paths; happy path resets in the streamJob's tail.
             var streamLaunched = false
             try {
+            // [T-truncation-critical-section] 重试是历史行写入者：它重发 user 行、并按
+            // 同一段 sort_order 区间删行，剪裁在飞时不等就会被剪裁的
+            // `deleteMessagesAfter(sort_order >= cutoff)` 连新行一起删掉
+            // （T-delete-from-here-inflight 的现场）。_isStreaming 上面已同步置位，
+            // 等待期间不会有新的剪裁插进来；剪裁侧从不等待写入者，无死锁。
+            TruncationInterlock.awaitIdle(truncationJob)
             val sid = realSessionId.takeIf { it.isNotEmpty() } ?: sessionId
 
             // Find the DB sort_order cutoff for this user message.
@@ -5889,6 +6015,31 @@ class ChatViewModel(
     internal fun appendBoundedHistoryAll(messages: Collection<LLMMessage>) {
         agentHistory.addAll(messages)
         trimAgentHistory()
+    }
+
+    /**
+     * [T-b1-tooluse-json-length] Re-seal a tool_use part whose `input` was
+     * mutated IN PLACE — `ToolJsonRepair.repair` does exactly that right
+     * before dispatch (ChatViewModelAgentLoopExt).
+     *
+     * [AgentContentPart.ToolUse.inputJsonLength] is a construction-time
+     * snapshot, so an in-place mutation would leave the resident-window byte
+     * accounting under-reporting whatever the repair added. Rebuilding the part
+     * via `copy(input = …)` re-snapshots it; nothing else about it changes.
+     */
+    internal fun resealToolInputInHistory(toolUseId: String, args: org.json.JSONObject) {
+        for (i in agentHistory.indices.reversed()) {
+            val parts = agentHistory[i].contentParts
+            val idx = parts.indexOfFirst { it is AgentContentPart.ToolUse && it.id == toolUseId }
+            if (idx < 0) continue
+            val current = parts[idx] as AgentContentPart.ToolUse
+            if (current.input === args) {
+                val updated = parts.toMutableList()
+                updated[idx] = current.copy(input = args)
+                agentHistory[i] = agentHistory[i].copy(contentParts = updated)
+            }
+            return
+        }
     }
 
     internal fun trimAgentHistory() {

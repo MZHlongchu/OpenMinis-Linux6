@@ -133,6 +133,7 @@
     <string name="resume_action">继续</string>
     <string name="search_chats_placeholder">搜索会话…</string>
     <string name="search_no_results">未找到 \"%1$s\" 的结果</string>
+    <string name="search_truncated_notice">只显示最近 %1$d 条匹配，细化关键词可以看到更多。</string>
     <string name="stop_tool">停止工具</string>
     <string name="mic_permission_title">需要麦克风权限</string>
     <string name="mic_permission_message">语音输入需要麦克风权限。点击「打开设置」以为 Minis Ultra 授权。</string>
@@ -1519,6 +1520,8 @@
     <string name="selection_copied_toast">已复制：%1$s</string>
     <string name="selection_copied_as_markdown_toast">已复制为 Markdown</string>
     <string name="selection_copied_as_rich_text_toast">已复制为富文本</string>
+    <!-- [T-cross-shard-copy-gap-notice-i18n] 跨分片复制时选区里有分片文本已随回收淘汰、无法还原时附在结果里。%1$d = 缺失分片数。 -->
+    <string name="chat_selection_copy_gap_notice">[…… 选区中有 %1$d 个分片的文本已被回收，复制到的内容不完整 ……]</string>
     <string name="markdown_table_copy_table">复制表格</string>
     <string name="markdown_table_copy_table_image">复制表格图片</string>
     <string name="markdown_table_copied_toast">已复制表格</string>

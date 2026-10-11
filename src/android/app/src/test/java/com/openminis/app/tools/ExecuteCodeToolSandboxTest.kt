@@ -3,6 +3,7 @@ package com.openminis.app.tools
 import java.io.File
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -95,5 +96,33 @@ class ExecuteCodeToolSandboxTest {
         val r = run("print(typeof file_write + ',' + typeof shell_execute);")
         assertTrue(r.success)
         assertTrue("non-allow-listed names leaked into the scope: ${r.output}", r.output.contains("undefined,undefined"))
+    }
+
+    // ---------- [T-execute-code-abandoned] 墙钟超时后的弃车 ----------
+
+    @Test
+    fun abandonedBridgeStopsFurtherToolCalls() {
+        var calls = 0
+        val bridge = ExecuteCodeTool.Bridge { _, _ ->
+            calls++
+            ToolExecutionResult("content", true)
+        }
+        assertEquals("content", bridge.call("file_read", "{}"))
+        assertEquals(1, calls)
+        // 超时分支置位后：脚本线程仍在跑，但不得再发起真实工具调用
+        bridge.abandoned = true
+        assertEquals("ERROR: script abandoned", bridge.call("web_search", "{}"))
+        assertEquals("ERROR: script abandoned", bridge.call("file_read", "{}"))
+        assertEquals("abandoned script must not reach invoke()", 1, calls)
+    }
+
+    @Test
+    fun abandonedBridgeDiscardsLateOutput() {
+        val bridge = ExecuteCodeTool.Bridge { _, _ -> ToolExecutionResult("content", true) }
+        bridge.print("before")
+        bridge.abandoned = true
+        bridge.print("after")
+        bridge.print(null)
+        assertEquals("before\n", bridge.out.toString())
     }
 }

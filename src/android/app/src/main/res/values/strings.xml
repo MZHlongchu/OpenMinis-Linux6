@@ -149,6 +149,7 @@
     <!-- T46: Session-list search bar -->
     <string name="search_chats_placeholder">Search chats…</string>
     <string name="search_no_results">No results for \"%1$s\"</string>
+    <string name="search_truncated_notice">Only the %1$d most recent matches are shown — refine your search to see more.</string>
 
     <!-- T14: Per-tool stop button (rendered on RUNNING/STREAMING tool cards) -->
     <string name="stop_tool">Stop tool</string>
@@ -1643,6 +1644,8 @@
     <string name="selection_copied_toast">Copied: %1$s</string>
     <string name="selection_copied_as_markdown_toast">Copied as Markdown</string>
     <string name="selection_copied_as_rich_text_toast">Copied as Rich Text</string>
+    <!-- [T-cross-shard-copy-gap-notice-i18n] Appended to a selection copy when fragments of the selected range were recycled out of the document text table and could not be recovered. %1$d = number of missing fragments. -->
+    <string name="chat_selection_copy_gap_notice">[…… %1$d fragment(s) in this selection were recycled, so the copied content is incomplete ……]</string>
     <!-- [T-markdown-table-copy-actions] Long-press menu actions and toasts on rendered markdown tables. -->
     <string name="markdown_table_copy_table">Copy Table</string>
     <string name="markdown_table_copy_table_image">Copy Table Image</string>

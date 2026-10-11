@@ -37,6 +37,14 @@ internal class StickyTree(val rootPid: Int) {
 
 internal object ProcessTree {
 
+    /**
+     * [T-e4-sweep-regex] [parseStatPgrp] 由 400ms 一轮的 /proc 巡检对全机**每个 pid**
+     * 调一次（见 `SandboxWorkload.snapshotProc`），在调用点里现造 `Regex("\\s+")`
+     * 等于每个 pid 一次正则编译。同文件同形的热点（`SandboxWorkload.WHITESPACE`）也已提到
+     * 对象级常量。Regex 无状态，可安全共享。
+     */
+    private val WHITESPACE = Regex("\\s+")
+
     fun collect(rootPid: Int, links: List<ProcLink>): Set<Int> {
         if (rootPid <= 0) return emptySet()
         val byParent = links.groupBy { it.ppid }
@@ -83,7 +91,7 @@ internal object ProcessTree {
     fun parseStatPgrp(stat: String): Int {
         val close = stat.lastIndexOf(')')
         if (close < 0 || close + 2 >= stat.length) return 0
-        val fields = stat.substring(close + 2).trim().split(Regex("\\s+"))
+        val fields = stat.substring(close + 2).trim().split(WHITESPACE)
         // state, ppid, pgrp
         return fields.getOrNull(2)?.toIntOrNull() ?: 0
     }

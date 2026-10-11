@@ -65,10 +65,25 @@ object ReadImageTool {
                 return ToolExecutionResult("Error: File not found: $path", false, toolTitle = toolTitle)
             }
 
-            val original = BitmapFactory.decodeFile(file.absolutePath)
+            // [T-p1-read-image-oom] 两段式解码：先 inJustDecodeBounds 取尺寸，再按 2 的
+            // 幂 inSampleSize 解码。原实现直接 decodeFile 全尺寸解码后才 createScaledBitmap，
+            // 大图（相机原图/生成的大 PNG）在 decodeFile 里就 OOM——而 OOM 是 Error，
+            // 下面的 catch(Exception) 接不住，会一路穿过工具执行链杀掉进程。
+            // 与同包 OcrTool.decodeForOcr 同款两段式。
+            val maxEdge = 2000
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                return ToolExecutionResult("Error: Cannot decode image: $path", false, toolTitle = toolTitle)
+            }
+            var sampleSize = 1
+            while (bounds.outWidth / sampleSize > maxEdge || bounds.outHeight / sampleSize > maxEdge) {
+                sampleSize *= 2
+            }
+            val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize.coerceAtLeast(1) }
+            val original = BitmapFactory.decodeFile(file.absolutePath, decodeOptions)
                 ?: return ToolExecutionResult("Error: Cannot decode image: $path", false, toolTitle = toolTitle)
 
-            val maxEdge = 2000
             val scaled = if (original.width > maxEdge || original.height > maxEdge) {
                 val scale = maxEdge.toFloat() / maxOf(original.width, original.height)
                 val w = (original.width * scale).toInt()
@@ -78,26 +93,31 @@ object ReadImageTool {
                 original
             }
 
-            val out = ByteArrayOutputStream()
-            scaled.compress(Bitmap.CompressFormat.JPEG, 85, out)
-            val imageBytes = out.toByteArray()
+            try {
+                val out = ByteArrayOutputStream()
+                scaled.compress(Bitmap.CompressFormat.JPEG, 85, out)
+                val imageBytes = out.toByteArray()
 
-            if (scaled !== original) scaled.recycle()
-            original.recycle()
-
-            val metadata = "[$path | ${original.width}x${original.height} | ${file.length()} bytes]"
-            ToolExecutionResult(
-                output = metadata,
-                success = true,
-                imageData = imageBytes,
-                imageMimeType = "image/jpeg",
-                toolTitle = toolTitle,
-                // Surface the source file for inline preview in the tool result UI
-                // (mirrors iOS ToolLiveSheet.readImageTool case).
-                imageFilePath = file.absolutePath,
-            )
-        } catch (e: Exception) {
-            ToolExecutionResult("Error reading image: ${e.message}", false)
+                // 元数据用 bounds（真实原始尺寸）：recycle 之后再读 bitmap.width 不可靠。
+                val metadata = "[$path | ${bounds.outWidth}x${bounds.outHeight} | ${file.length()} bytes]"
+                ToolExecutionResult(
+                    output = metadata,
+                    success = true,
+                    imageData = imageBytes,
+                    imageMimeType = "image/jpeg",
+                    toolTitle = toolTitle,
+                    // Surface the source file for inline preview in the tool result UI
+                    // (mirrors iOS ToolLiveSheet.readImageTool case).
+                    imageFilePath = file.absolutePath,
+                )
+            } finally {
+                if (scaled !== original) scaled.recycle()
+                original.recycle()
+            }
+        } catch (t: Throwable) {
+            // Throwable 而非 Exception：解码/缩放的 OOM 也必须变成工具错误回给模型，
+            // 而不是冒泡成未捕获 Error 崩掉 app 进程。
+            ToolExecutionResult("Error reading image: ${t.message ?: t.javaClass.simpleName}", false)
         }
     }
 }

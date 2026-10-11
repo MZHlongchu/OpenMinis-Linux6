@@ -154,7 +154,10 @@ fun extractSubagentReceipts(transcript: List<HarnessMessage>): SubagentHostRecei
         }
         val path = call.args.stringArg("path") ?: call.args.stringArg("destination")
         if (call.tool in LANE_WRITE_TOOLS && !path.isNullOrBlank()) {
-            writtenPaths += normalizeWritePath(path)
+            // [T-claim-path-root-normalization] 与裁定侧用同一个同根归一：工具调用侧的
+            // 相对写法（"docs/x.md"）与结论文本侧的绝对写法（"/var/minis/workspace/docs/x.md"）
+            // 必须落到同一个串，否则"同一文件"永远对不上，complete 主张被误降级为 partial。
+            writtenPaths += resolveAgainstWorkspaceRoot(path)
         }
     }
     return SubagentHostReceipts(
@@ -192,7 +195,8 @@ fun adjudicateSubagentClaim(
                     SubagentCriterionVerdict(criterion, false, "未提供可核验的路径")
                 } else {
                     val unbacked = criterion.paths.filter { path ->
-                        normalizeWritePath(path) !in receipts.writtenPaths
+                        // [T-claim-path-root-normalization] 同根归一，与凭据侧对称。
+                        resolveAgainstWorkspaceRoot(path) !in receipts.writtenPaths
                     }
                     if (unbacked.isEmpty()) {
                         SubagentCriterionVerdict(criterion, true, "host 观察到全部路径的成功写入")

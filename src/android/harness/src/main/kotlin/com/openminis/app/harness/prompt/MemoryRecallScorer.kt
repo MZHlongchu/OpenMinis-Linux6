@@ -62,9 +62,21 @@ object MemoryRecallScorer {
         val normalized = query.trim().lowercase()
         if (normalized.isEmpty()) return emptyList()
         val shortGeneric = normalized.length <= 4 &&
-            GENERIC_PHRASES.any { normalized == it || normalized.contains(it) }
+            GENERIC_PHRASES.any { genericPhraseHit(normalized, it) }
         if (shortGeneric || normalized in GENERIC_PHRASES) return emptyList()
         return tokenize(query).filter { it !in GENERIC_TERMS }
+    }
+
+    /**
+     * [T-b15-generic-substring] 只有多字 CJK 短语才允许「包含即命中」（"继续吧"/"好的谢谢"
+     * 属泛化轮次）；单字条目（"行"/"嗯"/"哦"）与拉丁整词（"ok"/"yes"/"next"）必须整串相等
+     * ——对它们用 contains 会把「运行 / 执行 / 不行 / 银行」以及「book / eyes」这类 ≤4 字符
+     * 查询整体判成泛化轮次，记忆召回静默不触发。
+     */
+    private fun genericPhraseHit(normalized: String, phrase: String): Boolean = when {
+        phrase.length == 1 -> normalized == phrase
+        CJK_SEGMENT.matches(phrase) -> normalized.contains(phrase)
+        else -> normalized == phrase
     }
 
     /**

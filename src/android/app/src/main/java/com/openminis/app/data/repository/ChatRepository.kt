@@ -2,6 +2,7 @@ package com.openminis.app.data.repository
 
 import androidx.room.withTransaction
 import android.database.sqlite.SQLiteBlobTooBigException
+import com.openminis.app.data.body.BodyRefLedger
 import com.openminis.app.data.body.BodyStore
 import com.openminis.app.data.body.BudgetDecision
 import com.openminis.app.data.body.PreviewBudget
@@ -432,21 +433,67 @@ class ChatRepository(
     }
 
     suspend fun deleteSession(id: String) {
-        dao.deleteMessages(id)
-        goalDao.delete(id)
-        dao.deleteSession(id)
+        // [T-bodies-gc] 先取候选 ref（删除后它们可能变成孤儿），去留由全库引用计数判定。
+        deleteSessionsInternal(listOf(id), referencedBodyRefsForSession(dao, versionDao, id))
+    }
+
+    /**
+     * [T-bodies-gc-batch] 批量删会话：候选集按会话点查（`session_id` 有索引，便宜），
+     * **孤儿回收只跑一轮**。逐个 [deleteSession] 会让每个会话各跑一轮回收，而那一轮要
+     * 全表读 `SELECT DISTINCT body_ref` + 版本表（都没有索引）—— N 个会话 = N 次全表扫。
+     */
+    suspend fun deleteSessions(ids: List<String>) {
+        if (ids.isEmpty()) return
+        if (ids.size == 1) return deleteSession(ids[0])
+        val refs = HashSet<String>()
+        for (id in ids) refs.addAll(referencedBodyRefsForSession(dao, versionDao, id))
+        deleteSessionsInternal(ids, refs)
+    }
+
+    private suspend fun deleteSessionsInternal(ids: List<String>, bodyRefs: Set<String>) {
+        for (id in ids) {
+            dao.deleteMessages(id)
+            goalDao.delete(id)
+            dao.deleteSession(id)
+        }
         val dir = filesDir
         if (dir != null) {
-            runCatching { ExecutionCoordinator.sessionDidTerminate(id) }
-            SessionWorkspace.deleteEntire(dir, id)
-            // [T-checkpoint-rewind] 轮次检查点随会话一起消亡：内存态 + 磁盘
-            // （异步写队列与删除在同一串行执行器上排队，见 CheckpointStore.dropSession）。
-            runCatching { com.openminis.app.checkpoint.CheckpointBridge.dropSession(dir, id) }
-            // [T-queue-disk-persistence] 排队提示词的磁盘镜像随会话删除，
-            // 防止重启后给已删除的会话还原出幽灵排队气泡。
-            runCatching { com.openminis.app.queue.PromptQueueBridge.dropSession(dir, id) }
+            for (id in ids) {
+                runCatching { ExecutionCoordinator.sessionDidTerminate(id) }
+                // [T-bodies-gc-main-thread] 会话目录 / 检查点 / 排队镜像的清理都是阻塞
+                // File 层工作，而调用方（删会话、删分组）通常在 `Main.immediate` 上
+                // await 到这里 —— 一律下 IO，别让一次删除卡住主线程。
+                withContext(Dispatchers.IO) {
+                    SessionWorkspace.deleteEntire(dir, id)
+                    // [T-checkpoint-rewind] 轮次检查点随会话一起消亡：内存态 + 磁盘
+                    // （异步写队列与删除在同一串行执行器上排队，见 CheckpointStore.dropSession）。
+                    runCatching { com.openminis.app.checkpoint.CheckpointBridge.dropSession(dir, id) }
+                    // [T-queue-disk-persistence] 排队提示词的磁盘镜像随会话删除，
+                    // 防止重启后给已删除的会话还原出幽灵排队气泡。
+                    runCatching { com.openminis.app.queue.PromptQueueBridge.dropSession(dir, id) }
+                }
+            }
+        }
+        if (bodyRefs.isNotEmpty()) {
+            runCatching { collectOrphanBodies(bodyRefs) }
+                .onFailure { AppLogger.warning(TAG, "[T-bodies-gc] 会话正文回收失败: ${it.message}") }
         }
     }
+
+    /**
+     * [T-bodies-gc] `files/bodies/` 的回收侧。判定、候选集与保险见 [reclaimOrphanBodies]。
+     *
+     * 实现在 ChatBodyGc.kt：本文件在文件尺寸棘轮上（只许缩减），而且回收必须在
+     * [Dispatchers.IO] 上跑 —— 调用方（`SessionListViewModel.deleteSession` /
+     * `deleteFolderWithSessions`）是在 `Main.immediate` 上 await 它的。
+     *
+     * @return 真正删掉的文件数。
+     */
+    suspend fun collectOrphanBodies(candidates: Collection<String>? = null): Int =
+        reclaimOrphanBodies(filesDir, dao, versionDao, candidates)
+
+    /** [T-bodies-gc] 启动期维护：清掉上次被杀掉的写入留下的临时文件。 */
+    suspend fun discardBodyTemps() { filesDir?.let { discardStoredBodyTemps(File(it, "bodies")) } }
 
     // ─── Session groups ("folders") ────────────────────────────────────────
     // [T-android-session-grouping] Ported from iOS ChatStore's Folders section.
@@ -702,8 +749,30 @@ class ChatRepository(
         return dao.listFolders().firstOrNull { it.name.trim().lowercase() == needle }
     }
 
-    suspend fun searchSessions(query: String): List<ChatSessionEntity> =
-        dao.searchSessions("%$query%")
+    /**
+     * [T-search-exists-limit] Session search over titles + message bodies.
+     *
+     * [limit] is pushed into SQL instead of capping the returned list: the old
+     * unbounded query hydrated EVERY matching session entity per debounced
+     * keystroke. Rows come back `updated_at DESC`, so the cap keeps the most
+     * recently active matches.
+     *
+     * [T-search-truncation-visible] 上限必须**显式**：返回值带上
+     * [SessionSearchResult.truncated]，命中更多时才知道这是"最近的一批"而非全部命中
+     * （静默截断 = harness-core `list` 5000 那类问题）。只多取一行判定，不跑 COUNT。
+     */
+    suspend fun searchSessions(
+        query: String,
+        limit: Int = MAX_SEARCH_SESSIONS,
+    ): SessionSearchResult {
+        val bounded = limit.coerceAtLeast(1)
+        // +1 行探针只判定"还有更多"，不渲染；Int.MAX_VALUE 不 +1（负数 = SQLite 无上限）。
+        val probe = if (bounded == Int.MAX_VALUE) bounded else bounded + 1
+        val rows = dao.searchSessions("%$query%", probe)
+        val truncated = rows.size > bounded
+        if (truncated) AppLogger.info(TAG, "[T-search-truncation-visible] 命中超过 $bounded 条，只返回最近一批")
+        return SessionSearchResult(rows.take(bounded), bounded, truncated)
+    }
 
     fun observeMessages(sessionId: String): Flow<List<MessageEntity>> =
         dao.observeMessages(sessionId)
@@ -983,7 +1052,13 @@ class ChatRepository(
         // column, flipping the session list to "No messages yet" the instant a
         // tool finished. The row's own timestamp is still worth recording: it
         // keeps the session sorted as recently-active during a long tool chain.
-        val preview = extractTextPreview(stored.inline)
+        // [T-android-preview-real-body] 预览取自**真身** partsJson，不是 storeBody
+        // 返回的 inline：正文 >2KB 时 inline 只是展示 stub
+        // （`body stored (N bytes)`），把它写进 sessions.last_message 会让会话列表
+        // 长期显示这行字（同一行正文在 DB 里其实带着 8KB 的 preview 列）。
+        // 口径与 updateSessionPreview 一致。纯文本行的 JSON 解析成本与
+        // extractTextPreview 的既有调用点相同（它只取第一个 text part 后即返回）。
+        val preview = extractTextPreview(partsJson)
         if (preview != null) {
             dao.updateLastMessage(sessionId, preview, now)
         } else {
@@ -991,6 +1066,108 @@ class ChatRepository(
         }
         return inserted
         }
+    }
+
+    /**
+     * [T-fork-copy-body-ref] 复制会话 / checkpoint 回溯 fork 逐条搬「引用」而不是搬体积。
+     *
+     * 源行可能已被 offload：正文 >[ResourceLimits.INLINE_BODY_BYTES] 时
+     * `messages.parts_json` 只是展示 stub（`body stored (N bytes)`），真身在
+     * `files/bodies/<sha>`。走 [appendMessage] 会把 stub 当正文重新落库——副本里
+     * 所有大消息永久丢失，而且那段 stub 文本会直接进模型上下文
+     * （ChatViewModel 对 `type=="text"` 取 `value`），连原本 8KB 的 preview 列也被
+     * stub 覆盖。
+     *
+     * 这里原样搬 parts_json / body_bytes / body_ref / body_sha / preview 五列，跳过
+     * 二次落盘：BodyStore 是内容寻址的，两条行指向同一 sha 完全安全，回收侧
+     * [collectOrphanBodies] 按全库引用计数决定去留 —— 前提是这次引用对回收侧可见，见下段。
+     *
+     * [T-bodies-gc-fork-retain] 但「照搬引用」本身不代表回收侧看得见这次引用：回收侧完全
+     * 可能已经读完全库引用（新行还没落库），而源会话若并发被删，这个 ref 在库里就只剩副本
+     * 一行引用 —— 回收侧 unlink 掉的正是活引用（副本的大消息永久退回 stub）。所以搬运
+     * `body_ref` 时必须用 [BodyRefLedger.retain] 在提交锁内声明这次引用：回收侧的锁内逐文件
+     * 确认因此必然看得见（或反过来 —— 回收侧在我们的声明之前就已把文件删掉，那时确实无文件
+     * 可保）。见 `BodyRefLedger`。
+     *
+     * 只有 [partsJson] 与源行一致时才搬引用；调用方改写过 payload（不相等）时必须
+     * 重新落盘，否则 body_ref 指向的仍是旧内容。
+     */
+    suspend fun copyMessageInto(
+        targetSessionId: String,
+        source: MessageEntity,
+        role: String = source.role,
+        partsJson: String = source.partsJson,
+        tokenUsage: String? = source.tokenUsage,
+        reasoningContent: String? = source.reasoningContent,
+    ): MessageEntity {
+        val stored = if (partsJson == source.partsJson) {
+            StoredBody(
+                inline = source.partsJson,
+                bodyBytes = source.bodyBytes,
+                ref = source.bodyRef,
+                sha = source.bodySha,
+                preview = source.preview,
+            )
+        } else {
+            storeBody(partsJson)
+        }
+        // [T-bodies-gc-fork-retain] 搬过来的引用要立刻向回收侧声明（BodyRefLedger 在 BodyStore
+        // 的提交锁内登记）：下面 appendMessage 落库之前，另一个线程的回收完全可能已经判定
+        // "没人引用它"了。
+        stored.ref?.let { ref -> BodyRefLedger.retain(ref) }
+        val now = System.currentTimeMillis()
+        val copy = MessageEntity(
+            id = UUID.randomUUID().toString(),
+            sessionId = targetSessionId,
+            role = role,
+            partsJson = stored.inline,
+            bodyBytes = stored.bodyBytes,
+            bodyRef = stored.ref,
+            bodySha = stored.sha,
+            preview = stored.preview,
+            createdAt = now,
+            tokenUsage = tokenUsage,
+            sortOrder = 0,
+            reasoningContent = reasoningContent,
+        )
+        val inserted = dao.appendMessage(copy)
+        // offload 行的 parts_json 是 stub、preview 列是"真身前 8KB"（可能是半截
+        // JSON）。预览只能从 preview 列里解析，解析不出来就宁可什么都不写
+        // （touchSession 不清列）：绝不能让 stub 文本或半截 JSON 进 last_message。
+        val preview = if (stored.ref != null) {
+            stored.preview?.let { extractTextPreviewStrict(it) }
+        } else {
+            extractTextPreview(partsJson)
+        }
+        if (preview != null) {
+            dao.updateLastMessage(targetSessionId, preview, now)
+        } else {
+            dao.touchSession(targetSessionId, now)
+        }
+        return inserted
+    }
+
+    /**
+     * [T-translate-writebody] 翻译回写要的是**真身**，不是展示投影。
+     *
+     * `ChatDao.messagePartsJson` 读的是 `substr(COALESCE(preview, parts_json),1,65536)`：
+     * 对 offload 行只是一段 8KB 截断的 preview（>8KB 的正文必然解析失败、译文写不
+     * 进去），对 inline 行也可能只是前 8KB。这里按 [readDisplayBody] 的同一策略，
+     * 从 BodyStore 取全量。
+     *
+     * 与 [readDisplayBody] 的差别：拿不到真身时返回 null 而不是退化成 stub ——调用方
+     * 要拿它当新正文写回，把 stub 写回去等于把译文替换成一行"正文已存盘"。
+     */
+    suspend fun loadRawPartsForRow(id: String): String? {
+        val row = dao.messageById(id) ?: return null
+        val ref = row.bodyRef
+        if (ref.isNullOrBlank()) return row.partsJson
+        val store = filesDir?.let { BodyStore(File(it, "bodies")) } ?: return null
+        val bytes = runCatching {
+            store.read(ref, maxBytes = ResourceLimits.MAX_DECLARED_UNCOMPRESSED)
+        }.getOrNull()
+        if (bytes == null || bytes.isEmpty()) return null
+        return bytes.toString(Charsets.UTF_8)
     }
 
     /**
@@ -1132,8 +1309,22 @@ class ChatRepository(
         endMs: Long?,
     ): List<MessageSearchMatch> {
         if (keywords.isEmpty()) return emptyList()
-        val budget = limit.coerceIn(1, 32).toLong() * ResourceLimits.SQL_CELL_BYTES
-        if (!com.openminis.app.data.body.Admission.tryAdmit(budget)) return emptyList()
+        // [T-search-admission-not-empty] 预留口径要覆盖这次查询真正会物化的量：
+        // SQL 取 limit*3 行、每行 substr(...,1,SQL_CELL_BYTES)。预算是进程级并发
+        // 提示，被占只是"暂时挤不下"，**不是"没有命中"**——以前这里直接
+        // `return emptyList()`，于是 minis-sessions-cli search 会告诉 agent
+        // 「历史里没有相关内容」。现在先等一小会儿；仍然拿不到就照常跑这条有界
+        // 查询并记日志（与 loadBoundedMessageRange 的处置一致：那次把拒绝当成空
+        // 结果，让 loadSession 清空两端游标、把长会话中段永久搁浅）。
+        val overFetchRows = limit.coerceIn(1, 32)
+        val budget = overFetchRows.toLong() * 3L * ResourceLimits.SQL_CELL_BYTES
+        val admitted = com.openminis.app.data.body.Admission.awaitAdmit(budget)
+        if (!admitted) {
+            AppLogger.warning(
+                TAG,
+                "searchMessages: admission busy, running the bounded query without a reservation",
+            )
+        }
         return try {
         val conditions = mutableListOf<String>()
         val args = mutableListOf<Any>()
@@ -1179,7 +1370,7 @@ class ChatRepository(
         }
         out
         } finally {
-            com.openminis.app.data.body.Admission.release(budget)
+            if (admitted) com.openminis.app.data.body.Admission.release(budget)
         }
     }
 
@@ -1367,6 +1558,14 @@ class ChatRepository(
          */
         internal const val MAX_TAIL_MESSAGES = 4_000
 
+        /**
+         * [T-search-exists-limit] 会话搜索一次最多回多少条命中会话。搜索框每次
+         * 防抖击键都会跑一遍这个查询：旧 SQL 没有 LIMIT，命中多少就一次拉回多少
+         * 个会话实体（会话多、命中词常见时最糟）。按 updated_at DESC 取最近的一
+         * 批，已覆盖用户真正在找的会话，超出部分不再渲染。
+         */
+        internal const val MAX_SEARCH_SESSIONS = 200
+
         // Session-list preview only needs ~100 chars. Regex.replace on a
         // 500 KB parts_json body was a leftover ICU Matcher.reset path.
         private const val PREVIEW_CLEAN_CHARS = 400
@@ -1474,33 +1673,50 @@ class ChatRepository(
         // messages it just imported — see BackupImporter [T-android-restore-preview].
         internal fun extractTextPreview(partsJson: String): String? {
             try {
-                val array = org.json.JSONArray(partsJson)
-                var hasMedia = false
-                // T-android-session-last-message-tool-call: also track the most
-                // recent tool_use so a mid-tool-call assistant turn (no text yet)
-                // renders as a short tool summary instead of falling through to
-                // "No messages yet" in the session list.
-                var lastToolUse: org.json.JSONObject? = null
-                for (i in 0 until array.length()) {
-                    val obj = array.getJSONObject(i)
-                    val type = obj.optString("type")
-                    if (type == "text") {
-                        val text = obj.optString("value", "")
-                        if (text.isNotBlank()) {
-                            return cleanPreview(text)
-                        }
-                    } else if (type == "mediaRef") {
-                        hasMedia = true
-                    } else if (type == "toolUse") {
-                        val v = obj.optJSONObject("value")
-                        if (v != null) lastToolUse = v
-                    }
-                }
-                if (hasMedia) return "[Image]"
-                if (lastToolUse != null) return summarizeToolUse(lastToolUse)
+                return extractTextPreviewParsed(partsJson)
             } catch (_: Exception) {
                 if (partsJson.isNotBlank()) return cleanPreview(partsJson)
             }
+            return null
+        }
+
+        /**
+         * [T-fork-copy-body-ref] 与 [extractTextPreview] 同口径，但解析失败时返回 null
+         * 而不是把原始片断当预览：fork 复制手里只有 preview 列（真身前 8KB，可能被
+         * 截成非法 JSON），把半截 JSON 或 stub 文案写进 sessions.last_message
+         * 比不写更糟。
+         */
+        internal fun extractTextPreviewStrict(partsJson: String): String? = try {
+            extractTextPreviewParsed(partsJson)
+        } catch (_: Exception) {
+            null
+        }
+
+        private fun extractTextPreviewParsed(partsJson: String): String? {
+            val array = org.json.JSONArray(partsJson)
+            var hasMedia = false
+            // T-android-session-last-message-tool-call: also track the most
+            // recent tool_use so a mid-tool-call assistant turn (no text yet)
+            // renders as a short tool summary instead of falling through to
+            // "No messages yet" in the session list.
+            var lastToolUse: org.json.JSONObject? = null
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                val type = obj.optString("type")
+                if (type == "text") {
+                    val text = obj.optString("value", "")
+                    if (text.isNotBlank()) {
+                        return cleanPreview(text)
+                    }
+                } else if (type == "mediaRef") {
+                    hasMedia = true
+                } else if (type == "toolUse") {
+                    val v = obj.optJSONObject("value")
+                    if (v != null) lastToolUse = v
+                }
+            }
+            if (hasMedia) return "[Image]"
+            if (lastToolUse != null) return summarizeToolUse(lastToolUse)
             return null
         }
         // <system-reminder>...</system-reminder> blocks are runtime nudges

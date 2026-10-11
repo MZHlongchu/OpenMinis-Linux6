@@ -76,10 +76,12 @@ object AtomicFileWrite {
     internal var failReplaceForTest = false
 
     /**
-     * One lock per canonical path. The map is unbounded in theory; in practice
-     * a session touches at most a few hundred distinct files, and an entry
-     * costs a few dozen bytes. Reaping would need its own lock to do safely,
-     * which is a worse trade than the memory.
+     * One lock per canonical path. A session touches at most a few hundred
+     * distinct files, so the map is capped and idle entries are reaped — see
+     * [acquireLock] / [evictIdleLocks] for the invariant that makes reaping
+     * safe (a reaped lock must never be one another writer is using, or about
+     * to use: two mutexes for one path is the lost update this file exists to
+     * prevent).
      */
     private val locks = ConcurrentHashMap<String, ReentrantLock>()
 
@@ -91,24 +93,85 @@ object AtomicFileWrite {
     /** [T-fileedit-locks-bounded] Idle-eviction threshold for [locks]. */
     internal const val MAX_LOCK_ENTRIES = 256
 
-    private fun lockFor(file: File): ReentrantLock {
-        // [T-fileedit-locks-bounded] A per-process map keyed by absolute path
-        // has no natural end on long sessions. The earlier cap policy was a
-        // blanket clear() — which is exactly wrong for a MUTEX table: dropping
-        // a lock another writer is holding (or queued on) lets a concurrent
-        // writer of the SAME path take a fresh lock object and interleave
-        // its read-modify-write. Evict IDLE locks only (unlocked, no waiters);
-        // if every entry is contended the map temporarily exceeds the cap
-        // instead — overshoot bounded by concurrently-edited file count.
+    /**
+     * Acquire the per-path mutex and return it **held**; [withFileLock]
+     * releases it.
+     *
+     * [T-fileedit-locks-bounded] A per-process map keyed by absolute path has
+     * no natural end on long sessions. The earlier cap policy was a blanket
+     * clear() — which is exactly wrong for a MUTEX table: dropping a lock
+     * another writer is holding (or queued on) lets a concurrent writer of the
+     * SAME path take a fresh lock object and interleave its read-modify-write.
+     * Idle entries are evicted instead (see [evictIdleLocks]).
+     *
+     * [T-fileedit-lock-eviction-race] Eviction alone is not enough: a lock that
+     * `getOrPut` has just published is not locked *yet*, so it is
+     * indistinguishable from an idle one and a reaper can drop it before its
+     * owner acquires it — the owner then holds an orphan while the next writer
+     * builds a second mutex for the same path, and both run their
+     * read-modify-write at once. The fix is the identity check after the
+     * acquire: only the lock that is still registered for [path] counts as the
+     * mutex. A writer that lost its entry releases the orphan and retries.
+     * The retry cannot spin: a reap only runs above the cap and takes the map
+     * down to half of it.
+     */
+    private fun acquireLock(file: File): ReentrantLock {
         val path = file.canonicalPath
-        if (locks.size >= MAX_LOCK_ENTRIES && !locks.containsKey(path)) {
-            val iter = locks.entries.iterator()
-            while (iter.hasNext() && locks.size > MAX_LOCK_ENTRIES / 2) {
-                val e = iter.next()
-                if (e.key != path && !e.value.isLocked && !e.value.hasQueuedThreads()) iter.remove()
+        while (true) {
+            val lock = locks.getOrPut(path) { ReentrantLock() }
+            lock.lock()
+            if (locks[path] === lock) {
+                evictIdleLocks(path)
+                return lock
+            }
+            lock.unlock()
+        }
+    }
+
+    /** [T-fileedit-locks-bounded] Drop entries nobody holds, down to half the cap. */
+    private fun evictIdleLocks(keep: String) {
+        if (locks.size <= MAX_LOCK_ENTRIES) return
+        for (entry in locks.entries) {
+            if (locks.size <= MAX_LOCK_ENTRIES / 2) return
+            if (entry.key == keep) continue
+            val victim = entry.value
+            // Only ever reap a lock this thread can take without already holding
+            // it — a held or queued one is in use, and a *reentrant* tryLock on
+            // our own lock would succeed and tear an in-use mutex out of the
+            // table ([T-fileedit-lock-eviction-self-hold]). `remove(key, value)`
+            // so an entry re-created in the meantime is not deleted by mistake.
+            if (!tryReapLock(victim)) continue
+            try {
+                locks.remove(entry.key, victim)
+            } finally {
+                victim.unlock()
             }
         }
-        return locks.getOrPut(path) { ReentrantLock() }
+    }
+
+    /**
+     * [T-fileedit-lock-eviction-self-hold] 摘取判定：**本线程已经持有的锁绝不算空闲**。
+     *
+     * `ReentrantLock.tryLock()` 是可重入的——摘取者正好是持有者时它会成功，于是
+     * [evictIdleLocks] 会把一笔**正在使用**的锁从表里删掉（[keep] 只挡住"当前这一条
+     * 路径"，而同一线程在嵌套写里可能同时持有多条路径的锁：`file_edit` 的
+     * read-modify-write 过程中再写第二个文件就是这种形状）。表里没有它之后，下一个写
+     * 同一路径的线程会建出**第二把**互斥量，两条路径并发写同一个文件——正是本文件要
+     * 防的丢更新。
+     *
+     * 返回 true 表示调用方**已经持有** [victim]（必须 unlock）；false 表示不该摘。
+     */
+    internal fun tryReapLock(victim: ReentrantLock): Boolean =
+        !victim.isHeldByCurrentThread && victim.tryLock()
+
+    /** Run [block] under the per-path mutex. */
+    private inline fun <T> withFileLock(file: File, block: () -> T): T {
+        val lock = acquireLock(file)
+        try {
+            return block()
+        } finally {
+            lock.unlock()
+        }
     }
 
     /**
@@ -118,15 +181,34 @@ object AtomicFileWrite {
      * @return the byte length reported on disk, or null when the write did not
      *   verifiably land — callers must treat null as a failure, NOT as success.
      */
-    fun write(file: File, content: String, append: Boolean = false): Long? {
-        val lock = lockFor(file)
-        lock.lock()
+    fun write(file: File, content: String, append: Boolean = false): Long? =
+        withFileLock(file) { writeLocked(file, content, append) }
+
+    /**
+     * [T-fileedit-symlink-target] Follow symlinks to the file whose bytes must
+     * actually change, so the write goes *through* the link and the link survives.
+     * `rename(2)` — and therefore `File.renameTo` — replaces a symlink itself,
+     * not its target, while every read path ([verify], `readText`) follows it:
+     * overwriting `link` left the target untouched and dropped a regular file
+     * where the link had been, while [verify] re-read that same path (now a
+     * regular file) and reported success.
+     * [T-symlink-realpath] `toRealPath`, NOT `canonicalFile`: Windows
+     * `File.canonicalPath` leaves reparse points unresolved (probed Windows 11,
+     * JDK 21 — `link.canonicalFile` is the link itself), so canonicalising was a
+     * no-op there and the rename still replaced the link; Android/Linux agree
+     * (realpath(3)). A path that does not exist yet (toRealPath requires
+     * existence) falls back to the caller's path.
+     */
+    private fun writeTarget(file: File): File =
         try {
-            return writeLocked(file, content, append)
-        } finally {
-            lock.unlock()
+            file.toPath().toRealPath().toFile()
+        } catch (e: IOException) {
+            AppLogger.debug(TAG, "could not resolve ${file.absolutePath}: ${e.message}")
+            file
+        } catch (e: SecurityException) {
+            AppLogger.warning(TAG, "could not resolve ${file.absolutePath}: ${e.message}")
+            file
         }
-    }
 
     /**
      * Move [tmp] onto [file] without deleting [file] first. A failed rename
@@ -153,23 +235,24 @@ object AtomicFileWrite {
      * never deletes the target first: rename, or copy-over as a fallback, or
      * return false with the previous bytes intact.
      */
-    fun moveIntoPlace(tmp: File, file: File): Boolean {
-        val lock = lockFor(file)
-        lock.lock()
-        try {
-            if (!replaceSibling(tmp, file)) {
-                AppLogger.error(TAG, "replace ${tmp.name} -> ${file.name} failed; previous bytes kept")
-                return false
-            }
-            if (tmp.exists()) tmp.delete()
-            return true
-        } finally {
-            lock.unlock()
+    fun moveIntoPlace(tmp: File, file: File): Boolean = withFileLock(file) {
+        // [T-fileedit-symlink-target] Same reasoning as writeLocked: renaming
+        // onto a symlink would replace the link, not the file it points at.
+        val target = writeTarget(file)
+        if (!replaceSibling(tmp, target)) {
+            AppLogger.error(TAG, "replace ${tmp.name} -> ${target.name} failed; previous bytes kept")
+            return@withFileLock false
         }
+        if (tmp.exists()) tmp.delete()
+        true
     }
 
     private fun writeLocked(file: File, content: String, append: Boolean): Long? {
-        val parent = file.parentFile
+        // [T-fileedit-symlink-target] Write to the resolved target, not the
+        // caller's path — see writeTarget(). [acquireLock] still keys on the
+        // canonical path, so a link and its target keep separate mutexes.
+        val target = writeTarget(file)
+        val parent = target.parentFile
         if (parent != null && !parent.exists()) {
             if (!parent.mkdirs()) {
                 AppLogger.error(TAG, "could not create parent ${parent.absolutePath}")
@@ -181,15 +264,22 @@ object AtomicFileWrite {
             // Append cannot go through rename — the result depends on the
             // bytes already there. Verify instead of making atomic.
             return try {
-                file.appendText(content)
-                verify(file, file.length(), content, appended = true)
+                // [T-append-verify-accounting] 记账式校验：追加前先记下长度，追加后
+                // 断言（长度 == before + UTF-8 字节数）并回读追加区间逐字节比对。
+                // 旧代码把 appendText 之后刚读到的 file.length() 当期望长度传进
+                // verify()——同一个值跟自己比——于是 append 分支实际只剩「文件存在」
+                // 这一条检查：FUSE 影子视图把追加静默丢掉时，工具照旧报成功。
+                val before = if (target.exists()) target.length() else 0L
+                val added = content.toByteArray(Charsets.UTF_8)
+                target.appendText(content)
+                verifyAppend(target, before, added)
             } catch (e: IOException) {
-                AppLogger.error(TAG, "append failed for ${file.name}: ${e.message}")
+                AppLogger.error(TAG, "append failed for ${target.name}: ${e.message}")
                 null
             }
         }
 
-        val tmp = File(parent, file.name + TEMP_SUFFIX)
+        val tmp = File(parent, target.name + TEMP_SUFFIX)
         try {
             tmp.writeText(content)
             val written = tmp.length()
@@ -202,22 +292,22 @@ object AtomicFileWrite {
                 tmp.delete()
                 return null
             }
-            // Do not delete [file] before the new bytes are in place.
+            // Do not delete [target] before the new bytes are in place.
             // renameTo fails when the destination exists on some hosts; deleting
             // first then failing the rename discarded the only copy.
-            if (!replaceSibling(tmp, file)) {
-                AppLogger.error(TAG, "replace ${tmp.name} -> ${file.name} failed; previous bytes kept")
+            if (!replaceSibling(tmp, target)) {
+                AppLogger.error(TAG, "replace ${tmp.name} -> ${target.name} failed; previous bytes kept")
                 tmp.delete()
                 return null
             }
             if (tmp.exists()) tmp.delete()
-            return verify(file, written, content, appended = false)
+            return verify(target, written, content)
         } catch (e: IOException) {
-            AppLogger.error(TAG, "write failed for ${file.name}: ${e.message}")
+            AppLogger.error(TAG, "write failed for ${target.name}: ${e.message}")
             tmp.delete()
             return null
         } catch (e: SecurityException) {
-            AppLogger.error(TAG, "write denied for ${file.name}: ${e.message}")
+            AppLogger.error(TAG, "write denied for ${target.name}: ${e.message}")
             tmp.delete()
             return null
         }
@@ -229,19 +319,26 @@ object AtomicFileWrite {
      * A read that does not hold the lock can observe bytes that a concurrent
      * write is halfway through replacing. Callers that need a consistent view
      * of a file they also write should use this rather than `File.readText()`.
+     *
+     * [T-b15-diff-preimage-cap] [maxBytes] is for callers that only want a
+     * *bounded* pre-image (file_write's 4 KB diff): an oversized file returns
+     * null — checked under the lock, so a concurrent grow cannot slip past —
+     * instead of being decoded into a String of the whole file. Default null
+     * keeps the unlimited semantics every other caller relies on.
      */
-    fun read(file: File): String? {
-        val lock = lockFor(file)
-        lock.lock()
+    fun read(file: File, maxBytes: Long? = null): String? = withFileLock(file) {
         try {
-            return try {
-                if (file.exists()) file.readText() else ""
-            } catch (e: IOException) {
-                AppLogger.error(TAG, "read failed for ${file.name}: ${e.message}")
-                null
+            when {
+                !file.exists() -> ""
+                maxBytes != null && file.length() > maxBytes -> {
+                    AppLogger.debug(TAG, "read of ${file.name} skipped: ${file.length()} bytes > $maxBytes")
+                    null
+                }
+                else -> file.readText()
             }
-        } finally {
-            lock.unlock()
+        } catch (e: IOException) {
+            AppLogger.error(TAG, "read failed for ${file.name}: ${e.message}")
+            null
         }
     }
 
@@ -258,10 +355,8 @@ object AtomicFileWrite {
      *   The lock is held for the whole read-compute-write, so a null result
      *   never leaves a half-applied edit.
      */
-    fun <T> readModifyWrite(file: File, transform: (String) -> T): T? {
-        val lock = lockFor(file)
-        lock.lock()
-        try {
+    fun <T> readModifyWrite(file: File, transform: (String) -> T): T? =
+        withFileLock(file) {
             // [T-fileedit-binary-guard] Read BYTES and decode strictly. The
             // old `file.readText()` silently replaced malformed sequences
             // with U+FFFD and then wrote the CORRUPTED text back to disk;
@@ -342,10 +437,7 @@ object AtomicFileWrite {
                     result
                 }
             }
-        } finally {
-            lock.unlock()
         }
-    }
 
     /**
      * Re-read from disk and confirm the bytes are really there.
@@ -354,7 +446,7 @@ object AtomicFileWrite {
      * returning without throwing is not evidence that the bytes reached the
      * filesystem, which is exactly how the original bug stayed invisible.
      */
-    private fun verify(file: File, expectedLen: Long, content: String, appended: Boolean): Long? {
+    private fun verify(file: File, expectedLen: Long, content: String): Long? {
         if (!file.exists()) {
             AppLogger.error(TAG, "verify failed: ${file.absolutePath} does not exist after write")
             return null
@@ -366,20 +458,76 @@ object AtomicFileWrite {
             )
             return null
         }
-        if (!appended) {
-            // Only the overwrite path can be compared byte-for-byte; an
-            // append's on-disk content is the old bytes plus the new ones.
-            val onDisk = try {
-                file.readText()
-            } catch (e: IOException) {
-                AppLogger.error(TAG, "verify failed: cannot re-read ${file.name}: ${e.message}")
-                return null
-            }
-            if (onDisk != content) {
-                AppLogger.error(TAG, "verify failed: ${file.name} content differs after write")
-                return null
-            }
+        // Only the overwrite path gets here — the file was replaced wholesale,
+        // so it must equal [content] byte for byte.
+        val onDisk = try {
+            file.readText()
+        } catch (e: IOException) {
+            AppLogger.error(TAG, "verify failed: cannot re-read ${file.name}: ${e.message}")
+            return null
+        }
+        if (onDisk != content) {
+            AppLogger.error(TAG, "verify failed: ${file.name} content differs after write")
+            return null
         }
         return file.length()
+    }
+
+    /**
+     * [T-append-verify-accounting] Verify an append against the length the file
+     * had *before* it ([before]) plus the bytes that were meant to be added
+     * ([added]) — never against a length read back after the write, which can
+     * only ever agree with itself.
+     *
+     * Both halves matter: `appendText` returning normally proves nothing (the
+     * shadow FUSE view behind external mounts can swallow the write), and a
+     * length-only check cannot see a write that landed with different bytes.
+     * Only the appended region is read back, so a huge append target does not
+     * pull the whole file into memory. Internal so a test can drive the
+     * mismatch directly.
+     *
+     * @return the resulting length, or null when the append did not verifiably
+     *   land.
+     */
+    internal fun verifyAppend(file: File, before: Long, added: ByteArray): Long? {
+        val expected = before + added.size
+        if (!file.exists()) {
+            AppLogger.error(TAG, "verify failed: ${file.absolutePath} does not exist after append")
+            return null
+        }
+        if (file.length() != expected) {
+            AppLogger.error(
+                TAG,
+                "verify failed: ${file.name} is ${file.length()} bytes after append, expected $expected",
+            )
+            return null
+        }
+        if (added.isEmpty()) return expected
+        return try {
+            java.io.RandomAccessFile(file, "r").use { raf ->
+                raf.seek(before)
+                val buf = ByteArray(minOf(added.size, 64 * 1024))
+                var off = 0
+                while (off < added.size) {
+                    val n = minOf(buf.size, added.size - off)
+                    raf.readFully(buf, 0, n)
+                    for (i in 0 until n) {
+                        if (buf[i] != added[off + i]) {
+                            AppLogger.error(
+                                TAG,
+                                "verify failed: ${file.name} differs from the appended bytes " +
+                                    "at offset ${before + off + i}",
+                            )
+                            return null
+                        }
+                    }
+                    off += n
+                }
+                expected
+            }
+        } catch (e: IOException) {
+            AppLogger.error(TAG, "verify failed: cannot re-read ${file.name}: ${e.message}")
+            null
+        }
     }
 }

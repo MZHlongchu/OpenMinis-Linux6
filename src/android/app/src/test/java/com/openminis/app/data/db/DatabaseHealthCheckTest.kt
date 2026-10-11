@@ -98,20 +98,68 @@ class DatabaseHealthCheckTest {
     }
 
     @Test
-    fun `checker crash is treated as corruption - quarantine still protects the user`() {
+    fun `checker crash is unavailable - the database is NOT moved aside`() {
+        // [T-db-gate-probe-unavailable] 探针自身抛错只能说明「判不出来」，不能当成
+        // 损坏：旧行为会把库整体隔离，用户开机进空库。现在保持原文件不动。
         val filesDir = tmp.root
         val db = fakeDb(filesDir, sidecars = false)
+        val before = db.readBytes()
 
         val outcome = DatabaseHealthCheck.ensureHealthyOrQuarantined(
             dbFile = db, filesDir = filesDir,
             checker = { throw RuntimeException("native exploded") },
         )
 
+        assertTrue(outcome is DatabaseHealthCheck.Outcome.Unavailable)
+        assertTrue((outcome as DatabaseHealthCheck.Outcome.Unavailable).reason.startsWith("checker crashed:"))
+        assertTrue(db.isFile)
+        assertTrue(db.readBytes().contentEquals(before))
+        assertTrue(DatabaseHealthCheck.listQuarantineDirs(filesDir).isEmpty())
+        // 诊断报告仍然留下，但 kind 与「已隔离」区分开，UI 不会弹隔离弹窗。
+        val report = DatabaseHealthCheck.pendingReport(filesDir)!!
+        assertEquals(DatabaseHealthCheck.KIND_UNAVAILABLE, report.kind)
+        assertNull(report.quarantineDir)
+        assertTrue(report.movedFiles.isEmpty())
+    }
+
+    @Test
+    fun `explicit unavailable probe keeps the database and never quarantines`() {
+        val filesDir = tmp.root
+        val db = fakeDb(filesDir, sidecars = false)
+        val before = db.readBytes()
+
+        val outcome = DatabaseHealthCheck.ensureHealthyOrQuarantined(
+            dbFile = db, filesDir = filesDir,
+            checker = object : IntegrityChecker {
+                override fun quickCheck(dbFile: File): String? = "unused"
+                override fun probe(dbFile: File): IntegrityProbeResult =
+                    IntegrityProbeResult.Unavailable("read-only: disk I/O error")
+            },
+        )
+
+        assertEquals(DatabaseHealthCheck.Outcome.Unavailable("read-only: disk I/O error"), outcome)
+        assertTrue(db.isFile)
+        assertTrue(db.readBytes().contentEquals(before))
+        assertFalse(File(filesDir, DatabaseHealthCheck.ROLLBACK_MARKER_FILE).exists())
+        assertTrue(DatabaseHealthCheck.listQuarantineDirs(filesDir).isEmpty())
+    }
+
+    @Test
+    fun `legacy detail string still means corruption - default probe maps it`() {
+        val filesDir = tmp.root
+        val db = fakeDb(filesDir, sidecars = false)
+
+        val outcome = DatabaseHealthCheck.ensureHealthyOrQuarantined(
+            dbFile = db, filesDir = filesDir,
+            checker = { "page 1: malformed" },
+        )
+
         assertTrue(outcome is DatabaseHealthCheck.Outcome.Quarantined)
         assertFalse(db.exists())
-        val report = DatabaseHealthCheck.pendingReport(filesDir)!!
-        assertTrue(report.detail.startsWith("checker crashed:"))
-        assertEquals(listOf("minis.db"), report.movedFiles)
+        assertEquals(
+            DatabaseHealthCheck.KIND_CORRUPTION,
+            DatabaseHealthCheck.pendingReport(filesDir)!!.kind,
+        )
     }
 
     @Test

@@ -52,6 +52,17 @@ fun TranslationSettingsScreen(
     var entryId by remember { mutableStateOf(TranslationPrefs.entryId(context)) }
     // [T-mlkit-stream-translate] 思考流/输出流的实时离线翻译设置。
     var streamEnabled by remember { mutableStateOf(TranslationPrefs.isStreamEnabled(context)) }
+    val scope = rememberCoroutineScope()
+    // [T-i18n-probe-wiring] 打开这个开关 = 该功能的「首次使用」：立刻探一次引擎
+    // 可用性——按当前语言对补下缺失语言包（下方语言包卡片的 Downloading 进度即时
+    // 可见），而不是像旧实现那样只写一个偏好、等下次冷启动才探测（旧实现里
+    // 引擎的可用性探测根本没有调用点，AUTO 档永远回落不到用户模型）。
+    // 先落盘再探测：probe 读的就是这个开关（未开启时只做只读复核，不下包）。
+    fun applyStreamEnabled(enabled: Boolean) {
+        streamEnabled = enabled
+        TranslationPrefs.setStreamEnabled(context, enabled)
+        if (enabled) scope.launch { runCatching { MlKitTranslationEngine.probe(context) } }
+    }
     BackHandler(onBack = onBack)
     val entries = config.modelEntries.filter { entry ->
         if (entry.isHidden) return@filter false
@@ -78,8 +89,7 @@ fun TranslationSettingsScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            streamEnabled = !streamEnabled
-                            TranslationPrefs.setStreamEnabled(context, streamEnabled)
+                            applyStreamEnabled(!streamEnabled)
                         }
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -94,10 +104,7 @@ fun TranslationSettingsScreen(
                     }
                     Switch(
                         checked = streamEnabled,
-                        onCheckedChange = {
-                            streamEnabled = it
-                            TranslationPrefs.setStreamEnabled(context, it)
-                        },
+                        onCheckedChange = { applyStreamEnabled(it) },
                     )
                 }
                 HorizontalDivider()
@@ -115,8 +122,7 @@ fun TranslationSettingsScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            streamEnabled = !streamEnabled
-                            TranslationPrefs.setStreamEnabled(context, streamEnabled)
+                            applyStreamEnabled(!streamEnabled)
                         }
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -131,10 +137,7 @@ fun TranslationSettingsScreen(
                     }
                     Switch(
                         checked = streamEnabled,
-                        onCheckedChange = {
-                            streamEnabled = it
-                            TranslationPrefs.setStreamEnabled(context, it)
-                        },
+                        onCheckedChange = { applyStreamEnabled(it) },
                     )
                 }
             }

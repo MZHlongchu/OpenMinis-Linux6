@@ -17,8 +17,9 @@ import java.io.File
  * - 扁平模型没有父链，`parentId` 恒为 null（[SessionForkPort] 契约允许）；
  * - harness 视角的消息不带 role，而宿主每一行都需要 `role` 列——按
  *   [branchMessages] 与 [appendMessages] 的**下标一一对应**关系旁路传递：
- *   rewinder 只重写 id / parentId，不改顺序也不改长度前缀，且一次 fork
- *   在单协程内串行（先 branch 后 append），下标稳定。
+ *   rewinder 只重写 id / parentId，不改顺序，并按锚点截取分支的**前缀**，
+ *   所以前缀的下标与源行逐一对应，且一次 fork 在单协程内串行（先 branch
+ *   后 append），下标稳定。
  *
  * [T-p1-9-fork-workspace] fork 必须带走工作区，否则 BOTH/CONVERSATION 回溯派生
  * 的会话在 `/var/minis` 下两手空空——续聊的模型看不到任何前缀消息引用的文件：
@@ -32,7 +33,7 @@ internal class AppSessionForkPort(
     private val filesDir: File,
 ) : SessionForkPort {
 
-    private var branchRoles: List<String> = emptyList()
+    private var branchSources: List<MessageEntity> = emptyList()
 
     override suspend fun findSession(sessionId: String): SessionForkSource? {
         val session = chatRepository.getSession(sessionId) ?: return null
@@ -63,7 +64,7 @@ internal class AppSessionForkPort(
             if (page.size < PAGE) break
             offset += page.size
         }
-        branchRoles = rows.map { it.role }
+        branchSources = rows
         return rows.map { row ->
             SessionForkMessage(
                 id = row.id,
@@ -159,19 +160,28 @@ internal class AppSessionForkPort(
     }
 
     override suspend fun appendMessages(sessionId: String, messages: List<SessionForkMessage>) {
-        // [T-p1-9-fork-roles-guard] 下标旁路的角色列表必须与消息等长：rewinder
-        // 只重写 id/parentId，长度前缀不变是其契约的一半；一旦破坏（上游改行为），
-        // 静默 getOrElse 兜底会把整段历史错标角色。fail-fast。
-        check(messages.size == branchRoles.size) {
-            "fork role prefix out of sync: ${messages.size} messages vs ${branchRoles.size} roles"
+        // [T-p1-9-fork-roles-guard] 下标旁路的源行列表必须覆盖传入的消息：rewinder
+        // 在锚点处派生新会话，传入的是分支的**前缀**（
+        // SessionForkConversationRewinder: `entries.subList(0, anchorIndex)`），只重写
+        // id/parentId，不改顺序——所以前缀的下标与源行逐一对应。这里以前要求
+        // 等长（`==`），任何锚点不是最后一条的回溯都会直接抛错；长度超出分支仍然
+        // fail-fast（那才是真正会错标角色的情况）。
+        check(messages.size <= branchSources.size) {
+            "fork role prefix out of sync: ${messages.size} messages vs ${branchSources.size} source rows"
         }
         messages.forEachIndexed { index, message ->
-            // 逐条 append：repo 分配新的 sort_order 与主键，派生会话的顺序
-            // 与源分支前缀一致（harness 契约要求顺序，不强求主键相同）。
-            chatRepository.appendMessage(
-                sessionId,
-                role = branchRoles[index],
+            // [T-fork-copy-body-ref] 逐条搬引用：源行正文可能已 offload 到
+            // files/bodies（parts_json 只是 stub），走 appendMessage 会把 stub 当
+            // 正文重新落库、副本里的大消息永久丢失。token_usage / reasoning_content
+            // 保持本端口原有行为（不随 fork 携带），由 copyMessageInto 显式传 null。
+            val source = branchSources[index]
+            chatRepository.copyMessageInto(
+                targetSessionId = sessionId,
+                source = source,
+                role = source.role,
                 partsJson = message.payloadJson,
+                tokenUsage = null,
+                reasoningContent = null,
             )
         }
     }

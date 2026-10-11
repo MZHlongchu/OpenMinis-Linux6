@@ -3,6 +3,7 @@ package com.openminis.app.auth
 import android.util.Log
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.URI
 
@@ -20,9 +21,14 @@ class OAuthCallbackServer(
         private const val TAG = "OAuthCallbackServer"
         private const val MAX_REQUEST_LINE = 4096
         private const val MAX_RESPONSE_BYTES = 1024
+        private const val ACCEPT_BACKLOG = 8
     }
 
-    private var serverSocket: ServerSocket? = null
+    /**
+     * [T-b18-oauth-loopback-bind] 已绑定的回环监听套接字（IPv4，可用时加 IPv6）。
+     * 每个套接字一条 accept 线程，共享同一套请求处理。
+     */
+    private val listeners = java.util.concurrent.CopyOnWriteArrayList<ServerSocket>()
     @Volatile private var running = false
 
     /** The port actually bound (may differ from [port] if fallback was used). */
@@ -42,84 +48,134 @@ class OAuthCallbackServer(
      */
     @Volatile var onExternalCancel: (() -> Unit)? = null
 
+    // [T-b18-oauth-loopback-bind] 原实现用 `ServerSocket(p)` 绑通配地址（0.0.0.0/::），
+    // 同网段任何主机都能直连回调端口：可以用 `?error=access_denied` 打断授权流程
+    // （回调路径与端口在各 manager 里是硬编码常量，可被扫描到），构成登录 DoS 与
+    // 端口指纹。根因修法是**只绑回环地址**。IPv4 与 IPv6 回环都绑，因为注册的
+    // redirect_uri 写的是 `localhost`（部分设备/浏览器解析到 ::1 优先），只绑
+    // 127.0.0.1 会让回调连不上、登录静默失败。
+    private fun loopbackAddresses(): List<InetAddress> = listOfNotNull(
+        runCatching { InetAddress.getByName("127.0.0.1") }.getOrNull(),
+        runCatching { InetAddress.getByName("::1") }.getOrNull()?.takeIf { it.isLoopbackAddress },
+    )
+
+    /** 在 [p] 上绑定所有可用的回环地址；返回空表示该端口整体不可用。 */
+    private fun bindLoopback(p: Int): List<ServerSocket> {
+        val bound = mutableListOf<ServerSocket>()
+        for (addr in loopbackAddresses()) {
+            try {
+                bound += ServerSocket(p, ACCEPT_BACKLOG, addr)
+            } catch (e: Exception) {
+                if (bound.isEmpty()) return emptyList()
+                // IPv4 已绑上、IPv6 侧不可用（内核无 v6 回环等）：不致命，降级为只监听 IPv4。
+                Log.w(TAG, "loopback ${addr.hostAddress}:$p unavailable: ${e.message}")
+            }
+        }
+        return bound
+    }
+
     fun start() {
         running = true
         Thread {
             try {
                 val portsToTry = listOf(port) + fallbackPorts
-                var bound = false
+                var bound: List<ServerSocket> = emptyList()
                 for (p in portsToTry) {
-                    try {
-                        serverSocket = ServerSocket(p)
+                    bound = bindLoopback(p)
+                    if (bound.isNotEmpty()) {
                         boundPort = p
-                        bound = true
                         break
-                    } catch (e: java.net.BindException) {
-                        Log.w(TAG, "Port $p in use, trying next...")
                     }
+                    Log.w(TAG, "Port $p in use, trying next...")
                 }
-                if (!bound) {
+                if (bound.isEmpty()) {
                     Log.e(TAG, "All ports unavailable: $portsToTry")
                     return@Thread
                 }
-                Log.d(TAG, "Listening on port $boundPort")
-                while (running) {
-                    val socket = serverSocket?.accept() ?: break
-                    try {
-                        socket.soTimeout = 5000
-                        val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                        val requestLine = reader.readLine() ?: continue
-                        if (requestLine.length > MAX_REQUEST_LINE) { writeResponse(socket, 414, "Request URI too long"); continue }
-                        val parts = requestLine.split(' ')
-                        if (parts.size != 3 || parts[2] != "HTTP/1.1") { writeResponse(socket, 400, "Bad request"); continue }
-                        if (parts[0] != "GET") { writeResponse(socket, 405, "Method not allowed"); continue }
-                        val requestTarget = parts[1]
-                        var headerBytes = 0
-                        while (true) {
-                            val header = reader.readLine() ?: break
-                            headerBytes += header.length
-                            if (header.isEmpty() || headerBytes > MAX_REQUEST_LINE) break
-                        }
-                        if (headerBytes > MAX_REQUEST_LINE) { writeResponse(socket, 431, "Headers too large"); continue }
-
-                        // Parse only the exact loopback callback path.
-                        val uri = URI("http://localhost$requestTarget")
-                            if (uri.rawPath != expectedPath || uri.rawFragment != null || (uri.rawQuery?.length ?: 0) > MAX_REQUEST_LINE) {
-                                writeResponse(socket, 404, "Not found")
-                                continue
-                            }
-                            val params = uri.query?.split("&")?.associate {
-                                val kv = it.split("=", limit = 2)
-                                kv[0] to (if (kv.size > 1) java.net.URLDecoder.decode(kv[1], "UTF-8") else "")
-                            } ?: emptyMap()
-
-                            val code = params["code"]
-                            val state = params["state"]
-
-                            // Send response
-                            val html = "<html><body><h1>Authorization complete</h1><p>You can close this tab.</p><script>window.close()</script></body></html>"
-                            writeResponse(socket, 200, html)
-                            Log.i(TAG, "OAuth callback accepted: codePresent=${!code.isNullOrEmpty()} statePresent=${!state.isNullOrEmpty()}")
-
-                            val err = params["error"]
-                            if (!code.isNullOrEmpty()) {
-                                onCode(code, state)
-                            } else if (!err.isNullOrEmpty()) {
-                                Log.i(TAG, "OAuth callback denied: $err")
-                                onDenied?.invoke()
-                                stop()
-                                return@Thread
-                            }
-                        socket.close()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Error handling connection", e)
-                        try { socket.close() } catch (_: Exception) {}
-                    }
+                listeners.addAll(bound)
+                Log.d(TAG, "Listening on loopback port $boundPort (${bound.size} socket(s))")
+                // 第一条套接字在当前线程 accept（与旧实现同形），额外的各起一条
+                // 守护线程；所有线程共用 [acceptLoop]，stop() 关闭套接字后一起退出。
+                bound.drop(1).forEach { extra ->
+                    Thread { acceptLoop(extra) }.apply { isDaemon = true }.start()
                 }
+                acceptLoop(bound.first())
             } catch (e: Exception) {
                 if (running) Log.e(TAG, "Server error", e)
             }
         }.start()
+    }
+
+    private fun acceptLoop(server: ServerSocket) {
+        while (running) {
+            val socket = try {
+                server.accept()
+            } catch (e: Exception) {
+                if (running) Log.w(TAG, "accept failed: ${e.message}")
+                return
+            }
+            // 第二道闸：来源必须是回环。绑定已经限死了监听地址，这里再做一次显式
+            // 白名单，防止将来有人改回通配绑定又把这条洞放回来。
+            val peer = runCatching { socket.inetAddress }.getOrNull()
+            if (peer == null || !peer.isLoopbackAddress) {
+                Log.w(TAG, "Rejected non-loopback callback from ${peer?.hostAddress}")
+                runCatching { socket.close() }
+                continue
+            }
+            handle(socket)
+        }
+    }
+
+    private fun handle(socket: java.net.Socket) {
+        try {
+            socket.soTimeout = 5000
+            val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+            val requestLine = reader.readLine() ?: return
+            if (requestLine.length > MAX_REQUEST_LINE) { writeResponse(socket, 414, "Request URI too long"); return }
+            val parts = requestLine.split(' ')
+            if (parts.size != 3 || parts[2] != "HTTP/1.1") { writeResponse(socket, 400, "Bad request"); return }
+            if (parts[0] != "GET") { writeResponse(socket, 405, "Method not allowed"); return }
+            val requestTarget = parts[1]
+            var headerBytes = 0
+            while (true) {
+                val header = reader.readLine() ?: break
+                headerBytes += header.length
+                if (header.isEmpty() || headerBytes > MAX_REQUEST_LINE) break
+            }
+            if (headerBytes > MAX_REQUEST_LINE) { writeResponse(socket, 431, "Headers too large"); return }
+
+            // Parse only the exact loopback callback path.
+            val uri = URI("http://localhost$requestTarget")
+            if (uri.rawPath != expectedPath || uri.rawFragment != null || (uri.rawQuery?.length ?: 0) > MAX_REQUEST_LINE) {
+                writeResponse(socket, 404, "Not found")
+                return
+            }
+            val params = uri.query?.split("&")?.associate {
+                val kv = it.split("=", limit = 2)
+                kv[0] to (if (kv.size > 1) java.net.URLDecoder.decode(kv[1], "UTF-8") else "")
+            } ?: emptyMap()
+
+            val code = params["code"]
+            val state = params["state"]
+
+            // Send response
+            val html = "<html><body><h1>Authorization complete</h1><p>You can close this tab.</p><script>window.close()</script></body></html>"
+            writeResponse(socket, 200, html)
+            Log.i(TAG, "OAuth callback accepted: codePresent=${!code.isNullOrEmpty()} statePresent=${!state.isNullOrEmpty()}")
+
+            val err = params["error"]
+            if (!code.isNullOrEmpty()) {
+                onCode(code, state)
+            } else if (!err.isNullOrEmpty()) {
+                Log.i(TAG, "OAuth callback denied: $err")
+                onDenied?.invoke()
+                stop()
+                return
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error handling connection", e)
+            try { socket.close() } catch (_: Exception) {}
+        }
     }
 
     private fun writeResponse(socket: java.net.Socket, status: Int, body: String) {
@@ -133,8 +189,11 @@ class OAuthCallbackServer(
     fun stop() {
         val wasRunning = running
         running = false
-        try { serverSocket?.close() } catch (_: Exception) {}
-        serverSocket = null
+        // 关闭全部回环监听套接字（IPv4 + 可选 IPv6），accept 线程随之退出。
+        for (listener in listeners) {
+            try { listener.close() } catch (_: Exception) {}
+        }
+        listeners.clear()
         // Notify external callers (e.g. XAIOAuthManager) so they can
         // cancel an in-flight suspendCancellableCoroutine instead of
         // hanging until the next inbound connection / the 5-min

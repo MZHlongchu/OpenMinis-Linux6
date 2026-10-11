@@ -126,6 +126,30 @@ class AnthropicProviderTest {
         assertNull(response.usage?.cacheReadInputTokens)
     }
 
+    @Test
+    fun `sendMessage folds cache tokens into latestContextTokens`() = runBlocking {
+        val responseBody = """
+        {
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_creation_input_tokens": 50,
+                "cache_read_input_tokens": 30
+            }
+        }
+        """.trimIndent()
+
+        server.enqueue(MockResponse().setBody(responseBody))
+
+        val response = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
+        // [T-anthropic-cache-context] input_tokens 是 fresh-only；真实上下文 =
+        // fresh + cache_creation + cache_read，否则第二轮起上下文压力被低估。
+        assertEquals(100, response.usage?.inputTokens)
+        assertEquals(180, response.usage?.latestContextTokens)
+    }
+
     // -- Request construction --
 
     @Test
@@ -260,6 +284,50 @@ class AnthropicProviderTest {
         val finished = chunks.filterIsInstance<LLMStreamChunk.Finished>()
         assertEquals(1, finished.size)
         assertEquals("end_turn", finished[0].stopReason)
+    }
+
+    @Test
+    fun `streamMessage keeps message_start usage when delta is output-only`() = runBlocking {
+        // 旧形状的 Anthropic 兼容中转：message_delta 只带 output_tokens。
+        // [T-anthropic-usage-merge] 合并后最后一次 Usage 仍要保留 input/cache，
+        // 否则消费侧 `lastUsage = chunk.usage` 会把它们整对象覆盖成 0。
+        val sseBody = buildString {
+            appendLine("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"cache_read_input_tokens\":30}}}")
+            appendLine()
+            appendLine("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}")
+            appendLine()
+        }
+        server.enqueue(MockResponse().setBody(sseBody).setHeader("Content-Type", "text/event-stream"))
+
+        val chunks = provider.streamMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024).toList()
+
+        val usageChunks = chunks.filterIsInstance<LLMStreamChunk.Usage>()
+        assertEquals(2, usageChunks.size)
+        val last = usageChunks[1].usage
+        assertEquals(3, last.outputTokens)
+        assertEquals(5, last.inputTokens)
+        assertEquals(30, last.cacheReadInputTokens)
+        assertEquals(35, last.latestContextTokens)
+    }
+
+    @Test
+    fun `streamMessage takes cumulative delta usage verbatim`() = runBlocking {
+        // 官方端点的 message_delta usage 是累计量（含 input/cache），合并必须是恒等。
+        val sseBody = buildString {
+            appendLine("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"cache_read_input_tokens\":30}}}")
+            appendLine()
+            appendLine("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":12,\"output_tokens\":7,\"cache_read_input_tokens\":30}}")
+            appendLine()
+        }
+        server.enqueue(MockResponse().setBody(sseBody).setHeader("Content-Type", "text/event-stream"))
+
+        val chunks = provider.streamMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024).toList()
+
+        val last = chunks.filterIsInstance<LLMStreamChunk.Usage>().last().usage
+        assertEquals(12, last.inputTokens)
+        assertEquals(7, last.outputTokens)
+        assertEquals(30, last.cacheReadInputTokens)
+        assertEquals(42, last.latestContextTokens)
     }
 
     @Test

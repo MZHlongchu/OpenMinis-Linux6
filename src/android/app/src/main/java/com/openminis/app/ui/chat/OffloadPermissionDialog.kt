@@ -38,15 +38,25 @@ import com.openminis.app.ui.components.MinisTextButton
  *
  * Dismissing via tap-outside or system back maps to DENY_SESSION too;
  * a silent dismiss should not invite the agent to keep retrying.
+ *
+ * [T-android-prompt-identity] Every answer carries the id of the prompt the
+ * user was actually looking at. The queue drops an answer whose id no longer
+ * matches the prompt on screen, so a late tap on a dialog that has already
+ * been withdrawn (caller timeout → next prompt promoted) cannot approve a
+ * tool the user never read.
  */
 @Composable
 fun OffloadPermissionDialog() {
-    val request by OffloadPermissionManager.pendingRequest.collectAsState()
-    val req = request ?: return
+    val pending by OffloadPermissionManager.pendingRequest.collectAsState()
+    val prompt = pending ?: return
+    val req = prompt.request
 
     AlertDialog(
         onDismissRequest = {
-            OffloadPermissionManager.respondToRequest(OffloadPermissionManager.Response.DENY_SESSION)
+            OffloadPermissionManager.respondToRequest(
+                prompt.id,
+                OffloadPermissionManager.Response.DENY_SESSION,
+            )
         },
         title = {
             Text(
@@ -89,21 +99,36 @@ fun OffloadPermissionDialog() {
             ) {
                 // Allow in this session — happy path goes first.
                 MinisButton(
-                    onClick = { OffloadPermissionManager.respondToRequest(OffloadPermissionManager.Response.ALLOW_SESSION) },
+                    onClick = {
+                        OffloadPermissionManager.respondToRequest(
+                            prompt.id,
+                            OffloadPermissionManager.Response.ALLOW_SESSION,
+                        )
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(stringResource(R.string.offload_perm_allow_session))
                 }
                 // Allow once — no caching; next call re-prompts.
                 MinisOutlinedButton(
-                    onClick = { OffloadPermissionManager.respondToRequest(OffloadPermissionManager.Response.ALLOW_ONCE) },
+                    onClick = {
+                        OffloadPermissionManager.respondToRequest(
+                            prompt.id,
+                            OffloadPermissionManager.Response.ALLOW_ONCE,
+                        )
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(stringResource(R.string.offload_perm_allow_once))
                 }
                 // Deny in this session — refuse + remember.
                 MinisTextButton(
-                    onClick = { OffloadPermissionManager.respondToRequest(OffloadPermissionManager.Response.DENY_SESSION) },
+                    onClick = {
+                        OffloadPermissionManager.respondToRequest(
+                            prompt.id,
+                            OffloadPermissionManager.Response.DENY_SESSION,
+                        )
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error,

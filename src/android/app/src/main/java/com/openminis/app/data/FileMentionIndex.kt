@@ -1,6 +1,9 @@
 package com.openminis.app.data
 
 import android.content.Context
+import com.openminis.app.logging.AppLogger
+import com.openminis.app.tools.SessionTreeGuard
+import com.openminis.app.tools.walkOwnedTree
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -217,7 +220,45 @@ class FileMentionIndex(
         return out
     }
 
-    private fun scanDir(
+    /**
+     * 递归收集 `@` 候选。
+     *
+     * [T-tools-files-walk-jail] 走归属安全的 [walkOwnedTree]（软链目录剪枝 + 逐项
+     * canonical 归属复检），**不再**用 `listFiles()` 队列递归。旧实现（`maxDepth =
+     * Int.MAX_VALUE` 的队列）会把越权软链下的**路径名**一起列进索引：guest 在工作区里
+     * `ln -s ../../.. leak`（proot 的 `--link2symlink` 只翻译 link(2)，不改写 symlink
+     * 目标，所以这就是宿主上的真实软链）之后，
+     * `/var/minis/workspace/leak/minis-sessions/sess-b/memory/` 下的 md 文件会以
+     * `/var/minis/workspace/leak/…` 的形式入索引、吃掉扫描预算，并被 `matches()` 当成
+     * 可引用的 `@` 目标交给模型——名字本身就是泄漏。
+     * （注意：此处不能出现「斜杠紧跟星号」的字面写法，Kotlin 块注释可嵌套，会把这段
+     * KDoc 撕成两半。）
+     *
+     * [T-tools-files-walk-realpath] 相对路径的基准是 [SessionTreeGuard.canonicalRoot]
+     * （walk 产出 canonical 路径，用调用方手里的词法根去算会得到 `../..`）。
+     *
+     * [T-walk-cage-single-resolve] 这里的根来自 `SessionWorkspace.hostDir`（app 自己建的
+     * bind 根），没有经过 `acceptsResolved` 复检，所以守卫用默认工厂、自己解析**一次**——
+     * 本层只有这一次解析，不存在「复检」与「遍历」各解析一次之间的改向窗口。
+     * 工具侧（grep_source / glob / code_graph / list_dir）的根是 `resolveSessionHostPath`
+     * 复检过的 canonical 路径，那里走 [SessionTreeGuard.verified]。
+     *
+     * 可见范围与旧 BFS 队列逐项对齐：深度 ≤ [maxDepth] 的目录会被展开，条目深度 ≤
+     * `maxDepth + 1`；隐藏目录与 [SKIP_DIR_NAMES] 既不列出也不进入。
+     * 深度判定写成 `depth - 1 > maxDepth`（而不是 `depth > maxDepth + 1`）：后者在
+     * `maxDepth = Int.MAX_VALUE`（layerEntries 的会话层就是这个值）时会溢出成负数，
+     * 把本来该全量的会话扫描变成空集。
+     *
+     * 顺序保持「浅层优先」：walk 是前序 DFS，这里按深度分桶再按深度拼接，预算不够时先
+     * 保住顶层条目（与旧 BFS 队列的截断结果一致）。
+     *
+     * [T-mention-budget-visible-nodes] 预算只数**会入条目的节点**：隐藏项、SKIP 目录、
+     * 超深目录、根外项都不占。旧写法对「走过的每一个节点」计数
+     * （`nodeBudget = budget * 2 + 256`），于是 300 个点文件就能把预算吃光——`budget = 10`
+     * 时整棵可见子树被静默丢掉，用户看到的是「工作区里的文件不见了」。被过滤节点仍有
+     * 一个兜底上限（防海量垃圾节点把整棵树走完），命中即记 WARN 日志，不再静默截断。
+     */
+    internal fun scanDir(
         root: File,
         linuxRoot: String,
         scope: Scope,
@@ -225,34 +266,77 @@ class FileMentionIndex(
         maxDepth: Int,
         budget: Int,
     ): List<Entry> {
-        val out = ArrayList<Entry>()
-        val rootPath = root.absolutePath
-        val queue = ArrayDeque<Pair<File, Int>>()
-        queue.addLast(root to 0)
-        while (queue.isNotEmpty() && out.size < budget) {
-            val (dir, depth) = queue.removeFirst()
-            if (depth > maxDepth) continue
-            val children = dir.listFiles() ?: continue
-            for (child in children) {
-                if (out.size >= budget) break
-                if (child.name.startsWith(".")) continue
-                if (child.isDirectory && child.name in SKIP_DIR_NAMES) continue
-                val relative = child.absolutePath.removePrefix(rootPath).removePrefix("/")
-                if (relative.isEmpty()) continue
-                val linuxPath = "$linuxRoot/$relative"
-                out += Entry(
-                    linuxPath = linuxPath,
-                    scope = scope,
-                    mountName = mountName,
-                    modifiedAt = child.lastModified(),
-                    isDirectory = child.isDirectory,
-                )
-                if (child.isDirectory && depth + 1 <= maxDepth) {
-                    queue.addLast(child to depth + 1)
+        if (budget <= 0) return emptyList()
+        val guard = SessionTreeGuard(root)
+        val buckets = ArrayList<MutableList<Entry>>()
+        // 入条目节点的预算：最终只交出 budget 条，这里留一倍余量给深度分桶。
+        val entryBudget = budget * 2 + 256
+        // [T-mention-budget-visible-nodes] 被过滤节点的兜底：只防「海量点文件/垃圾目录把
+        // 整棵树走完」，与可见条目互不挤占。
+        val junkBudget = entryBudget * 8 + 4096
+        var junk = 0
+        var counted = 0
+        val walk = walkOwnedTree(
+            root,
+            guard,
+            enter = { dir ->
+                // 只在目录上调用：先复检深度，再套隐藏/SKIP 规则（两者都与旧实现一致地
+                // 「不列出也不进入」）。depthOf 理论上不会为 null（walk 已复检归属），
+                // 这里按 fail-closed 处理成不进入。
+                val depth = guard.depthOf(dir) ?: return@walkOwnedTree false
+                !dir.name.startsWith(".") && dir.name !in SKIP_DIR_NAMES && depth <= maxDepth
+            },
+        )
+        for (real in walk) {
+            val name = real.name
+            // 隐藏项一律不列出；SKIP 名单只作用于目录（旧实现同一条规则：同名普通文件照列）。
+            if (name.startsWith(".") || (real.isDirectory && name in SKIP_DIR_NAMES)) {
+                if (++junk > junkBudget) {
+                    warnTruncated(root, junk, counted, "filtered nodes")
+                    break
                 }
+                continue
+            }
+            val depth = guard.depthOf(real) ?: continue
+            if (depth < 1 || depth - 1 > maxDepth) continue
+            val relative = guard.relativePath(real) ?: continue
+            if (relative.isEmpty()) continue
+            if (counted >= entryBudget) {
+                warnTruncated(root, junk, counted, "entry budget")
+                break
+            }
+            counted++
+            while (buckets.size < depth) buckets.add(ArrayList())
+            buckets[depth - 1] += Entry(
+                linuxPath = "$linuxRoot/$relative",
+                scope = scope,
+                mountName = mountName,
+                modifiedAt = real.lastModified(),
+                isDirectory = real.isDirectory,
+            )
+        }
+        val out = ArrayList<Entry>()
+        for (bucket in buckets) {
+            for (entry in bucket) {
+                if (out.size >= budget) return out
+                out += entry
             }
         }
         return out
+    }
+
+    /**
+     * [T-mention-budget-visible-nodes] 截断不再是静默的：预算/兜底上限命中时留一条 WARN。
+     *
+     * 调用点在 `scanDir` 的 IO 线程上（[scan] 跑在 [Dispatchers.IO]），不做额外调度。
+     */
+    private fun warnTruncated(root: File, junk: Int, counted: Int, reason: String) {
+        AppLogger.warning(
+            LOG_CATEGORY,
+            "mention scan stopped early on $reason for $root: " +
+                "$counted entry candidate(s) collected, $junk filtered node(s) skipped — " +
+                "the visible subtree may be incomplete",
+        )
     }
 
     private suspend fun publish(token: UUID, collected: List<Entry>) {
@@ -402,6 +486,11 @@ class FileMentionIndex(
         .thenByDescending { it.modifiedAt }
 
     companion object {
+        /**
+         * [T-mention-budget-visible-nodes] 截断日志的分类（AppLogger 的 category）。
+         */
+        private const val LOG_CATEGORY = "FileMentionIndex"
+
         const val DEFAULT_CACHE_TTL_MS = 10L * 60 * 1000
         const val DEFAULT_MATCH_LIMIT = 100
         const val GLOBAL_SCAN_BUDGET = 5000

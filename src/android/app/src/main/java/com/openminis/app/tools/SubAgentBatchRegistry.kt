@@ -5,6 +5,7 @@ import com.openminis.app.logging.AppLogger
 import com.openminis.app.sandbox.ExecutionCoordinator
 import com.openminis.app.sandbox.SessionWorkspace
 import java.io.File
+import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantLock
@@ -120,6 +121,12 @@ object SubAgentBatchRegistry {
     private fun lock(sessionId: String): ReentrantLock = locks.getOrPut(key(sessionId)) { ReentrantLock() }
 
     /**
+     * [T-batch-registry-corrupt] 只读注入口，供单测在没有 Context（`context.filesDir`
+     * 是 stub）时指向一个真实目录——与 [processStartedAt] 同口径，默认永远走 [file]。
+     */
+    internal var fileOverride: ((String) -> File?)? = null
+
+    /**
      * Session-private directory, mirroring [AgentPlanStore]: `workspace` is a
      * shared subdir, so two chats in one project folder would clobber a single
      * registry file.
@@ -130,6 +137,9 @@ object SubAgentBatchRegistry {
         return File(File(SessionWorkspace.base(context.filesDir, owner), DIR_NAME), FILE_NAME)
     }
 
+    private fun fileFor(sessionId: String, context: Context?): File? =
+        fileOverride?.invoke(key(sessionId)) ?: file(context, sessionId)
+
     internal fun decode(text: String): MutableList<Batch> =
         json.decodeFromString<List<Batch>>(text).toMutableList()
 
@@ -139,31 +149,45 @@ object SubAgentBatchRegistry {
     private fun loadLocked(sessionId: String, context: Context?): MutableList<Batch> {
         val k = key(sessionId)
         memory[k]?.let { return it }
-        val f = file(context, k)
+        val f = fileFor(sessionId, context)
         val loaded: MutableList<Batch> = if (f == null || !f.isFile) {
             mutableListOf()
         } else {
-            // A corrupt registry must not decode to an empty list: the next
-            // dispatch would then overwrite the file and erase the evidence.
+            // [T-batch-registry-corrupt] 与 AgentPlanStore.loadLocked 同口径：损坏 /
+            // 读不动的注册表**不能**静默降级成空表——空表会在下一次 begin() /
+            // markFinished() 的 saveLocked 里落盘，把全部 wave 台账抹掉。先把坏文件
+            // 改名留证，再抛 IOException，由 begin() / check_agent 转成显式工具错误。
             val text = AtomicFileWrite.read(f)
-            if (text == null) {
-                AppLogger.error(TAG, "cannot read batch registry ${f.absolutePath}")
-                mutableListOf()
-            } else {
-                runCatching { decode(text) }.getOrElse { e ->
-                    AppLogger.error(TAG, "batch registry corrupt at ${f.absolutePath}: ${e.message}")
-                    mutableListOf()
-                }
+                ?: throw quarantineCorrupt(f, "cannot be read")
+            runCatching { decode(text) }.getOrElse { e ->
+                throw quarantineCorrupt(f, "is corrupt (${e.message})")
             }
         }
         memory[k] = loaded
         return loaded
     }
 
+    /**
+     * [T-batch-registry-corrupt] 坏文件改名成 `batches.json.corrupt` 留证（现场不被后续
+     * 写入覆盖），并返回要抛给调用方的显式错误。
+     */
+    private fun quarantineCorrupt(f: File, why: String): IOException {
+        val backup = File(f.parentFile, f.name + ".corrupt")
+        val kept = runCatching { !backup.exists() && f.renameTo(backup) }.getOrDefault(false)
+        val evidence = if (kept) " — kept as ${backup.name}" else " — delete it to start fresh"
+        AppLogger.error(TAG, "batch registry $why at ${f.absolutePath}$evidence")
+        val recovery = if (kept) {
+            "the bad file was kept as ${backup.name} and a fresh registry will start"
+        } else {
+            "delete the file to start a fresh registry"
+        }
+        return IOException("batch registry ${f.name} $why; $recovery")
+    }
+
     private fun saveLocked(sessionId: String, context: Context?, batches: List<Batch>) {
         val k = key(sessionId)
         val trimmed = batches.take(MAX_BATCHES)
-        val f = file(context, k)
+        val f = fileFor(sessionId, context)
         if (f == null) {
             // No context (unit tests / headless callers): memory-only registry.
             memory[k] = trimmed.toMutableList()
@@ -296,7 +320,10 @@ object SubAgentBatchRegistry {
      */
     fun unfinished(sessionId: String, context: Context?): List<Batch> {
         if (sessionId.isBlank()) return emptyList()
+        // [T-batch-registry-corrupt] 这里保持"读不动也不打断 agent 循环"，但不再静默：
+        // check_agent 会把同一个 IOException 直接报给模型，这一行保证日志侧也有线索。
         runCatching { reconcileAfterRestart(sessionId, context) }
+            .onFailure { AppLogger.error(TAG, "unfinished(): reconcile failed: ${it.message}") }
         return list(sessionId, context).filter { b ->
             b.background && (!b.complete || b.collectedAt == 0L)
         }
@@ -341,36 +368,58 @@ object SubAgentBatchRegistry {
      * Drop in-flight lanes of a session whose process died. Called on session
      * open: a lane marked `running` with no live tracker is a lie, and leaving
      * it there would make the loop warn about unfinished work forever.
+     *
+     * [T-subagent-plan-restale] 复位 lane 的同时要把它的看板条目一并收尾：崩溃前
+     * 自动建的板条目是 `active`，只置 lane=stopped 的话，`renderPlanPromptFragment`
+     * 会每轮把它当"进行中"重新注入、折叠态还优先选它。锁序：在 registry 锁内只
+     * 收集 (planId)，出锁后再动 [AgentPlanStore]，避免两把锁嵌套。
      */
-    fun reconcileAfterRestart(sessionId: String, context: Context?): Int = lock(sessionId).withLock {
-        val all = loadLocked(sessionId, context)
-        var touched = 0
-        val out = all.map { batch ->
-            // Guard: only a batch from a PREVIOUS process can hold orphans.
-            // Reconciling this process's own batches would make every
-            // `check_agent op=status` poll report "the wave died" while it is
-            // still running, and a lane waiting to be launched would not
-            // survive a single status call.
-            if (batch.createdAt >= processStartedAt) return@map batch
-            if (batch.lanes.none { it.state == STATE_RUNNING || it.state == STATE_PENDING }) return@map batch
-            touched++
-            batch.copy(
-                lanes = batch.lanes.map { lane ->
-                    if (lane.state == STATE_RUNNING || lane.state == STATE_PENDING) {
-                        lane.copy(
-                            state = STATE_STOPPED,
-                            error = lane.error ?: "interrupted: process restarted before this lane finished",
-                            finishedAt = System.currentTimeMillis(),
-                        )
-                    } else {
-                        lane
-                    }
-                },
-                finishedAt = if (batch.finishedAt == 0L) System.currentTimeMillis() else batch.finishedAt,
-            )
+    fun reconcileAfterRestart(sessionId: String, context: Context?): Int {
+        val orphanedPlanIds = mutableListOf<String>()
+        val touched = lock(sessionId).withLock {
+            val all = loadLocked(sessionId, context)
+            var count = 0
+            val out = all.map { batch ->
+                // Guard: only a batch from a PREVIOUS process can hold orphans.
+                // Reconciling this process's own batches would make every
+                // `check_agent op=status` poll report "the wave died" while it is
+                // still running, and a lane waiting to be launched would not
+                // survive a single status call.
+                if (batch.createdAt >= processStartedAt) return@map batch
+                if (batch.lanes.none { it.state == STATE_RUNNING || it.state == STATE_PENDING }) return@map batch
+                count++
+                batch.copy(
+                    lanes = batch.lanes.map { lane ->
+                        if (lane.state == STATE_RUNNING || lane.state == STATE_PENDING) {
+                            lane.planId?.let { orphanedPlanIds.add(it) }
+                            lane.copy(
+                                state = STATE_STOPPED,
+                                error = lane.error ?: "interrupted: process restarted before this lane finished",
+                                finishedAt = System.currentTimeMillis(),
+                            )
+                        } else {
+                            lane
+                        }
+                    },
+                    finishedAt = if (batch.finishedAt == 0L) System.currentTimeMillis() else batch.finishedAt,
+                )
+            }
+            if (count > 0) saveLocked(sessionId, context, out)
+            count
         }
-        if (touched > 0) saveLocked(sessionId, context, out)
-        touched
+        orphanedPlanIds.distinct().forEach { planId ->
+            runCatching {
+                // 只收尾仍是 active 的条目：自动建板用 active，模型若已把它标成
+                // done/failed，就不要用一次崩溃复位覆盖它的判断。
+                AgentPlanStore.list(sessionId, context)
+                    .firstOrNull { it.id == planId }
+                    ?.takeIf { it.status == "active" }
+                    ?.let { AgentPlanStore.update(sessionId, context, planId, status = "failed") }
+            }.onFailure {
+                AppLogger.error(TAG, "cannot finish plan item $planId after restart: ${it.message}")
+            }
+        }
+        return touched
     }
 
     fun render(batch: Batch, verbose: Boolean = false): String = buildString {

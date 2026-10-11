@@ -3,6 +3,7 @@ package com.openminis.app.tools
 import android.content.Context
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.AgentToolParam
+import java.io.IOException
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 
@@ -65,7 +66,21 @@ object CheckAgentTool {
 
         // A wave that a dead process left `running` would otherwise make every
         // later status call claim unfinished work. Reconcile on read.
-        runCatching { registry.reconcileAfterRestart(sessionId, context) }
+        // [T-batch-registry-corrupt] 损坏 / 读不动的注册表现在抛 IOException（不再静默
+        // 空表）；在这里转成显式工具错误，别让它冒泡成整轮失败。其余异常维持原有的忽略
+        // 语义（这条链上没有挂起点，取消不会从这里抛出）。
+        val registryError = runCatching { registry.reconcileAfterRestart(sessionId, context) }
+            .exceptionOrNull()
+            ?.takeIf { it is IOException }
+        if (registryError != null) {
+            return ToolExecutionResult(
+                "Error: ${registryError.message}",
+                false,
+                errorCode = ToolErrorCode.EXECUTION_FAILED,
+                recoveryHint = "Delete the corrupt sub-agent batch registry file, then retry.",
+                toolTitle = toolTitle,
+            )
+        }
 
         return when (op) {
             "clear" -> {

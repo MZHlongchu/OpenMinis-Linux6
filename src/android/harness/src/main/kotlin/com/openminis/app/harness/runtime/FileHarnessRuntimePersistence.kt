@@ -1,5 +1,6 @@
 package com.openminis.app.harness.runtime
 
+import com.openminis.app.harness.fs.SessionPath
 import com.openminis.app.harness.model.HarnessEntryEntity
 import com.openminis.app.harness.model.HarnessLaneEntity
 import com.openminis.app.harness.model.HarnessLaneResultEntity
@@ -21,8 +22,9 @@ import kotlinx.serialization.json.Json
  *
  * 为什么合在一个文件：operation 的 settle/finish 事务同时动 entry、lane、operation
  * 三张表（接缝 KDoc 里「同进同出」的原子性约定），分文件就要跨文件事务；单文件 +
- * 单 Mutex + tmp/rename 原子改名，事务天然成立。队列持久化（FilePromptQueuePersistence）
- * 同款模式，坏文件降级为空——运行时台账是 best-effort 持久层，宁可丢台账不可挡聊天。
+ * 每会话一把 Mutex（见 [fileLocks]）+ tmp/rename 原子改名，事务天然成立。队列持久化
+ * （FilePromptQueuePersistence）同款模式，坏文件降级为空——运行时台账是 best-effort
+ * 持久层，宁可丢台账不可挡聊天。
  *
  * 会话树在这里是**宿主侧效果的影子账**：Room 才是对话的事实源；这份 entry 链记录
  * 的是 harness 侧观察到的工具意图/落定与 lane 指针，供跨进程死亡的恢复判定
@@ -42,25 +44,30 @@ class FileHarnessRuntimePersistence(private val root: File) :
     )
 
     private val json = Json { ignoreUnknownKeys = true }
-    private val fileLock = Mutex()
+
+    // [T-b18-op-lookup-session-domain] 锁拆两层：
+    //  - 每会话一把锁（条纹化，容量有界），同一会话文件的读-改-写串行、tmp 名不撞；
+    //  - 目录级短锁只护 mkdirs/listFiles，**不覆盖解码**。
+    // 原实现只有一把全局 Mutex，而 scanAll 在锁内解码全部会话文件，于是
+    // 任意会话的台账写都要排队等它——每个工具轮 8 次 findOperation（每次转移
+    // requireOperation + emitFor 各一次）就成了全局串行点。写侧本来就是
+    // tmp+rename 原子替换，读者不持锁也不会看到半截文件。
+    private val fileLocks = List(LOCK_STRIPES) { Mutex() }
+    private val dirLock = Mutex()
+
+    private fun lockFor(sessionId: String): Mutex {
+        val h = sessionId.hashCode()
+        return fileLocks[(h xor (h ushr 16)) and (LOCK_STRIPES - 1)]
+    }
 
     private fun fileFor(sessionId: String): File {
-        // 与队列持久化同款单射转义：lane 会话 id 含冒号/斜杠，不能直接当文件名。
-        val safe = buildString(sessionId.length + 8) {
-            for (b in sessionId.toByteArray(Charsets.UTF_8)) {
-                val c = b.toInt().toChar()
-                when {
-                    c == '_' -> append("__")
-                    c.isLetterOrDigit() || c == '.' || c == '-' -> append(c)
-                    else -> append('_').append("%02x".format(b))
-                }
-            }
-        }
-        return File(root, "$safe.json")
+        // 与队列持久化同款单射转义（共用 [SessionPath]）：lane 会话 id 含冒号/斜杠，
+        // 不能直接当文件名。
+        return File(root, "${SessionPath.segment(sessionId)}.json")
     }
 
     private suspend fun <R> withFile(sessionId: String, block: suspend (SessionFile) -> Pair<R, SessionFile>): R =
-        fileLock.withLock {
+        lockFor(sessionId).withLock {
             val file = fileFor(sessionId)
             val current = if (file.isFile) {
                 runCatching { json.decodeFromString(SessionFile.serializer(), file.readText(Charsets.UTF_8)) }
@@ -73,7 +80,7 @@ class FileHarnessRuntimePersistence(private val root: File) :
             }
             val (result, next) = block(current)
             if (next != current) {
-                root.mkdirs()
+                dirLock.withLock { root.mkdirs() }
                 val tmp = File(root, "${file.name}.tmp")
                 tmp.writeText(json.encodeToString(SessionFile.serializer(), next), Charsets.UTF_8)
                 if (!tmp.renameTo(file)) {
@@ -132,7 +139,7 @@ class FileHarnessRuntimePersistence(private val root: File) :
         withFile(sessionId) { f -> f.entries.firstOrNull { it.id == entryId } to f }
 
     override suspend fun deleteSessionData(sessionId: String) {
-        fileLock.withLock { fileFor(sessionId).delete() }
+        lockFor(sessionId).withLock { fileFor(sessionId).delete() }
     }
 
     // ─── OperationRuntimeRepository ────────────────────────────────────
@@ -143,8 +150,16 @@ class FileHarnessRuntimePersistence(private val root: File) :
         }
     }
 
+    /** 跨会话扫描：只留给真正的恢复期查询（调用方只有 operationId）。 */
     override suspend fun findOperation(operationId: String): HarnessOperationEntity? =
         scanAll().firstOrNull { it.id == operationId }
+
+    /**
+     * [T-b18-op-lookup-session-domain] 会话域查询：operation 行就在该会话自己的
+     * 文件里，单文件读——这是协调器每轮 8 次查找的热路径，不再扫全目录。
+     */
+    override suspend fun findOperation(sessionId: String, operationId: String): HarnessOperationEntity? =
+        withFile(sessionId) { f -> f.operations.firstOrNull { it.id == operationId } to f }
 
     override suspend fun listActiveOperations(sessionId: String): List<HarnessOperationEntity> =
         withFile(sessionId) { f -> f.operations.filter { it.sessionId == sessionId } to f }
@@ -217,12 +232,20 @@ class FileHarnessRuntimePersistence(private val root: File) :
 
     /** 跨会话扫 operation 行（findOperation 只有 id）。文件数 = 会话数，量级可控。 */
     private suspend fun scanAll(): List<HarnessOperationEntity> {
-        val files = root.listFiles { f -> f.isFile && f.name.endsWith(".json") } ?: return emptyList()
-        return fileLock.withLock {
-            files.flatMap { file ->
-                runCatching { json.decodeFromString(SessionFile.serializer(), file.readText(Charsets.UTF_8)).operations }
-                    .getOrDefault(emptyList())
-            }
+        // [T-b18-op-lookup-session-domain] 目录列举在短锁内，解码在锁外：解码全部
+        // 会话文件原先持有全局锁，正是跨会话写互相排队的根因；写侧是 tmp+rename
+        // 原子替换，读者不持锁也不会读到半截。
+        val files = dirLock.withLock {
+            root.listFiles { f -> f.isFile && f.name.endsWith(".json") }?.toList()
+        } ?: return emptyList()
+        return files.flatMap { file ->
+            runCatching { json.decodeFromString(SessionFile.serializer(), file.readText(Charsets.UTF_8)).operations }
+                .getOrDefault(emptyList())
         }
+    }
+
+    private companion object {
+        /** 2 的幂：条纹索引用位与取模。 */
+        const val LOCK_STRIPES = 64
     }
 }

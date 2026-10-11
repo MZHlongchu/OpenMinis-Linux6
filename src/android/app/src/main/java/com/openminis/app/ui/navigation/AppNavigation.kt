@@ -1068,6 +1068,9 @@ fun AppNavigation(
                 sessionId = sessionId,
                 chatDao = chatRepository.dao,
                 onBack = { navController.safePopBackStack() },
+                // [T-bodies-gc] 清存储时顺便回收 files/bodies/ 里已无人引用的正文
+                // （删会话/重新生成留下的死正文此前永久留在盘上并被备份打包）。
+                onReclaimOrphanBodies = { chatRepository.collectOrphanBodies() },
                 onBrowseFiles = { _ ->
                     // Same resolver as Chat Files. A filed session's workspace
                     // lives in minis-workspaces/<folder>, not the private tree

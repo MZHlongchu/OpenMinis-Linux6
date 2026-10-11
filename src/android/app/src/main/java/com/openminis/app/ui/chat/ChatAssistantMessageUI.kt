@@ -60,6 +60,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -850,11 +851,23 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
                 }
             }
             // Auto-follow: on every content growth, scroll to the new bottom.
-            // `snapshotFlow { block.content.length }` is recomposition-cheap
-            // and only ticks when the block's text actually grew.
+            // [T-android-thinking-inner-autofollow] `block` is a plain data-class
+            // PARAMETER (AssistantBlock.content is a val), and the three keys of
+            // this effect (scrollState / block.id / isStreaming) are all stable
+            // while a thinking block remains the tail block — the streaming ticks
+            // publish a NEW instance via `copy(content = …)`
+            // (ChatViewModelAgentLoopExt), which disturbs no key. The coroutine
+            // therefore kept the first instance forever and
+            // `snapshotFlow { block.content.length }` emitted once and then hung:
+            // the 300dp window showed its top instead of following the tail.
+            // rememberUpdatedState re-publishes the instance as snapshot state, so
+            // each tick re-emits; scrollState.maxValue joins the flow because it
+            // only catches up with the grown text AFTER layout — on its own the
+            // scrollTo below would keep snapping to the previous bottom.
+            val currentBlock by rememberUpdatedState(block)
             LaunchedEffect(scrollState, block.id, isStreaming) {
                 if (!isStreaming) return@LaunchedEffect
-                snapshotFlow { block.content.length }
+                snapshotFlow { currentBlock.content.length to scrollState.maxValue }
                     .collect {
                         if (innerAutoFollowPaused) return@collect
                         // scrollTo (not animateScrollTo) — Compose's animate cancels

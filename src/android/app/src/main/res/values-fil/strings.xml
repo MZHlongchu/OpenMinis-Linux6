@@ -72,6 +72,7 @@
     <string name="resume_action">Ipagpatuloy</string>
     <string name="search_chats_placeholder">Maghanap ng chat…</string>
     <string name="search_no_results">Walang resulta para sa \"%1$s\"</string>
+    <string name="search_truncated_notice">Ipinapakita lamang ang %1$d pinakabagong tugma — paghigpitan ang paghahanap upang makita pa.</string>
     <string name="stop_tool">Ihinto ang tool</string>
     <string name="mic_permission_title">Kailangan ng pahintulot sa mikropono</string>
     <string name="mic_permission_message">Kailangan ng pahintulot sa mikropono ang voice input. I-tap ang Buksan ang Mga Setting para payagan ito para sa Minis Ultra.</string>

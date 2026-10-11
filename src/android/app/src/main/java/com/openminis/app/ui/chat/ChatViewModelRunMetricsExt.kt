@@ -32,7 +32,7 @@ internal suspend fun ChatViewModel.noteRunRound() {
     val metrics = currentRunMetrics ?: return
     metrics.roundStarted()
     currentOperationId?.let { op ->
-        OperationBridge.providerIntent(context.applicationContext, op, metrics.roundsSoFar)
+        OperationBridge.providerIntent(context.applicationContext, activeSessionId, op, metrics.roundsSoFar)
     }
 }
 
@@ -51,7 +51,14 @@ internal suspend fun ChatViewModel.noteRunToolIntent(name: String, argsJson: Str
         args = args,
         rawToolName = name,
     )
-    OperationBridge.toolIntent(context.applicationContext, op, call, ToolReplayPolicy.forTool(call.tool, name), currentRunMetrics?.roundsSoFar ?: 0)
+    OperationBridge.toolIntent(
+        context.applicationContext,
+        activeSessionId,
+        op,
+        call,
+        ToolReplayPolicy.forTool(call.tool, name),
+        currentRunMetrics?.roundsSoFar ?: 0,
+    )
 }
 
 /** 工具落定后：结果进台账（输出截 2k 入影子账，全文在 Room 与 spill 里）。 */
@@ -59,6 +66,7 @@ internal suspend fun ChatViewModel.noteRunToolSettled(name: String, toolId: Stri
     val op = currentOperationId ?: return
     OperationBridge.toolSettled(
         context.applicationContext,
+        activeSessionId,
         op,
         ToolResult(
             id = "$toolId:result",
@@ -80,7 +88,7 @@ internal fun ChatViewModel.noteRunRetry() {
 internal fun ChatViewModel.noteRunSuspended(reason: String) {
     val op = currentOperationId ?: return
     val sid = activeSessionId
-    viewModelScope.launch { OperationBridge.suspendRun(context.applicationContext, op, reason) }
+    viewModelScope.launch { OperationBridge.suspendRun(context.applicationContext, sid, op, reason) }
     currentOperationId = null
     AppLogger.info(ChatViewModel.TAG_STREAM, "operation suspended: $reason (sid=$sid)")
 }

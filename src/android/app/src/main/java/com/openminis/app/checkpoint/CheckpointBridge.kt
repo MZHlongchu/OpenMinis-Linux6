@@ -91,6 +91,15 @@ object CheckpointBridge {
     fun checkpoints(context: Context, sessionId: String): List<CheckpointMeta> =
         runCatching { store(context.filesDir).checkpoints(sessionId) }.getOrDefault(emptyList())
 
+    /**
+     * [T-p2-checkpoint-restore-warmup] 后台预热该会话的 checkpoint 磁盘恢复：
+     * 会话装载时调用一次，冷启动后首轮 `beginTurn` 就不必在调用方线程上同步读
+     * 全部快照（索引 + 每条快照内容）。幂等、best-effort，失败不影响懒恢复重试。
+     */
+    fun prefetch(context: Context, sessionId: String) {
+        runCatching { store(context.filesDir).prefetch(sessionId) }
+    }
+
     /** 会话删除/重建时清理（内存态 + 磁盘 + 撤销记录）。 */
     fun dropSession(filesDir: File, sessionId: String) {
         runCatching { store(filesDir).dropSession(sessionId) }

@@ -302,25 +302,14 @@ private fun LogsBody(
                 onDismissRequest = { selectedTraceFile = null },
                 title = { Text(f.name) },
                 text = {
-                    val body = remember(f) {
-                        runCatching {
-                            f.readLines()
-                                .takeLast(400)
-                                .joinToString("\n") { line ->
-                                    runCatching {
-                                        val obj = org.json.JSONObject(line)
-                                        when (obj.optString("kind")) {
-                                            "text" -> "text: ${obj.optString("text").take(120)}"
-                                            "thinking" -> "thinking: ${obj.optString("text").take(120)}"
-                                            "reasoning" -> "reasoning: ${obj.optString("content").take(120)}"
-                                            "tool_use_start" -> "tool_use_start: ${obj.optString("name")}"
-                                            "tool_call_complete" -> "tool_call_complete: ${obj.optString("name")}"
-                                            "finished" -> "finished: ${obj.optString("stopReason")}"
-                                            else -> obj.optString("kind")
-                                        }
-                                    }.getOrDefault(line.take(120))
-                                }
-                        }.getOrDefault("读取失败")
+                    // [T-trace-preview-async] 旧实现在组合期直接 f.readLines() 整文件入内存
+                    // 再 takeLast(400)：轨迹文件每条 chunk 一行且无大小上限（ToolInputDelta
+                    // 每帧写入累积全文，行体积近平方级增长，数十 MB 完全现实），主线程大对象
+                    // 分配 + JSON 解析有 ANR/OOM 面。现在读取移到 IO 线程，且按偏移只读尾部
+                    // 有界字节（见 readTracePreview），用 state 驱动渲染。
+                    var preview by remember(f) { mutableStateOf<String?>(null) }
+                    LaunchedEffect(f) {
+                        preview = withContext(Dispatchers.IO) { readTracePreview(f) }
                     }
                     Column(
                         modifier = Modifier
@@ -329,7 +318,7 @@ private fun LogsBody(
                             .verticalScroll(rememberScrollState()),
                     ) {
                         Text(
-                            body,
+                            preview ?: "读取中…",
                             style = androidx.compose.material3.MaterialTheme.typography.bodySmall.copy(
                                 fontFamily = FontFamily.Monospace,
                             ),
@@ -749,6 +738,9 @@ fun LogDetailScreen(
         }
     }
 }
+
+// 轨迹回放弹窗的正文构建（readTracePreview / formatTraceLine）见同包
+// StreamTracePreview.kt —— 拆分是为了守住架构门 maxFileLines 棘轮。
 
 // ─── Share Utilities ───────────────────────────────────────────────────────────
 

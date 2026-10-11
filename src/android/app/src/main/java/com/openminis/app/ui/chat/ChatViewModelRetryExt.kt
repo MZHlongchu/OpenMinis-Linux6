@@ -89,6 +89,13 @@ fun ChatViewModel.retryLast() {
     viewModelScope.launch {
         var streamLaunched = false
         try {
+        // [T-truncation-critical-section] 与 sendMessage 同一口径：重试也是**历史行
+        // 写入者**（materializeQueuedPromptsAsUserTurn 会落 user 行，下面还会按
+        // sort_order 区间删行），剪裁在飞时必须先等它收尾。不等的话剪裁的
+        // `deleteMessagesAfter(sort_order >= cutoff)` 会把这次重试刚落库的行一起删掉：
+        // 气泡消失、agentHistory 里没有这一行，模型对着不在上下文里的问题作答。
+        // _isStreaming 已在上面同步置位，所以等待期间不会有新的剪裁插进来。
+        TruncationInterlock.awaitIdle(truncationJob)
         // [T-retry-stale-context] 重试前先把幽灵队列物化进 agentHistory：用户在
         // 错误横幅期间发的消息若还卡在 _promptQueue（错误出口此前不排空），
         // 它们不在 agentHistory 里——直接重试会拿到「上一次错误时」的上下文，
@@ -163,6 +170,10 @@ fun ChatViewModel.retryLast() {
                 // assistant row: clear digest excerpts so deleted content
                 // cannot flow back through HistoryDigest.inject.
                 clearHistoryDigestState()
+                // [T-b1-truncate-compact-reconcile] 同一收尾序列的第三段：
+                // 删掉的行若正好是压缩标记的锚，摘要必须一起丢弃，否则模型
+                // 继续看到「已完成」的、已经不存在的轮次。
+                reconcileCompactMarkerAfterTruncation()
             }
         } else {
             AppLogger.info(

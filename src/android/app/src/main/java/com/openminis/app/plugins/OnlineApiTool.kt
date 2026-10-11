@@ -9,6 +9,8 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.ResponseBody
+import okio.Buffer
 import org.json.JSONObject
 import java.net.URL
 import java.net.URLEncoder
@@ -45,6 +47,46 @@ object OnlineApiTool {
 
     private const val UA = "OpenMinis-Agent/1.26"
     private const val MAX_OUTPUT = 4_000
+
+    /**
+     * [T-online-api-body-cap] 插件响应体的读取上限。
+     *
+     * 插件目录来自远端市场，响应体是不可信输入：原先的 `body.string()` 无上限读进堆
+     * （OOM 是 Error，`execute` 的 runCatching 吞不住，还会被报成误导性的
+     * "Cannot reach plugin server"），而模型侧最终只用到 [MAX_OUTPUT] 个字符。
+     */
+    internal const val MAX_RESPONSE_BYTES: Long = 1L * 1024 * 1024
+
+    /**
+     * [T-online-api-body-cap] 按上限读取响应体；超限返回 null，由调用方转成显式工具错误
+     * （绝不把半截 JSON 当成功返回）。
+     *
+     * okio 的 `Source.read(sink, n)` 契约是「**最多** n 字节，EOF 返回 -1」——一次调用
+     * 不保证填满，所以必须循环读到 `cap + 1` 字节或 EOF：多读的那 1 字节正是区分
+     * 「恰好等于上限」（接受）与「超出上限」（拒绝）的判据，单次 read 只会拿回第一个
+     * 分段（实测 100KB → 8192 字符、chunked/2MB → 4096 字符）并静默报成功。
+     *
+     * `contentLength()` 预检只拦得住声明了长度的响应；chunked / gzip 透明解压后的
+     * 响应 contentLength() == -1，只能靠读取上限兜住。调用方负责关闭 [body]。
+     *
+     * 解码与原来的 `body.string()` 一致（Content-Type 声明的 charset，缺省 UTF-8），
+     * 否则 `charset=gbk` 这类插件响应会被 UTF-8 解成乱码。
+     */
+    internal fun readBodyBounded(body: ResponseBody?): String? {
+        if (body == null) return ""
+        if (body.contentLength() > MAX_RESPONSE_BYTES) return null
+        val charset = body.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
+        val limit = MAX_RESPONSE_BYTES + 1
+        val buffer = Buffer()
+        val source = body.source()
+        while (buffer.size < limit) {
+            // <= 0 即 EOF(-1)；byteCount > 0 时 okio 不会返回 0，这里同时兜住坏 Source 的死循环。
+            val read = source.read(buffer, limit - buffer.size)
+            if (read <= 0L) break
+        }
+        if (buffer.size > MAX_RESPONSE_BYTES) return null
+        return buffer.readString(charset)
+    }
 
     internal fun evictNetworkClient(plugin: PluginRegistry.RemotePlugin) {
         val prefix = connectorScopePrefix(plugin.id)
@@ -178,7 +220,13 @@ object OnlineApiTool {
                     requestUrl = redirected.toString()
                     return@use
                 }
-                text = response.body?.string().orEmpty()
+                // [T-online-api-body-cap] 超限是显式工具错误，不是半截 JSON 的成功响应。
+                text = readBodyBounded(response.body)
+                    ?: return ToolExecutionResult(
+                        "Remote HTTP $code: plugin response body exceeds the " +
+                            "${MAX_RESPONSE_BYTES / (1024 * 1024)} MiB read cap; body not loaded.",
+                        false,
+                    )
             }
             if (code in 300..399) continue
             break

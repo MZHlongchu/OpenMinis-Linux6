@@ -191,6 +191,11 @@ fun SessionStorageDetailScreen(
     chatDao: ChatDao,
     onBack: () -> Unit,
     onBrowseFiles: (rootPath: String) -> Unit = {},
+    /**
+     * [T-bodies-gc] `files/bodies/` 里的孤儿正文回收（内容寻址的正文此前只增不减）。
+     * 默认空实现，让预览/测试可以只读地用这个屏；正式接线见 AppNavigation。
+     */
+    onReclaimOrphanBodies: suspend () -> Int = { 0 },
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -314,6 +319,11 @@ fun SessionStorageDetailScreen(
                         withContext(Dispatchers.IO) {
                             File(sessionsDir, sessionId).deleteRecursively()
                             deleteSessionMedia(mediaDir, sessionId)
+                            // [T-bodies-gc] 顺手回收孤儿正文：只删「全库都没有任何
+                            // 行引用」的正文文件，本会话的消息行仍在库里，所以它的
+                            // 正文不会被删；这里清掉的是此前删会话/重新生成留下的
+                            // 死正文（它们会被备份一起打包，让包体积只增不减）。
+                            onReclaimOrphanBodies()
                         }
                         minisSize = 0L
                         mediaSize = 0L

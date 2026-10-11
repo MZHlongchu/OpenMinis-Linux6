@@ -72,6 +72,7 @@
     <string name="resume_action">Sambung</string>
     <string name="search_chats_placeholder">Cari sembang…</string>
     <string name="search_no_results">Tiada hasil untuk \"%1$s\"</string>
+    <string name="search_truncated_notice">Hanya %1$d padanan terbaharu dipaparkan — haluskan carian untuk lihat lagi.</string>
     <string name="stop_tool">Hentikan alat</string>
     <string name="mic_permission_title">Perlukan kebenaran mikrofon</string>
     <string name="mic_permission_message">Input suara memerlukan kebenaran mikrofon. Ketik Buka Tetapan untuk membenarkannya bagi Minis Ultra.</string>

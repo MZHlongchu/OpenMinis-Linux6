@@ -1118,6 +1118,13 @@ private fun ManualBearerTokenSection(
                     val cleaned = draft.replace(Regex("\\s+"), "")
                     if (cleaned.isNotEmpty() && manager != null) {
                         manager.saveManualBearerToken(cleaned)
+                        // [T-key-cache-invalidate] 手动 bearer 是构造期烘进 provider
+                        // 的（ProviderFactory 的 openAI/xAI/kimiCode 分支读
+                        // loadManualBearerToken 决定 effectiveKey 甚至分支形状），
+                        // 而 memo key 不含它 —— 不失效的话，改完 token 后旧的
+                        // provider 实例继续用旧令牌，只能等进程重启或缓存被别的
+                        // 写入挤掉。与 saveApiKey/deleteApiKey 同款处理。
+                        com.openminis.app.provider.ProviderFactory.invalidateInstance(instance.id)
                         AppLogger.info(TAG, "Manual bearer token set for ${instance.id}")
                         draft = ""
                         isEditing = false
@@ -1158,6 +1165,10 @@ private fun ManualBearerTokenSection(
             MinisSmallOutlinedButton(
                 onClick = {
                     manager?.deleteManualBearerToken()
+                    // [T-key-cache-invalidate] 删 token 同样要让 memo 失效：已构造
+                    // 的 provider 把旧 bearer 烘在 effectiveKey 里存活，否则删除后
+                    // 仍继续用旧令牌请求（与 deleteApiKey 同款处理）。
+                    com.openminis.app.provider.ProviderFactory.invalidateInstance(instance.id)
                     AppLogger.info(TAG, "Manual bearer token removed for ${instance.id}")
                     reloadTick++
                 },

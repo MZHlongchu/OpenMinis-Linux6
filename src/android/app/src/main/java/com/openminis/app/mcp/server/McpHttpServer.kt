@@ -24,9 +24,10 @@ import java.util.concurrent.atomic.AtomicLong
  * JSON-RPC envelope and delegates to [McpServerCore.handle]. Only POST to
  * `/mcp` or `/message` is accepted; GET returns 405 (v1 is POST-only).
  *
- * Loopback-only binding means plain HTTP is safe for local clients; an
- * optional Bearer token (never empty when auth is enabled) gates requests
- * for defense in depth (e.g. other apps on-device probing the port).
+ * Loopback-only binding means plain HTTP is safe for local clients; a Bearer
+ * token is REQUIRED on top of that (never blank — [start] refuses to bind
+ * without one) so another app on the device cannot drive shell_exec /
+ * file_write just by reaching the port.
  */
 class McpHttpServer(
     // Nullable for JVM unit tests; the class never dereferences it —
@@ -77,6 +78,17 @@ class McpHttpServer(
     fun start(port: Int): Boolean {
         if (running.get()) return true
         lastBindConflict = false
+        // [T-b1-mcp-token-failclosed] A blank token is not "auth disabled" —
+        // McpServerCore skips the Authorization check entirely for a blank
+        // token, so this port would then serve shell_exec / file_write to any
+        // app (or web page) that can reach 127.0.0.1. Refuse to open the
+        // socket instead; re-seeding the token is McpServerManager's job.
+        if (authToken().isNullOrBlank()) {
+            lastError = "no bearer token configured — refusing to start with auth disabled"
+            Log.w(TAG, "MCP server start refused: $lastError")
+            running.set(false)
+            return false
+        }
         return try {
             val socket = ServerSocket(port, 10, InetAddress.getByName("127.0.0.1"))
             serverSocket = socket
@@ -173,15 +185,26 @@ class McpHttpServer(
             val contentLengthRaw = headers["content-length"]
             val contentLength = contentLengthRaw?.toLongOrNull()
             if (contentLength == null && contentLengthRaw != null) {
-                writer.print(McpServerCore.buildHttpResponse(McpServerCore.Response(400, "bad content-length")))
+                writer.print(McpServerCore.buildHttpResponse(
+                    McpServerCore.Response(400, "bad content-length"), headers["origin"]))
                 writer.flush()
                 socket.close()
                 return
             }
             if ((contentLength ?: 0L) > MAX_BODY_BYTES) {
                 // 413 without allocating anything near the declared size.
+                // [T-b1-transfer-limit-single-source] A JSON-RPC error envelope
+                // (not a bare text body): callers must be able to tell this
+                // apart from a tool failure and see which limit was hit — the
+                // push tool's own cap is derived from this one.
                 writer.print(McpServerCore.buildHttpResponse(
-                    McpServerCore.Response(413, "body too large", "text/plain")))
+                    McpServerCore.rpcErrorNullId(
+                        ErrorCode.INVALID_REQUEST,
+                        "request body exceeds the ${MAX_BODY_BYTES / (1024 * 1024)} MiB limit",
+                        413,
+                    ),
+                    headers["origin"],
+                ))
                 writer.flush()
                 socket.close()
                 return
@@ -200,7 +223,7 @@ class McpHttpServer(
             }
 
             val response = route(method, path, headers, body)
-            writer.print(McpServerCore.buildHttpResponse(response))
+            writer.print(McpServerCore.buildHttpResponse(response, headers["origin"]))
             writer.flush()
         } catch (e: Exception) {
             Log.w(TAG, "connection error: ${e.message}")
@@ -271,6 +294,18 @@ class McpHttpServer(
                 if (path != "/mcp" && path != "/message") {
                     return McpServerCore.Response(404, "not found", "text/plain")
                 }
+                // [T-b1-mcp-token-failclosed] authToken is a live lambda; if the
+                // token disappears mid-run (encrypted prefs wiped by
+                // EncryptedPrefsFactory, or clearToken), do NOT fall back to
+                // "no auth" — answer 401 like any other unauthenticated call.
+                val token = authToken()
+                if (token.isNullOrBlank()) {
+                    return McpServerCore.rpcErrorNullId(
+                        ErrorCode.AUTH_REQUIRED,
+                        "server has no bearer token configured",
+                        401,
+                    )
+                }
                 val parsed = runCatching { JSONObject(body) }.getOrNull()
                     ?: return McpServerCore.rpcErrorNullId(ErrorCode.PARSE_ERROR, "invalid JSON body")
                 val rpcMethod = parsed.optString("method", "")
@@ -286,7 +321,7 @@ class McpHttpServer(
                     headers = headers,
                     id = id,
                     dispatcher = dispatcher,
-                    authToken = authToken(),
+                    authToken = token,
                     serverVersion = serverVersion,
                 )
                 handledRequests.incrementAndGet()
