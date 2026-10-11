@@ -30,18 +30,12 @@ object MlKitTranslationEngine {
             val downloadedBytes: Long = 0L,
             val totalBytes: Long = 0L,
         ) : PackState() {
-            /** "12.3 MB / 29.8 MB (41%)" or "41% (第 1/2 阶段)" */
+            /**
+             * 与 full 同构（[T-mlkit-download-stall]）：ML Kit download Task
+             * 不暴露字节进度，模拟百分比会卡 91%——确定阶段文案，不确定式进度条。
+             */
             val detailText: String
-                get() = if (downloadedBytes > 0L && totalBytes > 0L) {
-                    val dl = String.format(java.util.Locale.US, "%.1f", downloadedBytes / 1048576.0)
-                    val tot = String.format(java.util.Locale.US, "%.1f", totalBytes / 1048576.0)
-                    val pct = ((downloadedBytes.toDouble() / totalBytes) * 100).toInt().coerceIn(0, 100)
-                    "$dl MB / $tot MB ($pct%)"
-                } else if (progress != null) {
-                    "${(progress * 100).toInt().coerceIn(0, 100)}% (第 $step/$totalSteps 阶段)"
-                } else {
-                    "第 $step/$totalSteps 阶段 (连接中...)"
-                }
+                get() = if (totalSteps > 1) "第 $step/$totalSteps 阶段" else ""
         }
         data object Ready : PackState()
         data class Failed(val message: String) : PackState()
