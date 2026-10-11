@@ -159,6 +159,10 @@ fun ChatViewModel.retryLast() {
                     ChatViewModel.TAG_STREAM,
                     "retryLast: deleted trailing assistant row sortOrder=$trailingAssistantSortOrder, kept ${trailingAssistantSortOrder} prior rows",
                 )
+                // [T-truncation-digest-clear] retryLast removed the trailing
+                // assistant row: clear digest excerpts so deleted content
+                // cannot flow back through HistoryDigest.inject.
+                clearHistoryDigestState()
             }
         } else {
             AppLogger.info(

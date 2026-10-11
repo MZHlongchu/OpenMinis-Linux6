@@ -81,6 +81,9 @@ fun ChatViewModel.deleteFromMessage(messageId: String) {
         // Rebuild agentHistory from what survived, so the next turn is
         // built on the truncated conversation rather than a stale list.
         val tail = awaitBoundedHistoryRebuild(sid)
+        // [T-truncation-digest-clear] digest 摘录里是被裁掉行（含刚删除的轮次）
+        // 的痕迹，不清空会继续注入已删上下文。
+        clearHistoryDigestState()
         reconcileCompactMarkerAfterTruncation()
         // Refresh the session's last-message preview; otherwise the
         // session list keeps quoting a message that no longer exists.
@@ -105,33 +108,61 @@ fun ChatViewModel.deleteFromMessage(messageId: String) {
  * effectiveAgentHistory 的投影仍然把摘要注入模型上下文，模型以为做了已经不
  * 存在的工作 → 「接入模型的上下文与实际上下文不对」。
  *
- * 规则：标记的三个锚（boundary / firstKept / lastCompacted）在**活历史**里
- * 一个都解析不到 → 摘要描述的会话已不存在 → 整体丢弃压缩状态（删 DB 标记行 +
- * 清内存缓存 + 清 UI 分隔行），全量历史重新流动。任一锚仍在 → 标记有效保留
- * （detached-anchor 的 _compactMarkerDetached 是窗口外不是不存在，不在此列）。
+ * [T-truncation-marker-partial] 判定规则（v2 语义：摘要覆盖
+ * [会话起点 .. lastCompactedMessageId]，见 CompactMarkerEntity）：
+ *  - v2 标记（lastCompactedMessageId 非空）：**以 DB 为准**——该行仍在 → 摘要
+ *    覆盖的区间完整幸存 → 保留；该行已不在（被本次截断删除）→ 摘要描述的
+ *    轮次已不存在 → 丢弃。旧的 anyAnchorAlive 判定有洞：boundary 幸存而
+ *    lastCompacted 被删时（删除点落在摘要区间中段），摘要仍在注入已删内容。
+ *  - v1 / 无 id 锚（anchors 为空）：截断后无法核验摘要范围 → 保守丢弃
+ *    （自动压缩会在需要时重建标记）。
+ *  - 其余（id 锚齐全且 lastCompacted 幸存）：标记有效保留。detached-anchor
+ *    的 _compactMarkerDetached 是窗口外不是不存在，不在此列。
  */
 internal suspend fun ChatViewModel.reconcileCompactMarkerAfterTruncation() {
     val marker = _cachedLatestMarker ?: return
+    val lastCompacted = marker.lastCompactedMessageId
+    if (lastCompacted != null) {
+        val survived = runCatching {
+            chatRepository.dao.sortOrderOf(lastCompacted)
+        }.getOrNull() != null
+        if (survived) return
+        val sid = realSessionId.ifEmpty { sessionId }
+        AppLogger.warning(
+            ChatViewModel.TAG,
+            "[Compact] truncation removed lastCompacted anchor $lastCompacted — " +
+                "dropping compact state; summary described turns that no longer exist",
+        )
+        runCatching { chatRepository.dao.deleteCompactMarker(marker.id) }
+        _cachedLatestMarker = null
+        _compactSummary.value = null
+        // UI 分隔行（compact 系统行）随标记消失；真实消息不动。
+        _messages.value = _messages.value.filterNot { msg ->
+            msg.role == "system" && msg.toolBlocks.firstOrNull()?.toolName == "compact"
+        }
+        return
+    }
     val history = agentHistory.toList()
     val anchors = listOfNotNull(
         marker.boundaryMessageId,
         marker.firstKeptMessageId,
         marker.lastCompactedMessageId,
     )
-    if (anchors.isEmpty()) return
-    val anchorIds = anchors.toSet()
-    val anyAnchorAlive = history.any { it.dbMessageId != null && it.dbMessageId in anchorIds }
-    if (anyAnchorAlive) return
+    if (anchors.isNotEmpty()) {
+        val anchorIds = anchors.toSet()
+        val anyAnchorAlive = history.any { it.dbMessageId != null && it.dbMessageId in anchorIds }
+        if (anyAnchorAlive) return
+    }
+    // v1 / 无 id 锚：截断后无法核验摘要覆盖范围，保守丢弃。
     val sid = realSessionId.ifEmpty { sessionId }
     AppLogger.warning(
         ChatViewModel.TAG,
-        "[Compact] truncation removed every marker anchor (${anchors.size}) — " +
-            "dropping compact state; summary described turns that no longer exist",
+        "[Compact] truncation with a legacy/no-anchor marker — dropping compact state " +
+            "(cannot verify the summarized range still exists)",
     )
     runCatching { chatRepository.dao.deleteCompactMarker(marker.id) }
     _cachedLatestMarker = null
     _compactSummary.value = null
-    // UI 分隔行（compact 系统行）随标记消失；真实消息不动。
     _messages.value = _messages.value.filterNot { msg ->
         msg.role == "system" && msg.toolBlocks.firstOrNull()?.toolName == "compact"
     }

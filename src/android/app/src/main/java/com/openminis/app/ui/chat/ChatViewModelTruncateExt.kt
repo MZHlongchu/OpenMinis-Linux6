@@ -44,6 +44,8 @@ internal suspend fun ChatViewModel.truncateBeforeEdit(messageId: String) {
         chatRepository.deleteMessagesAfter(sid, cutoffSortOrder)
     }
     val remaining = awaitBoundedHistoryRebuild(sid)
+    // [T-truncation-digest-clear] 编辑截断同样清 digest 摘录。
+    clearHistoryDigestState()
     AppLogger.info(
         ChatViewModel.TAG_STREAM,
         "✏️ truncateBeforeEdit cutoffSortOrder=$cutoffSortOrder remaining=${remaining.size}"

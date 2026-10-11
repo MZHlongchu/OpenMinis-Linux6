@@ -957,6 +957,19 @@ class ChatViewModel(
         llmDigestLines.addAll(retained)
     }
 
+    /**
+     * [T-truncation-digest-clear] 长按截断类操作（从此处删除 / 重试 / 撤回）之后
+     * 调用：digest 摘录是有界窗口此前裁掉行的"裁剪痕迹"，每轮请求经
+     * HistoryDigest.inject 重新注入。截断刚删掉的那些轮次正是摘录的内容——
+     * 不清空的话，重建后的 agentHistory 是对的、但注入的摘录仍是已删对话，
+     * 模型接到的依旧是旧上下文（用户实测：删除/重试/回滚后接错上下文）。
+     * 窗口外的幸存行摘录一并丢弃是可接受代价：随后每轮窗口裁剪会自然重建。
+     */
+    fun clearHistoryDigestState() {
+        llmDigestLines.clear()
+        llmDigestOmitted = 0
+    }
+
     internal fun notePersistedUiRow(uiMessageId: String?, dbMessageId: String) {
         if (uiMessageId != null) {
             _messages.value = _messages.value.map { message ->
@@ -4443,6 +4456,9 @@ class ChatViewModel(
 
                 // Rebuild only the bounded model context from the persisted tail.
                 awaitBoundedHistoryRebuild(sid)
+                // [T-truncation-digest-clear] rerunFromToolBlock 也是截断：
+                // digest 摘录里被裁行（含本次删除区间）的痕迹清空防注入。
+                clearHistoryDigestState()
 
                 streamLaunched = runRerunStreamTail(initialProvider, "rerunFromToolBlock")
             } finally {
@@ -4546,6 +4562,9 @@ class ChatViewModel(
             }
 
             awaitBoundedHistoryRebuild(sid)
+            // [T-truncation-digest-clear] 重试删掉了出错轮；digest 摘录里可能
+            // 还有更早被窗口裁掉、且已被本次截断删除的行——清空防注入。
+            clearHistoryDigestState()
 
             // [T-p1-context-marker-reconcile] 截断后对账压缩标记：摘要描述的
             // 轮次刚被重试删掉时，丢弃标记让全量历史流动（否则模型以为做了

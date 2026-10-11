@@ -104,6 +104,9 @@ internal fun ChatViewModel.rewindToMessage(
                     }
                 }
                 val tail = awaitBoundedHistoryRebuild(sid)
+                // [T-truncation-digest-clear] 撤回截断了上下文；digest 摘录里
+                // 被裁掉行的痕迹一并清空，防已删内容继续注入。
+                clearHistoryDigestState()
                 reconcileCompactMarkerAfterTruncation()
                 runCatching {
                     chatRepository.updateSessionPreview(sid, tail.lastOrNull()?.partsJson ?: "[]")
