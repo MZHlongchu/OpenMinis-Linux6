@@ -50,9 +50,9 @@ object ExecutionCoordinator {
     /** Thread-safe per-session mutex registry. */
     private val mutexes = ConcurrentHashMap<String, Mutex>()
 
-    // [T-shell-perf] recordLastCommand 的后台写 scope（脱离会话互斥锁）。
+    // [T-shell-perf] 后台写 scope（脱离会话锁）。[T-last-cmd-order] limitedParallelism(1) 保写序：交错落盘会让 .minis-last-cmd.sh 停在旧命令。
     private val recordScope = kotlinx.coroutines.CoroutineScope(
-        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO.limitedParallelism(1),
     )
 
     /**
