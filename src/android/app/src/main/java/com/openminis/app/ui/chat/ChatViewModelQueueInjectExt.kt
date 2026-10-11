@@ -19,8 +19,9 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     finishedAccumulatedText: String,
     finishedAllToolBlocks: List<AssistantBlock>,
 ): ChatViewModel.InjectedTurn? {
-    if (_promptQueue.value.isEmpty()) return null
-    val queued = _promptQueue.value
+    // [T-queue-shelved] 搁置消息不参与自动注入；只注入 pending 态。
+    val queued = _promptQueue.value.filter { !it.shelved }
+    if (queued.isEmpty()) return null
 
     // [T-truncation-digest-clear] 打断 + 注入 = 上下文重置点：digest 摘录是
     // 有界窗口此前裁掉行的痕迹（可能含已被用户删除/放弃的轮次），不清空

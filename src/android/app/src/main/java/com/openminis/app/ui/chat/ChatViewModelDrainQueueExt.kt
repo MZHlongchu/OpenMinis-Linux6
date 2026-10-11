@@ -21,7 +21,8 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
     fallbackProviders: List<ChatViewModel.FallbackCandidate>,
     fallbackStrategy: com.openminis.app.data.model.FallbackStrategy,
 ) {
-    while (_promptQueue.value.isNotEmpty()) {
+    // [T-queue-shelved] 搁置态的消息不自动 drain（打断/异常后不自动重发旧消息）。
+    while (_promptQueue.value.any { !it.shelved }) {
         if (!materializeQueuedPromptsAsUserTurn()) break
 
         try {
@@ -63,8 +64,9 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
  * @return true = 物化了至少一条排队提示词。
  */
 internal suspend fun ChatViewModel.materializeQueuedPromptsAsUserTurn(): Boolean {
-    if (_promptQueue.value.isEmpty()) return false
-    val queued = _promptQueue.value
+    // [T-queue-shelved] 只物化 pending 态；搁置消息留在队列（不自动重发）。
+    val queued = _promptQueue.value.filter { !it.shelved }
+    if (queued.isEmpty()) return false
 
     // [T-truncation-digest-clear] drain 也是上下文重置点（打断后恢复/轮末
     // 消费）：digest 摘录里可能含已被用户删除/放弃的轮次，注入即串上下文。

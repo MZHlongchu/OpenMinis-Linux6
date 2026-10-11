@@ -1713,7 +1713,8 @@ internal suspend fun ChatViewModel.runAgentLoop(
         // continue 进新轮，排队消息在本轮 API 调用就到达模型（10 分钟的构建
         // 命令不再吞掉排队延迟）。注入失败（异常/空内容）不堆 [interrupted]：
         // 队列保留，本回合照常执行工具，回合末尾边界与 loop 末尾 drain 会重试。
-        if (_promptQueue.value.isNotEmpty()) {
+        // [T-queue-shelved] 搁置消息不参与自动注入——只有 pending 态才触发。
+        if (_promptQueue.value.any { !it.shelved }) {
             AppLogger.info(
                 ChatViewModel.TAG_STREAM,
                 "📨[QueueInterrupt] turn=$turn pre-dispatch: ${_promptQueue.value.size} queued prompt(s) — interrupting before tool execution",
@@ -2165,7 +2166,8 @@ internal suspend fun ChatViewModel.runAgentLoop(
         //   …assistant(responds-to-queued).
         // The bridge lives in agentHistory only (NOT persisted) —
         // it's purely a wire-format spacer for the API call.
-        if (_promptQueue.value.isNotEmpty()) {
+        // [T-queue-shelved] 搁置消息不参与边界自动注入。
+        if (_promptQueue.value.any { !it.shelved }) {
             AppLogger.info(
                 ChatViewModel.TAG_STREAM,
                 "📨[QueueInterrupt] turn=$turn ${_promptQueue.value.size} queued prompt(s) — interrupting after current tool call to start a standalone turn",

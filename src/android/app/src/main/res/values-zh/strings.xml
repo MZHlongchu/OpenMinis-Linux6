@@ -2466,6 +2466,8 @@
         <string name="chat_longpress_abort_tool_inject">中止当前工具并立即插入</string>
     <string name="chat_queue_hint_wait">已排队 · 当前工具完成后注入（长按可中止工具立即插入）</string>
     <string name="chat_queue_hint_abort">已排队 · 正在执行工具（长按可中止立即插入）</string>
+    <string name="chat_queue_hint_shelved">已搁置 · 中断后不会自动重发（长按可重新排队或撤回）</string>
+    <string name="chat_longpress_requeue">重新排队这条消息</string>
 <string name="translate_stream_slim_notice">当前安装的是 slim 版（不含离线翻译推理运行时，安装包更小）。实时离线翻译需要 full 版；气泡翻译不受影响，仍由模型完成。</string>
     <string name="plan_board_expand">展开</string>
     <string name="plan_board_collapse">收起</string>

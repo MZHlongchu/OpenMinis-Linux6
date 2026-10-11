@@ -2651,6 +2651,8 @@
         <string name="chat_longpress_abort_tool_inject">Abort tool and insert now</string>
     <string name="chat_queue_hint_wait">Queued - injects after the current tool finishes (long-press to abort the tool and insert now)</string>
     <string name="chat_queue_hint_abort">Queued - a tool is running (long-press to abort it and insert now)</string>
+    <string name="chat_queue_hint_shelved">Shelved - will not auto-send after the interruption (long-press to re-queue or withdraw)</string>
+    <string name="chat_longpress_requeue">Re-queue this message</string>
 <string name="translate_stream_slim_notice">This is the slim build (no offline translation runtime, smaller APK). Live offline translation requires the full build; bubble translation is unaffected and still handled by the model.</string>
     <string name="plan_board_expand">Expand</string>
     <string name="plan_board_collapse">Collapse</string>

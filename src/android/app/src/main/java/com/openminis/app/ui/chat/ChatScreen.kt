@@ -4100,6 +4100,14 @@ fun ChatScreen(
                                 onWithdraw = if (item.message.isQueued) {
                                     { safeMutate { viewModel.withdrawQueuedMessage(item.message.id) } }
                                 } else null,
+                                // [T-queue-shelved] 搁置气泡的长按「重新排队」：
+                                // 打断/异常后滞留的消息不再自动重发，用户主动恢复。
+                                onRequeue = if (item.message.isQueued &&
+                                    viewModel.promptQueue.value
+                                        .firstOrNull { it.id == item.message.queuedPromptId }?.shelved == true
+                                ) {
+                                    { safeMutate { viewModel.requeueShelvedPrompt(item.message.queuedPromptId ?: "") } }
+                                } else null,
                                 // [T-queue-abort-tool] 排队气泡 + 流式运行中有在飞
                                 // 工具才提供「中止当前工具并立即插入」。currentTool
                                 // 来自 run 的原子引用；null = 工具间隙（模型在思考/

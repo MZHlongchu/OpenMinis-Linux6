@@ -105,6 +105,9 @@ internal fun UserMessageBubble(
     // ChatRewindDialog.kt for the body and the gating rationale).
     onRewind: (() -> Unit)? = null,
     onWithdraw: (() -> Unit)? = null,
+    // [T-queue-shelved] 搁置气泡的长按「重新排队」：打断/异常后滞留的消息
+    // 不自动重发，用户主动恢复。仅搁置态非 null（由 promptQueue 推导）。
+    onRequeue: (() -> Unit)? = null,
     // [T-queue-abort-tool] 中止当前工具并立即把这条排队消息注入为独立新轮。
     // 仅排队气泡 + 流式运行中非 null；由调用方用 currentToolSnapshot 判定，
     // 无在飞工具时传 null（pre-dispatch 注入点已保证下一个工具边界生效）。
@@ -191,8 +194,11 @@ internal fun UserMessageBubble(
                     if (isQueued) {
                         Text(
                             text = stringResource(
-                                if (onAbortToolAndInject != null) R.string.chat_queue_hint_abort
-                                else R.string.chat_queue_hint_wait,
+                                when {
+                                    onRequeue != null -> R.string.chat_queue_hint_shelved
+                                    onAbortToolAndInject != null -> R.string.chat_queue_hint_abort
+                                    else -> R.string.chat_queue_hint_wait
+                                },
                             ),
                             style = MaterialTheme.typography.labelSmall,
                             color = secondaryTextColor.copy(alpha = 0.8f),
@@ -339,6 +345,14 @@ internal fun UserMessageBubble(
                 }
                 // [T-checkpoint-rewind] Recoverable counterpart to Delete.
                 if (onRewind != null) RewindMenuEntry { showMenu = false; onRewind() }
+                // [T-queue-shelved] 搁置消息的「重新排队」：恢复自动注入/drain 流转。
+                if (onRequeue != null) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.chat_longpress_requeue)) },
+                        onClick = { showMenu = false; onRequeue() },
+                        leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                    )
+                }
                 // [T-queue-abort-tool] 排队消息的长按菜单：正在执行工具时
                 // 提供「中止当前工具并立即插入」——杀在飞进程，工具以失败
                 // 返回，工具边界随即将本消息注入。前置 Copy 项之后、其余

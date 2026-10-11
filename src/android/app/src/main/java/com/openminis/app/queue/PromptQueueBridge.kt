@@ -118,6 +118,8 @@ object PromptQueueBridge {
         val attachmentMimeTypes: List<String> = emptyList(),
         val attachmentIsImages: List<Boolean> = emptyList(),
         val createdAt: Long = 0,
+        // [T-queue-shelved] 打断/异常后的搁置态跨重启保留：恢复时不自动重发。
+        val shelved: Boolean = false,
     ) {
         /** 还原宿主 QueuedPrompt（Uri.parse 重建 android.net.Uri）。 */
         fun toQueuedPrompt(id: String): QueuedPrompt {
@@ -136,7 +138,7 @@ object PromptQueueBridge {
                     )
                 }.getOrNull()
             }
-            return QueuedPrompt(id = id, text = text, attachments = attachments)
+            return QueuedPrompt(id = id, text = text, attachments = attachments, shelved = shelved)
         }
 
         companion object {
@@ -148,6 +150,7 @@ object PromptQueueBridge {
                 attachmentMimeTypes = prompt.attachments.map { it.mimeType },
                 attachmentIsImages = prompt.attachments.map { it.isImage },
                 createdAt = System.currentTimeMillis(),
+                shelved = prompt.shelved,
             )
         }
     }
@@ -176,6 +179,28 @@ object PromptQueueBridge {
         }
     }
 
+    /**
+     * [T-queue-shelved] 翻转单条的搁置态（cancel + 重写）。
+     * shelved=true：打断/异常后不自动重发；false：用户点"重新排队"恢复。
+     */
+    suspend fun mirrorShelved(context: Context, sessionId: String, promptId: String, shelved: Boolean) {
+        withContext(Dispatchers.IO) {
+            awaitPendingWrites(context.filesDir)
+            runCatching {
+                val mgr = manager(context.filesDir)
+                val entry = mgr.list(sessionId, PromptQueue.FOLLOW_UP).firstOrNull { it.id == promptId }
+                    ?: return@runCatching
+                mgr.cancelById(promptId)
+                val payload = entry.payload.copy(shelved = shelved)
+                mgr.enqueue(
+                    sessionId = sessionId,
+                    queue = PromptQueue.FOLLOW_UP,
+                    payload = payload,
+                    itemId = promptId,
+                )
+            }
+        }
+    }
     /** 消费确认：内存队列已注入为真实用户消息（appendMessage 成功后调用）。 */
     suspend fun confirm(context: Context, sessionId: String, promptIds: List<String>) {
         if (promptIds.isEmpty()) return

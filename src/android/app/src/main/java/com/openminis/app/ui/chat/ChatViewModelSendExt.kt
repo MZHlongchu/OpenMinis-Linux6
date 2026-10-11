@@ -366,12 +366,13 @@ internal fun ChatViewModel.sendMessage(
                         setInlineError(e.message ?: "Unknown error")
                         // T298: completion notifier should show the ❌ variant.
                         SessionActivityTracker.markStreamError(activeSessionId)
-                        // [T-queued-prompt-ghost] 终局错误也要排空队列：
-                        // drainQueuedPrompts 只在正常返回路径跑，错误路径不排
-                        // → 用户在错误横幅期间发的消息永远卡在队列里（灰泡
-                        // 既不跑也撤不回）——「发送的消息被隐藏」。200ms 延迟
-                        // 让本协程的 finally 先把 _isStreaming 放下来。
-                        if (_promptQueue.value.isNotEmpty()) resumeQueueAfterCancel()
+                        // [T-queue-shelved] 终局错误：排队消息转搁置态（不再
+                        // 自动 drain 重发——用户实测抱怨新轮次完成后旧消息被
+                        // 自动塞给智能体）。气泡保留：撤回 / 长按重新排队。
+                        if (_promptQueue.value.isNotEmpty()) {
+                            _promptQueue.value = _promptQueue.value.map { it.copy(shelved = true) }
+                            shelvedPrompts = true
+                        }
                     }
                 } finally {
                     AppLogger.info(ChatViewModel.TAG_STREAM, "send streamJob FINALLY enter")
@@ -390,8 +391,11 @@ internal fun ChatViewModel.sendMessage(
             } catch (e: com.openminis.app.service.SlotQueueTimeout) {
                 if (!run.isStopped) {
                     setInlineError(e.message ?: "会话排队超时，名额已释放")
-                    // [T-queued-prompt-ghost] 同上：错误出口不排空 = 幽灵队列。
-                    if (_promptQueue.value.isNotEmpty()) resumeQueueAfterCancel()
+                    // [T-queue-shelved] 同上：排队消息转搁置态。
+                    if (_promptQueue.value.isNotEmpty()) {
+                        _promptQueue.value = _promptQueue.value.map { it.copy(shelved = true) }
+                        shelvedPrompts = true
+                    }
                 }
             } catch (e: CancellationException) {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "send streamJob CANCELLED waiting for slot")

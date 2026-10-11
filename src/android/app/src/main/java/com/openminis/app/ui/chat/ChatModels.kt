@@ -138,6 +138,12 @@ data class QueuedPrompt(
     val id: String,
     val text: String,
     val attachments: List<InputAttachment> = emptyList(),
+    /**
+     * [T-queue-shelved] 打断/异常后滞留的排队消息进入"搁置"态：不参与任何
+     * 自动注入/drain——用户发了新消息并跑完新轮次后，搁置的旧消息【不会】
+     * 被自动重发给智能体（用户实测抱怨）。气泡保留（撤回/重新排队可操作）。
+     */
+    val shelved: Boolean = false,
 )
 
 /**

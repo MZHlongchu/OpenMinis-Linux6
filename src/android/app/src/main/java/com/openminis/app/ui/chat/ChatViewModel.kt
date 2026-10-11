@@ -1687,6 +1687,14 @@ class ChatViewModel(
     val promptQueue: StateFlow<List<QueuedPrompt>> = _promptQueue.asStateFlow()
 
     /**
+     * [T-queue-shelved] 打断/异常后滞留的排队消息进入搁置态：不自动注入/drain，
+     * 用户提供的新轮次完成后也不会自动重发。重新排队（长按菜单）或撤回。
+     * 队列全空时复位 false。
+     */
+    @Volatile
+    internal var shelvedPrompts = false
+
+    /**
      * Input-token count reported by the most recent API call, used by
      * [ContextPolicy] as the "estimated tokens" gate before sending. Zero
      * means either we've never called the model or the provider didn't return
@@ -4704,6 +4712,26 @@ class ChatViewModel(
         val run = streamJob?.let { com.openminis.app.service.ActiveRunRegistry.current(it) }
             ?: com.openminis.app.service.ActiveRunRegistry.current(activeSessionId)
         return run?.takeIf { !it.isStopped }?.currentToolSnapshot()
+    }
+
+    /**
+     * [T-queue-shelved] 长按搁置气泡 → 「重新排队」：shelved 翻回 pending，
+     * 恢复正常的注入/drain 流转。磁盘镜像同步（重启后不自动重发的语义随
+     * shelved 翻转解除）。
+     */
+    fun requeueShelvedPrompt(promptId: String) {
+        _promptQueue.value = _promptQueue.value.map {
+            if (it.id == promptId) it.copy(shelved = false) else it
+        }
+        if (_promptQueue.value.none { it.shelved }) shelvedPrompts = false
+        viewModelScope.launch {
+            runCatching {
+                com.openminis.app.queue.PromptQueueBridge.mirrorShelved(
+                    context.applicationContext, activeSessionId, promptId, shelved = false,
+                )
+            }
+        }
+        AppLogger.info(TAG_STREAM, "📨[QueueShelved] requeued $promptId (pending again)")
     }
 
     /**
