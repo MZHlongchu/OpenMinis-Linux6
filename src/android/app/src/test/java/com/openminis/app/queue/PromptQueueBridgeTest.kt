@@ -141,6 +141,67 @@ class PromptQueueBridgeTest {
         assertTrue("the late record must not outlive its own confirm", texts("sess-1").isEmpty())
     }
 
+    @Test
+    fun `mirror write block that awaits pending writes does not self-join`() = runBlocking {
+        // [T-queue-mirror-self-join] cancelQueuedPromptOnDisk 的 block 是
+        // PromptQueueBridge.cancel —— 它内部先 awaitPendingWrites 再动文件。
+        // await 若把「自己这个尚未完成的 Job」也 join 进去，就是等自己完成
+        // = 永久挂起：镜像写协程死锁、台账永久残留，之后所有 confirm/cancel
+        // /drop 全部跟着挂死（agent loop 卡住，重启才自愈）。await 必须跳过
+        // 调用者自己的 Job，只等其他在途写。
+        PromptQueueBridge.enqueue(filesDir, "sess-1", prompt("q1", "one"))
+
+        val job = PromptQueueBridge.launchMirrorWrite(filesDir, this) {
+            PromptQueueBridge.cancel(filesDir, "q1")
+        }
+
+        kotlinx.coroutines.withTimeout(5_000) { job.join() }
+
+        assertTrue("the cancelled record must actually be gone", texts("sess-1").isEmpty())
+    }
+
+    // ─── [T-queue-shelved] 搁置态镜像 ──────────────────────────────────
+
+    @Test
+    fun `mirrorShelved true survives a restore so a restart does not auto-resend`() = runBlocking {
+        // 批量搁置出口（stop/终局错误/排队超时）的磁盘契约：shelved=true 落盘，
+        // 重启 restore 读回的仍是 shelved——否则旧消息复活成 pending，下次
+        // run 照样自动 drain 重发（这正是修复前三个出口只翻内存的雷）。
+        PromptQueueBridge.enqueue(filesDir, "sess-1", prompt("q1", "one"))
+        PromptQueueBridge.enqueue(filesDir, "sess-1", prompt("q2", "two"))
+
+        PromptQueueBridge.mirrorShelved(filesDir, "sess-1", "q1", shelved = true)
+
+        val restored = PromptQueueBridge.restore(filesDir, "sess-1")
+        assertEquals(2, restored.size)
+        assertTrue("q1 must restore as shelved", restored.first { it.id == "q1" }.shelved)
+        assertFalse("q2 must stay pending", restored.first { it.id == "q2" }.shelved)
+    }
+
+    @Test
+    fun `mirrorShelved false requeues a shelved prompt and keeps the payload intact`() = runBlocking {
+        // 长按「重新排队」的磁盘契约：翻回 pending，且 cancel+重写不得丢失
+        // 正文（重写路径是先删再写，字段保真靠 payload.copy；createdAt 在
+        // payload 层，restore 排序稳定即间接佐证未丢）。
+        PromptQueueBridge.enqueue(filesDir, "sess-1", prompt("q1", "keep me"))
+        PromptQueueBridge.mirrorShelved(filesDir, "sess-1", "q1", shelved = true)
+        PromptQueueBridge.mirrorShelved(filesDir, "sess-1", "q1", shelved = false)
+
+        val after = PromptQueueBridge.restore(filesDir, "sess-1").single()
+        assertFalse(after.shelved)
+        assertEquals("keep me", after.text)
+    }
+
+    @Test
+    fun `mirrorShelved of an unknown id is a no-op`() = runBlocking {
+        PromptQueueBridge.enqueue(filesDir, "sess-1", prompt("q1", "one"))
+
+        PromptQueueBridge.mirrorShelved(filesDir, "sess-1", "ghost", shelved = true)
+
+        assertEquals(listOf("one"), texts("sess-1"))
+        assertFalse(PromptQueueBridge.restore(filesDir, "sess-1").single().shelved)
+    }
+
     // ─── 会话隔离 ──────────────────────────────────────────────────────
 
     @Test

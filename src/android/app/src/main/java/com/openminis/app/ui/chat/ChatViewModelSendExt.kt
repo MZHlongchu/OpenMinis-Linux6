@@ -369,10 +369,8 @@ internal fun ChatViewModel.sendMessage(
                         // [T-queue-shelved] 终局错误：排队消息转搁置态（不再
                         // 自动 drain 重发——用户实测抱怨新轮次完成后旧消息被
                         // 自动塞给智能体）。气泡保留：撤回 / 长按重新排队。
-                        if (_promptQueue.value.isNotEmpty()) {
-                            _promptQueue.value = _promptQueue.value.map { it.copy(shelved = true) }
-                            shelvedPrompts = true
-                        }
+                        // 内存+磁盘镜像同步（见 shelveAllQueuedPrompts）。
+                        shelveAllQueuedPrompts()
                     }
                 } finally {
                     AppLogger.info(ChatViewModel.TAG_STREAM, "send streamJob FINALLY enter")
@@ -391,11 +389,8 @@ internal fun ChatViewModel.sendMessage(
             } catch (e: com.openminis.app.service.SlotQueueTimeout) {
                 if (!run.isStopped) {
                     setInlineError(e.message ?: "会话排队超时，名额已释放")
-                    // [T-queue-shelved] 同上：排队消息转搁置态。
-                    if (_promptQueue.value.isNotEmpty()) {
-                        _promptQueue.value = _promptQueue.value.map { it.copy(shelved = true) }
-                        shelvedPrompts = true
-                    }
+                    // [T-queue-shelved] 同上：排队消息转搁置态（含磁盘镜像）。
+                    shelveAllQueuedPrompts()
                 }
             } catch (e: CancellationException) {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "send streamJob CANCELLED waiting for slot")

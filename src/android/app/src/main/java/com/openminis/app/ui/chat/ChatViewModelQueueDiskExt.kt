@@ -41,6 +41,31 @@ internal fun ChatViewModel.cancelQueuedPromptOnDisk(promptId: String) {
 }
 
 /**
+ * [T-queue-shelved] 批量搁置：打断 / 终局错误 / 排队超时后，滞留的排队
+ * 消息转**搁置**态——不自动注入 / drain（用户实测抱怨旧消息被自动重发）。
+ *
+ * 内存翻转 + 磁盘镜像在此收口（此前三个出口各自只翻内存、镜像从不更新：
+ * 重启后 restore 读回 shelved=false，旧消息复活成 pending，下次 run 照样
+ * 自动 drain 重发——「restart 不自动重发」的声称从未成立）。sid 在入口快照
+ * （[T-queue-mirror-session-binding]）；镜像走 tracked launch 保持
+ * fire-and-forget（错误出口不阻塞 UI），block 内的 mirrorShelved 自带
+ * awaitPendingWrites，靠祖先链排除不自 join。
+ */
+internal fun ChatViewModel.shelveAllQueuedPrompts() {
+    val toShelve = _promptQueue.value.filter { !it.shelved }
+    if (toShelve.isEmpty()) return
+    _promptQueue.value = _promptQueue.value.map { it.copy(shelved = true) }
+    val sid = activeSessionId
+    val appContext = context.applicationContext
+    PromptQueueBridge.launchMirrorWrite(appContext.filesDir, viewModelScope) {
+        for (prompt in toShelve) {
+            PromptQueueBridge.mirrorShelved(appContext, sid, prompt.id, shelved = true)
+        }
+    }
+    Log.i(ChatViewModel.TAG, "📨[QueueShelved] shelved ${toShelve.size} queued prompt(s) (interrupt/error)")
+}
+
+/**
  * 内存队列 + 磁盘镜像同步遗忘一条排队提示词。**不动占位气泡**——调用方对
  * 消息列表各有各的处置（重写 / 截断 / 整体清空），这里只保证「队列事实源
  * 与它的重启保险不会分叉」。

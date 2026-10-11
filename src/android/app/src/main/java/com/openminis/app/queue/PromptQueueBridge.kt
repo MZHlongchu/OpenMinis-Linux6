@@ -13,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -100,10 +101,34 @@ object PromptQueueBridge {
      * confirm / cancel / dropSession 的内部版在动文件前先走这一步；公开出来
      * 供会话切换交接（ChatViewModelQueueDiskExt.onActiveSessionChanged）在
      * cancel+enqueue 对账前先排干在途写，防同 id 双写。
+     *
+     * [T-queue-mirror-self-join] 跳过调用者自己的 Job：launchMirrorWrite 的
+     * block 内（cancelQueuedPromptOnDisk → cancel）调用本函数时，台账里的
+     * 「自己」尚未完成——join 它 = 等自己 = 永久挂起，且台账永久残留会连环
+     * 挂死之后所有 confirm/cancel/drop（agent loop 卡死，重启才自愈）。
+     * 自己 block 内的操作顺序由代码顺序保证，无需等自己；其他在途写仍
+     * 必须先落盘（晚到的写不复活已删记录的保证不变）。
      */
     suspend fun awaitPendingWrites(filesDir: File) {
         val ledger = pendingWrites[filesDir.absolutePath] ?: return
-        for (job in ledger.toList()) job.join()
+        // [T-queue-mirror-self-join] 排除调用者自己的 Job（含祖先链）：调用点
+        // 深处往往隔着 withContext(Dispatchers.IO)，coroutineContext[Job] 拿到
+        // 的是子 Job 而台账里存的是 launch 的外层 Job，直接 === 永远不中——
+        // 必须沿 parent 链上溯把整条链都排除。join 自己（或祖先）= 等自己
+        // 完成 = 永久挂起，且台账永久残留会连环挂死之后所有 confirm/cancel
+        // /drop（agent loop 卡死，重启才自愈）。自己 block 内的操作顺序由
+        // 代码顺序保证，无需等自己；其他在途写仍必须先落盘（晚到的写不
+        // 复活已删记录的保证不变）。
+        val excluded = HashSet<Job>()
+        var cur: Job? = coroutineContext[Job]
+        while (cur != null) {
+            excluded.add(cur)
+            cur = cur.parent
+        }
+        for (job in ledger.toList()) {
+            if (job in excluded) continue
+            job.join()
+        }
     }
 
     // ─── 落盘 DTO ───────────────────────────────────────────────────────
@@ -183,24 +208,9 @@ object PromptQueueBridge {
      * [T-queue-shelved] 翻转单条的搁置态（cancel + 重写）。
      * shelved=true：打断/异常后不自动重发；false：用户点"重新排队"恢复。
      */
-    suspend fun mirrorShelved(context: Context, sessionId: String, promptId: String, shelved: Boolean) {
-        withContext(Dispatchers.IO) {
-            awaitPendingWrites(context.filesDir)
-            runCatching {
-                val mgr = manager(context.filesDir)
-                val entry = mgr.list(sessionId, PromptQueue.FOLLOW_UP).firstOrNull { it.id == promptId }
-                    ?: return@runCatching
-                mgr.cancelById(promptId)
-                val payload = entry.payload.copy(shelved = shelved)
-                mgr.enqueue(
-                    sessionId = sessionId,
-                    queue = PromptQueue.FOLLOW_UP,
-                    payload = payload,
-                    itemId = promptId,
-                )
-            }
-        }
-    }
+    suspend fun mirrorShelved(context: Context, sessionId: String, promptId: String, shelved: Boolean) =
+        mirrorShelved(context.filesDir, sessionId, promptId, shelved)
+
     /** 消费确认：内存队列已注入为真实用户消息（appendMessage 成功后调用）。 */
     suspend fun confirm(context: Context, sessionId: String, promptIds: List<String>) {
         if (promptIds.isEmpty()) return
@@ -269,6 +279,28 @@ object PromptQueueBridge {
         withContext(Dispatchers.IO) {
             awaitPendingWrites(filesDir) // [T-queue-mirror-write-race]
             runCatching { manager(filesDir).cancelById(promptId) }
+        }
+    }
+
+    /**
+     * [T-queue-shelved] 纯 JVM 面：翻转单条搁置态（cancel + 重写，payload
+     * 其余字段原样保留）。Context 面委托到这里；测试直接走本面。
+     */
+    suspend fun mirrorShelved(filesDir: File, sessionId: String, promptId: String, shelved: Boolean) {
+        withContext(Dispatchers.IO) {
+            awaitPendingWrites(filesDir) // [T-queue-mirror-write-race]
+            runCatching {
+                val mgr = manager(filesDir)
+                val entry = mgr.list(sessionId, PromptQueue.FOLLOW_UP).firstOrNull { it.id == promptId }
+                    ?: return@runCatching
+                mgr.cancelById(promptId)
+                mgr.enqueue(
+                    sessionId = sessionId,
+                    queue = PromptQueue.FOLLOW_UP,
+                    payload = entry.payload.copy(shelved = shelved),
+                    itemId = promptId,
+                )
+            }
         }
     }
 

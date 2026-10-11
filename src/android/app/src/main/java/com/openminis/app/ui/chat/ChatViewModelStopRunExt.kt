@@ -151,10 +151,8 @@ internal suspend fun ChatViewModel.finishStoppedRun(
         // [T-queue-shelved] 用户主动打断：滞留的排队消息转为**搁置**态——
         // 不再自动 drain 重发（旧行为会把用户打断前的旧消息在新轮次完成后
         // 塞给智能体，实测抱怨）。气泡保留：撤回 / 长按重新排队可操作。
-        if (_promptQueue.value.isNotEmpty()) {
-            _promptQueue.value = _promptQueue.value.map { it.copy(shelved = true) }
-            shelvedPrompts = true
-        }
+        // 内存+磁盘镜像同步（见 shelveAllQueuedPrompts）。
+        shelveAllQueuedPrompts()
     }
 }
 

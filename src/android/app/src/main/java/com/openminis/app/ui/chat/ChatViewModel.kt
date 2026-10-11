@@ -1687,14 +1687,6 @@ class ChatViewModel(
     val promptQueue: StateFlow<List<QueuedPrompt>> = _promptQueue.asStateFlow()
 
     /**
-     * [T-queue-shelved] 打断/异常后滞留的排队消息进入搁置态：不自动注入/drain，
-     * 用户提供的新轮次完成后也不会自动重发。重新排队（长按菜单）或撤回。
-     * 队列全空时复位 false。
-     */
-    @Volatile
-    internal var shelvedPrompts = false
-
-    /**
      * Input-token count reported by the most recent API call, used by
      * [ContextPolicy] as the "estimated tokens" gate before sending. Zero
      * means either we've never called the model or the provider didn't return
@@ -4723,11 +4715,18 @@ class ChatViewModel(
         _promptQueue.value = _promptQueue.value.map {
             if (it.id == promptId) it.copy(shelved = false) else it
         }
-        if (_promptQueue.value.none { it.shelved }) shelvedPrompts = false
-        viewModelScope.launch {
+        // [T-queue-mirror-session-binding] sid 在协程外快照：dispatch 时刻的
+        // activeSessionId 可能已是切换后的会话，镜像会翻错会话的记录（
+        // 静默 no-op，内存与磁盘分叉）。镜像走 tracked launch——翻回 pending
+        // 后可能被消费，confirm 的 await 要能等到这次写。
+        val sid = activeSessionId
+        val appContext = context.applicationContext
+        com.openminis.app.queue.PromptQueueBridge.launchMirrorWrite(
+            appContext.filesDir, viewModelScope,
+        ) {
             runCatching {
                 com.openminis.app.queue.PromptQueueBridge.mirrorShelved(
-                    context.applicationContext, activeSessionId, promptId, shelved = false,
+                    appContext, sid, promptId, shelved = false,
                 )
             }
         }
