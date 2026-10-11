@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import com.openminis.app.R
 import com.openminis.app.tools.AgentPlanStore
 import com.openminis.app.ui.theme.ChatColors
+import com.openminis.app.ui.theme.monetIconTint
 
 /**
  * [T-plan-board-sticky] 会话级任务列表看板（taixu StickyPlanBar 形态）：数据来自
@@ -53,12 +54,14 @@ import com.openminis.app.ui.theme.ChatColors
  * 完整列表；展开吃的是列表空间（列表收缩），不遮挡聊天记录；浮动工具条与
  * 工具预览缩略图 overlay 在上方消息区 Box 内，与看板互不重叠。
  *
- * [T-plan-board-style] 视觉语言与过程卡片（ChatProcessRunCardUI）同源：四角统一
- * 12dp 圆角的独立卡片（旧版只圆上两角、下缘切平贴输入框，像被裁掉一截）；底色/
- * 边框走 ChatColors.isDark 双值（深色实底 1C1C1E/38383A，浅色蓝 tint 6%/15%），
- * 状态色全用 iOS 系统色（深浅同值）——不再走 M3 colorScheme，那套不跟随 app 内
- * 调色板，是旧版与整体风格脱节的根因。展开/收起操作点从表头右侧 12dp 小箭头
- * 移到卡片底部整宽 40dp 触控条（[T-plan-board-toggle]），拇指区可及。
+ * [T-plan-board-style] 看板是常驻控制面（chrome）不是内容卡：与蓝 tint 过程卡
+ * （ChatProcessRunCardUI）刻意拉开层级——卡底/边框走 ChatPalette 中性面
+ * secondaryBg/separator（浅 F2F2F7、深 26262A，动态取色时跟壁纸
+ * surfaceContainerLow/outlineVariant），读作设置分组式面板而非又一张过程卡；
+ * 状态色只落在状态点/进度条/计数上。accent 经 monetIconTint：动态取色时跟
+ * 壁纸 primary（此时 ChatPalette 本身也是壁纸派生，两者同源），静态保持 iOS
+ * 蓝；绿/红/灰是语义色不跟壁纸。四角 12dp 圆角不变；展开/收起操作点在
+ * 头部行（[T-plan-board-toggle]），整宽 32dp 触达。
  *
  * 数据刷新：isStreaming 翻转驱动 + 每 2s 轮询（流式期间工具频繁更新）。
  * 传入真实 context：list() 命中内存缓存无 IO，冷启动从会话文件恢复——
@@ -101,13 +104,15 @@ fun SessionPlanBoardCard(
             plans = emptyList()
         }
     }
-    // iOS 系统色深浅同值；卡底/边框按 isDark 双值，与过程卡片逐字同源。
-    val accent = Color(0xFF007AFF)
+    // 卡底/边框走中性 chrome 面（见 [T-plan-board-style]）：浅 F2F2F7、深
+    // 26262A、动态取色 surfaceContainerLow/outlineVariant，跟 app 调色板与
+    // 壁纸；accent 过 monetIconTint（动态=壁纸 primary，静态=iOS 蓝）。
+    val accent = monetIconTint(Color(0xFF007AFF))
     val doneGreen = Color(0xFF34C759)
     val failRed = Color(0xFFFF3B30)
     val idleGray = Color(0xFF8E8E93)
-    val cardFill = if (ChatColors.isDark) Color(0xFF1C1C1E) else Color(0xFF007AFF).copy(alpha = 0.06f)
-    val cardStroke = if (ChatColors.isDark) Color(0xFF38383A) else Color(0xFF007AFF).copy(alpha = 0.15f)
+    val cardFill = ChatColors.secondaryBg
+    val cardStroke = ChatColors.separator
     Surface(
         modifier = modifier.fillMaxWidth(),
         color = cardFill,
