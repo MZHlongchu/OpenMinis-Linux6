@@ -121,7 +121,13 @@ fun SessionPlanBoardCard(
                     .padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
+                // [T-plan-board-toggle] 头部行即展开/收起操作点（整宽 32dp 触达），
+                // 行尾箭头示意方向；旧版底部 32dp 整宽按钮条占折叠卡近半高度，已删。
                 Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 32.dp)
+                        .clickable { expanded = !expanded },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
@@ -157,6 +163,14 @@ fun SessionPlanBoardCard(
                         else "$completed/${plans.size}",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (failed > 0) failRed else accent,
+                    )
+                    Icon(
+                        // 列表向上展开：收起态箭头朝上（展开方向），展开态朝下（收回）。
+                        if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp,
+                        contentDescription = if (expanded) stringResource(R.string.plan_board_collapse)
+                        else stringResource(R.string.plan_board_expand),
+                        tint = idleGray,
+                        modifier = Modifier.size(16.dp),
                     )
                 }
                 // 细进度条（收起/展开都显示）。
@@ -218,36 +232,6 @@ fun SessionPlanBoardCard(
                         }
                     }
                 }
-            }
-            // [T-plan-board-toggle] 展开/收起操作点：整宽触控条沉到卡片底部。
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(1.dp)
-                    .background(cardStroke),
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(32.dp)
-                    .clickable { expanded = !expanded },
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center,
-            ) {
-                Icon(
-                    // 列表向上展开：收起态箭头朝上（展开方向），展开态朝下（收回）。
-                    if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp,
-                    contentDescription = null,
-                    tint = idleGray,
-                    modifier = Modifier.size(16.dp),
-                )
-                Text(
-                    if (expanded) stringResource(R.string.plan_board_collapse)
-                    else stringResource(R.string.plan_board_expand),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = idleGray,
-                    modifier = Modifier.padding(start = 4.dp),
-                )
             }
         }
     }
