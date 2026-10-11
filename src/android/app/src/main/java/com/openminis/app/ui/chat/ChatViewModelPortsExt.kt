@@ -72,6 +72,16 @@ fun ChatViewModel.uiEventSink(
             content = uiMessage,
             durationMs = elapsed,
         )
+        // [T-queue-abort-tool] 被 interrupted 的工具也可能正占着 overlay 的
+        // "Running: xxx" pill（abort 后工具以失败结算、pre-dispatch skip 的
+        // 调用从不进入 onToolCallFinished）——仅当当前在飞工具就是这一个时
+        // 清除，避免误清同批仍在跑的其他工具。
+        val run = com.openminis.app.service.ActiveRunContext.current()
+        if (run?.currentToolCallId == toolCallId) {
+            com.openminis.app.service.SessionActivityTracker.clearToolRunning(
+                com.openminis.app.service.ToolOutcome.Cancelled,
+            )
+        }
         withContext(Dispatchers.Main) {
             updateAssistantMessage(assistantId, currentText, true, toolBlocks)
         }

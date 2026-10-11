@@ -50,6 +50,11 @@ object ExecutionCoordinator {
     /** Thread-safe per-session mutex registry. */
     private val mutexes = ConcurrentHashMap<String, Mutex>()
 
+    // [T-shell-perf] recordLastCommand 的后台写 scope（脱离会话互斥锁）。
+    private val recordScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+    )
+
     /**
      * Per-session snapshot of the env-var keys injected on the previous
      * `applyEnvironment` call. Used to issue `unset` for keys the user has
@@ -252,12 +257,16 @@ object ExecutionCoordinator {
         if (sessionId.startsWith("__") || sessionId == "self-build") return
         if (!SandboxNotifyActions.shouldRecordLastCommand(command)) return
         val host = PRootKernel.resolveHostPath(SandboxNotifyActions.LAST_CMD_GUEST_PATH) ?: return
-        try {
-            host.parentFile?.mkdirs()
-            host.writeText("#!/bin/sh\n# recorded by ExecutionCoordinator\n$command\n")
-            host.setExecutable(true, false)
-        } catch (t: Throwable) {
-            Log.w(TAG, "recordLastCommand failed: ${t.message}")
+        // [T-shell-perf] 每条命令的宿主文件写（mkdirs + writeText + setExecutable）
+        // 原本同步跑在会话互斥锁内——移到后台 scope，命令延迟不再包含这次 IO。
+        recordScope.launch {
+            try {
+                host.parentFile?.mkdirs()
+                host.writeText("#!/bin/sh\n# recorded by ExecutionCoordinator\n$command\n")
+                host.setExecutable(true, false)
+            } catch (t: Throwable) {
+                Log.w(TAG, "recordLastCommand failed: ${t.message}")
+            }
         }
     }
 

@@ -107,11 +107,36 @@ fun TranslationSettingsScreen(
             }
         } else {
             SettingsSection(header = stringResource(R.string.translate_stream_section)) {
-                Text(
-                    stringResource(R.string.translate_stream_slim_notice),
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                // [T-slim-stream-toggle] slim 上也要能关实时翻译偏好：full 上
+                // 开启后装 slim，引擎不可用但偏好仍在——切回 full 会带着开启
+                // 状态。这里提供同一个开关（读写 stream_enabled），文案说明
+                // slim 下实际不生效，偏好随开关保留。
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            streamEnabled = !streamEnabled
+                            TranslationPrefs.setStreamEnabled(context, streamEnabled)
+                        }
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(stringResource(R.string.translate_stream_enabled), style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            stringResource(R.string.translate_stream_slim_notice),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = streamEnabled,
+                        onCheckedChange = {
+                            streamEnabled = it
+                            TranslationPrefs.setStreamEnabled(context, it)
+                        },
+                    )
+                }
             }
         }
         SettingsSection(header = stringResource(R.string.translate_pick_model)) {

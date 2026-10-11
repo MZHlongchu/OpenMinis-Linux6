@@ -405,6 +405,13 @@ internal fun ChatViewModel.sendMessage(
             } else {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "send _isStreaming SKIPPED (stale job)")
             }
+            // [T-stream-end-running-state] 流结束兜底：任何出口（错误/取消/轮限）
+            // 没走到 happy-path 终态刷新时，_streamingById 的残留 entry 会让
+            // mergeStreamingOverlay 把该气泡的 isStreaming 锁在 true——过程卡
+            // 转圈、"运行中" pill 不消失，直到下次发送才被入口 sweep 清掉。
+            // flushAllStreamingDeltas 把残留 delta 物化为 canonical
+            // isStreaming=false（ awaiting 默认 false），运行状态立即复位。
+            flushAllStreamingDeltas()
             AppLogger.info(ChatViewModel.TAG_STREAM, "send streamJob EXIT")
         }
         } finally {

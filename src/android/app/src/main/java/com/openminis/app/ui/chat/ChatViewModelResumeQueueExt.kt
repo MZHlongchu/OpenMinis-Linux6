@@ -130,6 +130,8 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
             } else {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel _isStreaming SKIPPED (stale job)")
             }
+            // [T-stream-end-running-state] drain 出口同样兜底残留 side-channel。
+            flushAllStreamingDeltas()
             AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob EXIT")
         }
     }
