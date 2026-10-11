@@ -22,6 +22,11 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     if (_promptQueue.value.isEmpty()) return null
     val queued = _promptQueue.value
 
+    // [T-truncation-digest-clear] 打断 + 注入 = 上下文重置点：digest 摘录是
+    // 有界窗口此前裁掉行的痕迹（可能含已被用户删除/放弃的轮次），不清空
+    // 会随本轮请求继续注入——模型接到的仍是旧上下文（用户实测）。
+    clearHistoryDigestState()
+
     // [T-android-queued-message-duplicated-on-inject] REMOVE the queued
     // placeholder bubbles (the ones enqueuePrompt added with
     // id="queued_msg_…") for the prompts we're injecting. Step (c) below

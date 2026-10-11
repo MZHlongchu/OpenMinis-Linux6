@@ -65,6 +65,10 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
 internal suspend fun ChatViewModel.materializeQueuedPromptsAsUserTurn(): Boolean {
     if (_promptQueue.value.isEmpty()) return false
     val queued = _promptQueue.value
+
+    // [T-truncation-digest-clear] drain 也是上下文重置点（打断后恢复/轮末
+    // 消费）：digest 摘录里可能含已被用户删除/放弃的轮次，注入即串上下文。
+    clearHistoryDigestState()
     Log.i(ChatViewModel.TAG, "📨[DRAIN] Draining ${queued.size} queued prompt(s): " +
         queued.joinToString(", ") { "${it.id}=\"${it.text.take(20)}...\"" })
 

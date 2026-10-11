@@ -1707,38 +1707,71 @@ internal suspend fun ChatViewModel.runAgentLoop(
         val resultParts = mutableListOf<AgentContentPart>()
         val parallelSubResults = mutableMapOf<String, ToolExecutionResult>()
         var didFanOutSubAgents = false
-        for ((id, name, args) in toolCalls) {
-            currentCoroutineContext().ensureActive()
-            // [T-queue-pre-dispatch-inject] 注入点前移：队列非空时本回合的工具
-            // 一律不执行——合成 interrupted 结果保持 tool_use/tool_result 配对，
-            // 随后的 post-result 边界把排队消息注入为独立新轮。旧注入点在工具
-            // 结果之后，10 分钟的构建/安装命令会把排队延迟吞掉同样的时长。
-            // 不计入循环检测器：用户中断不是模型行为（与 replay 拒绝同口径）。
-            if (_promptQueue.value.isNotEmpty()) {
-                val interruptedMsg = "[interrupted] Not executed — the user sent a new message while this call was pending. Handle the user's message first; re-issue this call afterwards if it is still needed."
-                AppLogger.info(
-                    ChatViewModel.TAG_STREAM,
-                    "📨[QueueInterrupt] turn=$turn pre-dispatch skip tool=$name id=$id (queue non-empty)",
+        // [T-queue-pre-dispatch-inject] 注入点前移（回合级，非 per-call）：本回合
+        // 的任何工具执行前，队列非空即先尝试注入排队消息为独立新轮——成功则
+        // 整批工具合成 interrupted 结果（配对平衡），随后的 post-result 边界
+        // continue 进新轮，排队消息在本轮 API 调用就到达模型（10 分钟的构建
+        // 命令不再吞掉排队延迟）。注入失败（异常/空内容）不堆 [interrupted]：
+        // 队列保留，本回合照常执行工具，回合末尾边界与 loop 末尾 drain 会重试。
+        if (_promptQueue.value.isNotEmpty()) {
+            AppLogger.info(
+                ChatViewModel.TAG_STREAM,
+                "📨[QueueInterrupt] turn=$turn pre-dispatch: ${_promptQueue.value.size} queued prompt(s) — interrupting before tool execution",
+            )
+            val handled = try {
+                injectQueuedPromptsAsNewTurn(
+                    finishedAssistantId = assistantId,
+                    finishedAccumulatedText = accumulatedText,
+                    finishedAllToolBlocks = allToolBlocks,
                 )
-                val blockIdx = allToolBlocks.indexOfFirst { it.id == id }
-                if (blockIdx >= 0) {
-                    val elapsed = System.currentTimeMillis() - allToolBlocks[blockIdx].startTimeMs
-                    allToolBlocks[blockIdx] = allToolBlocks[blockIdx].copy(
-                        toolStatus = ToolBlockStatus.FAILED,
+            } catch (e: Exception) {
+                Log.e(ChatViewModel.TAG, "pre-dispatch injectQueuedPromptsAsNewTurn failed", e)
+                null
+            }
+            if (handled != null) {
+                for ((id, name, _) in toolCalls) {
+                    val interruptedMsg = "[interrupted] Not executed — the user sent a new message while this call was pending. Handle the user's message first; re-issue this call afterwards if it is still needed."
+                    val blockIdx = allToolBlocks.indexOfFirst { it.id == id }
+                    if (blockIdx >= 0) {
+                        val elapsed = System.currentTimeMillis() - allToolBlocks[blockIdx].startTimeMs
+                        allToolBlocks[blockIdx] = allToolBlocks[blockIdx].copy(
+                            toolStatus = ToolBlockStatus.FAILED,
+                            content = interruptedMsg,
+                            durationMs = elapsed,
+                        )
+                    }
+                    uiEventSink(allToolBlocks, assistantId, accumulatedText)
+                        .onToolCallRejected(id, "Interrupted by a new user message")
+                    resultParts.add(AgentContentPart.ToolResult(
+                        id = id, name = name,
                         content = interruptedMsg,
-                        durationMs = elapsed,
-                    )
+                        isError = true,
+                    ))
+                    toolInputChunkRings.remove(id)
                 }
-                uiEventSink(allToolBlocks, assistantId, accumulatedText)
-                    .onToolCallRejected(id, "Interrupted by a new user message")
-                resultParts.add(AgentContentPart.ToolResult(
-                    id = id, name = name,
-                    content = interruptedMsg,
-                    isError = true,
-                ))
-                toolInputChunkRings.remove(id)
+                // [T-queue-pre-dispatch-inject] 结果落库 + continue：排队消息
+                // 已经在本轮请求之前的 agentHistory 里（inject 追加），这里把
+                // interrupted 配对补上并立即进入新轮（跳过 post-result 边界的
+                // 重复注入——队列已被清空，边界检查自然跳过）。
+                val toolResultDbId = persistToolResultMessageForRun(
+                    checkNotNull(activeRun) { "Agent loop has no persistence owner" },
+                    resultParts,
+                    uiMessageId = assistantId,
+                )
+                conversationPort().append(ToolRoundOutcome.toolResultMessage(resultParts, toolResultDbId))
+                assistantId = handled.newAssistantId
+                accumulatedText = ""
+                allToolBlocks.clear()
+                allToolInputs.clear()
+                toolInputChunkRings.clear()
+                _canResume.value = false
                 continue
             }
+            // 注入失败：队列保留，本回合工具照常执行（不堆 [interrupted]），
+            // 回合末尾边界与 loop 末尾 drain 会重试注入。
+        }
+        for ((id, name, args) in toolCalls) {
+            currentCoroutineContext().ensureActive()
             // [T-android-overlay-tool-title] Pull tool_title uniformly
             // from args for ALL tools — without this browser_use's
             // tool_title never reached the overlay (only shell_execute
