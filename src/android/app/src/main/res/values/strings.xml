@@ -987,6 +987,11 @@
     <string name="appearance_chat_user_bubble_color">User Bubble Color</string>
     <string name="appearance_chat_bg_color">Chat Background Color</string>
     <string name="appearance_color_follow_theme">Follow Theme</string>
+    <string name="appearance_plan_board_color">Task Board Background Color</string>
+    <string name="appearance_color_mode_light">Light</string>
+    <string name="appearance_color_mode_dark">Dark</string>
+    <string name="appearance_color_hex_hint">HEX or RGB (#RRGGBB or R,G,B)</string>
+    <string name="appearance_color_apply">Apply</string>
     <string name="appearance_section_language">Language</string>
     <string name="appearance_language_footer">Override the display language for this app. \"System\" follows your device language.</string>
     <!-- T-android-dynamic-app-icon: launcher-icon picker section. -->

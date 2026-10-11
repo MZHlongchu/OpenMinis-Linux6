@@ -148,7 +148,7 @@
         "app/src/main/java/com/openminis/app/ui/sessions/SessionListScreen.kt": 3277,
         "app/src/main/java/com/openminis/app/ui/sessions/SessionListViewModel.kt": 1202,
         "app/src/main/java/com/openminis/app/ui/settings/AddProviderScreen.kt": 940,
-        "app/src/main/java/com/openminis/app/ui/settings/AppearanceScreen.kt": 971,
+        "app/src/main/java/com/openminis/app/ui/settings/AppearanceScreen.kt": 973,
         "app/src/main/java/com/openminis/app/ui/settings/BackgroundSettingsScreen.kt": 487,
         "app/src/main/java/com/openminis/app/ui/settings/CheckUpdateSection.kt": 813,
         "app/src/main/java/com/openminis/app/ui/settings/EnvironmentVariablesScreen.kt": 529,

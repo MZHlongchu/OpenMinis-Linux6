@@ -24,7 +24,9 @@ import com.openminis.app.ui.settings.userBubbleColorOverride
 import com.openminis.app.ui.settings.chatBgColorOverride
 import com.openminis.app.ui.settings.KEY_CHAT_USER_BUBBLE_COLOR
 import com.openminis.app.ui.settings.KEY_CHAT_BG_COLOR
+import com.openminis.app.ui.settings.KEY_CHAT_PLAN_BOARD_COLOR_LIGHT
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
@@ -252,17 +254,25 @@ fun MinisTheme(
     var chatColorRevision by remember { mutableIntStateOf(0) }
     DisposableEffect(appearancePrefs) {
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { sp, key ->
-            if (key == KEY_CHAT_USER_BUBBLE_COLOR || key == KEY_CHAT_BG_COLOR) {
+            // [T-color-rgb-mode-split] 模式分离槽（.light/.dark）+ 看板背景键
+            // 也触发重读；旧单一键保持兼容。
+            if (key != null && (
+                key.startsWith(KEY_CHAT_USER_BUBBLE_COLOR) ||
+                    key.startsWith(KEY_CHAT_BG_COLOR) ||
+                    key.startsWith(KEY_CHAT_PLAN_BOARD_COLOR_LIGHT.substringBefore(".light"))
+                )
+            ) {
                 chatColorRevision++
             }
         }
         appearancePrefs.registerOnSharedPreferenceChangeListener(listener)
         onDispose { appearancePrefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
-    val effectiveChatPalette = remember(chatPalette, chatColorRevision) {
+    val isDarkNow = colorScheme.background.luminance() < 0.5f
+    val effectiveChatPalette = remember(chatPalette, chatColorRevision, isDarkNow) {
         chatPalette.copy(
-            userBubble = userBubbleColorOverride(context) ?: chatPalette.userBubble,
-            background = chatBgColorOverride(context) ?: chatPalette.background,
+            userBubble = userBubbleColorOverride(context, isDarkNow) ?: chatPalette.userBubble,
+            background = chatBgColorOverride(context, isDarkNow) ?: chatPalette.background,
         )
     }
 

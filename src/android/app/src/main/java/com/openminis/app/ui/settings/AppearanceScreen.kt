@@ -167,6 +167,14 @@ const val KEY_CHAT_GUTTER_DP = "chat.gutterDp"
 const val DEFAULT_CHAT_GUTTER_DP = 20
 const val KEY_CHAT_USER_BUBBLE_COLOR = "chat.userBubbleColor"
 const val KEY_CHAT_BG_COLOR = "chat.bgColor"
+// [T-color-rgb-mode-split] 浅色/深色分离槽：每模式独立存储；旧单一键保留作
+// 迁移源（模式槽缺失时两模式共用旧值）。任务看板背景色同套自定义。
+const val KEY_CHAT_USER_BUBBLE_COLOR_LIGHT = "chat.userBubbleColor.light"
+const val KEY_CHAT_USER_BUBBLE_COLOR_DARK = "chat.userBubbleColor.dark"
+const val KEY_CHAT_BG_COLOR_LIGHT = "chat.bgColor.light"
+const val KEY_CHAT_BG_COLOR_DARK = "chat.bgColor.dark"
+const val KEY_CHAT_PLAN_BOARD_COLOR_LIGHT = "chat.planBoardColor.light"
+const val KEY_CHAT_PLAN_BOARD_COLOR_DARK = "chat.planBoardColor.dark"
 const val NO_COLOR_OVERRIDE = -1L
 
 /** True when Enter (without Shift) should send the message. iOS calls this
@@ -181,17 +189,18 @@ fun chatGutterDp(context: Context): Int =
     getAppearancePrefs(context).getInt(KEY_CHAT_GUTTER_DP, DEFAULT_CHAT_GUTTER_DP)
         .coerceIn(8, 32)
 
-/** User-bubble color override, or null to follow the theme palette. */
-fun userBubbleColorOverride(context: Context): Color? {
-    val v = getAppearancePrefs(context).getLong(KEY_CHAT_USER_BUBBLE_COLOR, NO_COLOR_OVERRIDE)
-    return if (v == NO_COLOR_OVERRIDE) null else Color(v.toLong() and 0xFFFFFFFFL)
-}
+/** [T-color-rgb-mode-split] User-bubble color override for the ACTIVE mode, or
+ *  null to follow the theme palette. Mode slot -> legacy single key -> null. */
+fun userBubbleColorOverride(context: Context, isDark: Boolean): Color? =
+    colorOverride(context, ColorSlot.USER_BUBBLE, isDark).takeOrNullIfNoOverride()
 
-/** Chat background color override, or null to follow the theme palette. */
-fun chatBgColorOverride(context: Context): Color? {
-    val v = getAppearancePrefs(context).getLong(KEY_CHAT_BG_COLOR, NO_COLOR_OVERRIDE)
-    return if (v == NO_COLOR_OVERRIDE) null else Color(v.toLong() and 0xFFFFFFFFL)
-}
+/** [T-color-rgb-mode-split] Chat background color override for the ACTIVE mode. */
+fun chatBgColorOverride(context: Context, isDark: Boolean): Color? =
+    colorOverride(context, ColorSlot.CHAT_BG, isDark).takeOrNullIfNoOverride()
+
+/** [T-plan-board-color] 任务看板背景色 override（模式分离）。 */
+fun planBoardColorOverride(context: Context, isDark: Boolean): Color? =
+    colorOverride(context, ColorSlot.PLAN_BOARD, isDark).takeOrNullIfNoOverride()
 
 
 fun keepScreenAwakeEnabled(context: Context): Boolean =

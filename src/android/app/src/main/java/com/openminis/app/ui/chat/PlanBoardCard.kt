@@ -107,11 +107,15 @@ fun SessionPlanBoardCard(
     // 卡底/边框走中性 chrome 面（见 [T-plan-board-style]）：浅 F2F2F7、深
     // 26262A、动态取色 surfaceContainerLow/outlineVariant，跟 app 调色板与
     // 壁纸；accent 过 monetIconTint（动态=壁纸 primary，静态=iOS 蓝）。
+    // [T-plan-board-color] 用户自定义看板背景色（浅/深分离 + HEX/RGB 输入，
+    // 外观设置页对话区）覆盖主题面；null = 跟随主题。
     val accent = monetIconTint(Color(0xFF007AFF))
     val doneGreen = Color(0xFF34C759)
     val failRed = Color(0xFFFF3B30)
     val idleGray = Color(0xFF8E8E93)
-    val cardFill = ChatColors.secondaryBg
+    val isDark = ChatColors.isDark
+    val cardFill = com.openminis.app.ui.settings.planBoardColorOverride(context, isDark)
+        ?: ChatColors.secondaryBg
     val cardStroke = ChatColors.separator
     Surface(
         modifier = modifier.fillMaxWidth(),

@@ -907,6 +907,11 @@
     <string name="appearance_chat_user_bubble_color">用户气泡颜色</string>
     <string name="appearance_chat_bg_color">聊天背景颜色</string>
     <string name="appearance_color_follow_theme">跟随主题</string>
+    <string name="appearance_plan_board_color">任务看板背景颜色</string>
+    <string name="appearance_color_mode_light">浅色模式</string>
+    <string name="appearance_color_mode_dark">深色模式</string>
+    <string name="appearance_color_hex_hint">HEX 或 RGB（#RRGGBB 或 R,G,B）</string>
+    <string name="appearance_color_apply">应用</string>
     <string name="appearance_section_language">语言</string>
     <string name="appearance_language_footer">自定义此 App 的显示语言。选择「系统」将跟随设备语言设置。</string>
     <string name="appearance_section_app_icon">应用图标</string>

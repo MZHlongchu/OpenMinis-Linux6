@@ -12,14 +12,19 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChatBubble
+import androidx.compose.material.icons.outlined.Checklist
 import androidx.compose.material.icons.outlined.CompareArrows
 import androidx.compose.material.icons.outlined.Wallpaper
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,9 +35,11 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.R
@@ -41,21 +48,28 @@ import kotlin.math.roundToInt
 
 /**
  * [T-android-chat-customization] Chat Area section: conversation-column gutter
- * (the shared rail the message list, floating tool bar and composer all sit on)
- * plus user-bubble / chat-background color overrides.
+ * (the shared rail the message list and composer sit on) plus user-bubble /
+ * chat-background / task-board color overrides.
  *
- * Self-contained: state, prefs writes and the swatch dialog all live here, so
- * AppearanceScreen only needs a single call. Color overrides are stored as
- * Long ARGB with NO_COLOR_OVERRIDE = follow theme (the resolved ChatPalette
- * owns the slot again).
+ * [T-color-rgb-mode-split] 每个颜色槽存储为**浅色/深色两个键**（ARGB Long）；
+ * 读取按主题的深浅解析结果选槽，模式槽缺失回退旧单一键，旧键也缺失才跟随
+ * 主题。色板对话框支持 HEX/RGB 输入（#RRGGBB / #AARRGGBB / R,G,B，实时预览）
+ * + 预设网格（按模式切换色板组）+ 跟随主题重置。
+ *
+ * Self-contained: state, prefs writes and the picker dialog all live here, so
+ * AppearanceScreen only needs a single call.
  */
 @Composable
 internal fun ChatAreaSection(prefs: android.content.SharedPreferences) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val isDark = com.openminis.app.ui.theme.ChatColors.isDark
     var chatGutter by remember { mutableIntStateOf(chatGutterDp(context)) }
-    var userBubbleColor by remember { mutableLongStateOf(prefs.getLong(KEY_CHAT_USER_BUBBLE_COLOR, NO_COLOR_OVERRIDE)) }
-    var chatBgColor by remember { mutableLongStateOf(prefs.getLong(KEY_CHAT_BG_COLOR, NO_COLOR_OVERRIDE)) }
-    var colorPickerTarget by remember { mutableStateOf<String?>(null) }
+    var revision by remember { mutableIntStateOf(0) }
+    fun readColor(slot: ColorSlot): Long = colorOverride(context, slot, isDark)
+    var userBubbleColor by remember(revision) { mutableLongStateOf(readColor(ColorSlot.USER_BUBBLE)) }
+    var chatBgColor by remember(revision) { mutableLongStateOf(readColor(ColorSlot.CHAT_BG)) }
+    var planBoardColor by remember(revision) { mutableLongStateOf(readColor(ColorSlot.PLAN_BOARD)) }
+    var colorPickerTarget by remember { mutableStateOf<ColorSlot?>(null) }
 
     val tileTeal = Color(0xFF5AC8FA)
     val tileBlue = Color(0xFF007AFF)
@@ -87,13 +101,10 @@ internal fun ChatAreaSection(prefs: android.content.SharedPreferences) {
             iconColor = tileBlue,
             title = stringResource(R.string.appearance_chat_user_bubble_color),
             subtitle = null,
-            onClick = { colorPickerTarget = KEY_CHAT_USER_BUBBLE_COLOR },
+            onClick = { colorPickerTarget = ColorSlot.USER_BUBBLE },
             showDivider = true,
             trailing = {
-                ColorSwatch(
-                    color = if (userBubbleColor == NO_COLOR_OVERRIDE) null
-                    else Color(userBubbleColor.toLong() and 0xFFFFFFFFL),
-                )
+                ColorSwatch(userBubbleColor.takeOrNullIfNoOverride())
             },
         )
         SettingsRow(
@@ -101,38 +112,116 @@ internal fun ChatAreaSection(prefs: android.content.SharedPreferences) {
             iconColor = tilePurple,
             title = stringResource(R.string.appearance_chat_bg_color),
             subtitle = null,
-            onClick = { colorPickerTarget = KEY_CHAT_BG_COLOR },
+            onClick = { colorPickerTarget = ColorSlot.CHAT_BG },
+            showDivider = true,
+            trailing = {
+                ColorSwatch(chatBgColor.takeOrNullIfNoOverride())
+            },
+        )
+        // [T-plan-board-color] 任务看板背景色：与聊天背景/气泡同一套自定义
+        //（模式分离 + HEX/RGB 输入 + 预设 + 跟随主题）。
+        SettingsRow(
+            icon = Icons.Outlined.Checklist,
+            iconColor = tileTeal,
+            title = stringResource(R.string.appearance_plan_board_color),
+            subtitle = null,
+            onClick = { colorPickerTarget = ColorSlot.PLAN_BOARD },
             showDivider = false,
             trailing = {
-                ColorSwatch(
-                    color = if (chatBgColor == NO_COLOR_OVERRIDE) null
-                    else Color(chatBgColor.toLong() and 0xFFFFFFFFL),
-                )
+                ColorSwatch(planBoardColor.takeOrNullIfNoOverride())
             },
         )
     }
 
     colorPickerTarget?.let { target ->
-        val current = if (target == KEY_CHAT_USER_BUBBLE_COLOR) userBubbleColor else chatBgColor
+        val current = when (target) {
+            ColorSlot.USER_BUBBLE -> userBubbleColor
+            ColorSlot.CHAT_BG -> chatBgColor
+            ColorSlot.PLAN_BOARD -> planBoardColor
+        }
         ChatColorPickerDialog(
             title = stringResource(
-                if (target == KEY_CHAT_USER_BUBBLE_COLOR) R.string.appearance_chat_user_bubble_color
-                else R.string.appearance_chat_bg_color
+                when (target) {
+                    ColorSlot.USER_BUBBLE -> R.string.appearance_chat_user_bubble_color
+                    ColorSlot.CHAT_BG -> R.string.appearance_chat_bg_color
+                    ColorSlot.PLAN_BOARD -> R.string.appearance_plan_board_color
+                }
             ),
+            slot = target,
             current = current,
-            isBubble = target == KEY_CHAT_USER_BUBBLE_COLOR,
             onPick = { value ->
-                if (target == KEY_CHAT_USER_BUBBLE_COLOR) userBubbleColor = value else chatBgColor = value
-                prefs.edit().putLong(target, value).apply()
+                when (target) {
+                    ColorSlot.USER_BUBBLE -> userBubbleColor = value
+                    ColorSlot.CHAT_BG -> chatBgColor = value
+                    ColorSlot.PLAN_BOARD -> planBoardColor = value
+                }
+                storeColorOverride(context, target, isDark, value)
+                revision++
             },
             onFollowTheme = {
-                if (target == KEY_CHAT_USER_BUBBLE_COLOR) userBubbleColor = NO_COLOR_OVERRIDE
-                else chatBgColor = NO_COLOR_OVERRIDE
-                prefs.edit().putLong(target, NO_COLOR_OVERRIDE).apply()
+                when (target) {
+                    ColorSlot.USER_BUBBLE -> userBubbleColor = NO_COLOR_OVERRIDE
+                    ColorSlot.CHAT_BG -> chatBgColor = NO_COLOR_OVERRIDE
+                    ColorSlot.PLAN_BOARD -> planBoardColor = NO_COLOR_OVERRIDE
+                }
+                clearColorOverride(context, target, isDark)
+                revision++
             },
             onDismiss = { colorPickerTarget = null },
         )
     }
+}
+
+/** 每个可自定义的颜色槽。 */
+internal enum class ColorSlot { USER_BUBBLE, CHAT_BG, PLAN_BOARD }
+
+internal fun Long.takeOrNullIfNoOverride(): Color? =
+    if (this == NO_COLOR_OVERRIDE) null else Color(this and 0xFFFFFFFFL)
+
+/** [T-color-rgb-mode-split] 模式分离读取：模式槽 → 旧单一键 → 跟随主题(null)。 */
+internal fun colorOverride(context: android.content.Context, slot: ColorSlot, isDark: Boolean): Long {
+    val prefs = getAppearancePrefs(context)
+    val modeKey = when {
+        slot == ColorSlot.USER_BUBBLE && isDark -> KEY_CHAT_USER_BUBBLE_COLOR_DARK
+        slot == ColorSlot.USER_BUBBLE -> KEY_CHAT_USER_BUBBLE_COLOR_LIGHT
+        slot == ColorSlot.CHAT_BG && isDark -> KEY_CHAT_BG_COLOR_DARK
+        slot == ColorSlot.CHAT_BG -> KEY_CHAT_BG_COLOR_LIGHT
+        slot == ColorSlot.PLAN_BOARD && isDark -> KEY_CHAT_PLAN_BOARD_COLOR_DARK
+        else -> KEY_CHAT_PLAN_BOARD_COLOR_LIGHT
+    }
+    val mode = prefs.getLong(modeKey, NO_COLOR_OVERRIDE)
+    if (mode != NO_COLOR_OVERRIDE) return mode
+    // 旧单一键迁移源：模式槽未设置时两模式共用旧值。
+    val legacy = when (slot) {
+        ColorSlot.USER_BUBBLE -> prefs.getLong(KEY_CHAT_USER_BUBBLE_COLOR, NO_COLOR_OVERRIDE)
+        ColorSlot.CHAT_BG -> prefs.getLong(KEY_CHAT_BG_COLOR, NO_COLOR_OVERRIDE)
+        ColorSlot.PLAN_BOARD -> NO_COLOR_OVERRIDE
+    }
+    return legacy
+}
+
+internal fun storeColorOverride(context: android.content.Context, slot: ColorSlot, isDark: Boolean, value: Long) {
+    val key = when {
+        slot == ColorSlot.USER_BUBBLE && isDark -> KEY_CHAT_USER_BUBBLE_COLOR_DARK
+        slot == ColorSlot.USER_BUBBLE -> KEY_CHAT_USER_BUBBLE_COLOR_LIGHT
+        slot == ColorSlot.CHAT_BG && isDark -> KEY_CHAT_BG_COLOR_DARK
+        slot == ColorSlot.CHAT_BG -> KEY_CHAT_BG_COLOR_LIGHT
+        slot == ColorSlot.PLAN_BOARD && isDark -> KEY_CHAT_PLAN_BOARD_COLOR_DARK
+        else -> KEY_CHAT_PLAN_BOARD_COLOR_LIGHT
+    }
+    getAppearancePrefs(context).edit().putLong(key, value).apply()
+}
+
+internal fun clearColorOverride(context: android.content.Context, slot: ColorSlot, isDark: Boolean) {
+    val key = when {
+        slot == ColorSlot.USER_BUBBLE && isDark -> KEY_CHAT_USER_BUBBLE_COLOR_DARK
+        slot == ColorSlot.USER_BUBBLE -> KEY_CHAT_USER_BUBBLE_COLOR_LIGHT
+        slot == ColorSlot.CHAT_BG && isDark -> KEY_CHAT_BG_COLOR_DARK
+        slot == ColorSlot.CHAT_BG -> KEY_CHAT_BG_COLOR_LIGHT
+        slot == ColorSlot.PLAN_BOARD && isDark -> KEY_CHAT_PLAN_BOARD_COLOR_DARK
+        else -> KEY_CHAT_PLAN_BOARD_COLOR_LIGHT
+    }
+    getAppearancePrefs(context).edit().putLong(key, NO_COLOR_OVERRIDE).apply()
 }
 
 /** [T-android-chat-customization] Gutter slider — mirrors FontScaleSliderRow's
@@ -149,7 +238,7 @@ private fun GutterSliderRow(
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(stringResource(R.string.appearance_chat_gutter_title), style = MaterialTheme.typography.bodyMedium)
             Text(
@@ -197,93 +286,6 @@ private fun ColorSwatch(color: Color?) {
     )
 }
 
-/** Swatch presets. Bubble set leans on the iOS system-color family the chat
- *  palette is built from; background set adds near-white / near-black neutrals
- *  plus pastel tints that keep dark-mode text legible. */
-private val BubbleColorPresets = listOf(
-    0xFF007AFF, 0xFF34C759, 0xFFFF9500, 0xFFFF3B30,
-    0xFF5856D6, 0xFFFF2D55, 0xFF5AC8FA, 0xFFFFD60E,
-    0xFFF2F2F7, 0xFFE5E5EA, 0xFF787880, 0xFF2F3A5C,
-    0xFF2C2C2E, 0xFF1C1C1E, 0xFFA2845E, 0xFF6D6D72,
-)
-private val BgColorPresets = listOf(
-    0xFFFFFFFF, 0xFFF2F2F7, 0xFFE5E5EA, 0xFFD1D1D6,
-    0xFFEAF4FF, 0xFFEAFBF0, 0xFFFFF6E5, 0xFFF5EEFF,
-    0xFF000000, 0xFF1C1C1E, 0xFF2C2C2E, 0xFF26262A,
-    0xFF16213E, 0xFF1E2A25, 0xFF2B1E1E, 0xFF241F2E,
-)
-
-/** Swatch picker dialog: 4x4 preset grid + "follow theme" reset.
- *  current is the stored Long (NO_COLOR_OVERRIDE = follow theme). */
-@Composable
-private fun ChatColorPickerDialog(
-    title: String,
-    current: Long,
-    isBubble: Boolean,
-    onPick: (Long) -> Unit,
-    onFollowTheme: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val presets = if (isBubble) BubbleColorPresets else BgColorPresets
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title, style = MaterialTheme.typography.titleMedium) },
-        text = {
-            Column {
-                presets.chunked(4).forEach { rowColors ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                    ) {
-                        rowColors.forEach { c ->
-                            val selected = current != NO_COLOR_OVERRIDE &&
-                                (current and 0xFFFFFFFFL) == (c.toLong() and 0xFFFFFFFFL)
-                            Box(
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .background(Color(c), CircleShape)
-                                    .border(
-                                        width = if (selected) 3.dp else 1.dp,
-                                        color = if (selected) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.outlineVariant,
-                                        shape = CircleShape,
-                                    )
-                                    .clickable {
-                                        onPick(c.toLong() and 0xFFFFFFFFL)
-                                        onDismiss()
-                                    },
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            onFollowTheme()
-                            onDismiss()
-                        }
-                        .padding(vertical = 10.dp),
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    Text(
-                        stringResource(R.string.appearance_color_follow_theme),
-                        color = MaterialTheme.colorScheme.primary,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            MinisTextButton(onClick = onDismiss) {
-                Text(stringResource(R.string.common_close))
-            }
-        },
-    )
-}
 
 /** [T-android-font-scale] Font-scale slider row (moved verbatim from
  *  AppearanceScreen.kt during the T-android-chat-customization ratchet
@@ -312,7 +314,7 @@ internal fun FontScaleSliderRow(
                 color = MaterialTheme.colorScheme.primary,
             )
         }
-        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Text("A", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Slider(
                 value = sliderPos,
