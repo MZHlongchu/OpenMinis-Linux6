@@ -2308,34 +2308,65 @@ class ChatViewModel(
     /**
      * Cached reference to the lazily-created [BrowserTabPool] so
      * [ensureSession] can re-point it at the real session id after a rename.
-     * Read only through [browserTabPool]; the backing `by lazy` fills this in.
+     * Read only through [browserTabPool]; the backing getter fills this in.
      */
     @Volatile
     internal var _browserTabPoolRef: BrowserTabPool? = null
+
+    /**
+     * [T-w1-pool-ownership] 这份池子是不是**本 VM 自己建的**。
+     *
+     * `adoptBrowserTabPool` 借来的池子归父会话，本 VM 只是使用者：ChatViewModelStore
+     * 淘汰 helper 子会话就是 `ViewModelStore.clear` → [onCleared]，那时若照着
+     * [_browserTabPoolRef] 无条件 dispose，拆掉的是父会话正在用的池子（跨会话池销毁）。
+     * 所以 onCleared / 清空会话只对**自建**的那份负责。
+     */
+    @Volatile
+    private var _ownsBrowserTabPool: Boolean = false
 
     /**
      * [T-u12-merge] 上游 1.14 ChatViewModel.kt:2552：把一个**已存在**的标签池
      * 借给这个 ViewModel（辅助会话不自己建池，直接用父会话那一个——同一个
      * WebView 池，页面与登录态共享）。合并时这个成员整个丢了，而
      * ScheduledAgentRunner / ChatViewModel 里都还在调它。
+     *
+     * [T-w1-pool-ownership] 上游同一处（:2552-2554）只换绑定、不碰归属：借来的池子
+     * 仍由创建者（父会话）负责拆，所以这里同时清掉自建标记，淘汰时就不会有人抢着拆
+     * 父会话的页面。若本 VM 此前已经自建过一份，它从此不可达——那是上游也有的收尾
+     * 缺口，但比「借入方反过来拆掉父会话正在看的池子」安全得多。
      */
-    internal fun adoptBrowserTabPool(pool: BrowserTabPool) { _browserTabPoolRef = pool }
-
-    /** Browser tab pool for browser_use tool. Lazily created on first access. */
-    val browserTabPool: BrowserTabPool by lazy {
-        BrowserTabPool(context).also {
-            it.setSession(activeSessionId)
-            // Surface download start/finish/failure as system-info notices in
-            // this chat. May fire from the pool's IO scope — hop to Main since
-            // appendSystemInfo does a read-modify-write on _messages.
-            it.onDownloadEvent = { text ->
-                viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
-                    appendSystemInfo(text, "info")
-                }
-            }
-            _browserTabPoolRef = it
-        }
+    internal fun adoptBrowserTabPool(pool: BrowserTabPool) {
+        _browserTabPoolRef = pool
+        _ownsBrowserTabPool = false
     }
+
+    /**
+     * Browser tab pool for browser_use tool. Lazily created on first access.
+     *
+     * [T-w1-pool-read] 读取端先看 [_browserTabPoolRef]、没有才自建，对齐上游 1.14
+     * ChatViewModel.kt:2533-2546。原来的 `by lazy` 是「谁先读谁建一份」：helper
+     * 子会话建 VM 时明明已经 `adoptBrowserTabPool(父池)`，第一次读池子仍会另建一套
+     * WebView 并把引用覆盖掉——父子看的不是同一批标签、登录态也不共享，接线在而语义
+     * 不通（复核者点名的「编译级假绿」）。
+     */
+    val browserTabPool: BrowserTabPool
+        get() = _browserTabPoolRef ?: synchronized(this) {
+            _browserTabPoolRef ?: BrowserTabPool(context).also {
+                it.setSession(activeSessionId)
+                // Surface download start/finish/failure as system-info notices in
+                // this chat. May fire from the pool's IO scope — hop to Main since
+                // appendSystemInfo does a read-modify-write on _messages.
+                it.onDownloadEvent = { text ->
+                    viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                        appendSystemInfo(text, "info")
+                    }
+                }
+                // [T-w1-pool-ownership] 先立归属、再发布引用：并发的 onCleared 只要
+                // 看见引用非空，就必须同时看见「这份是自建池、归本 VM 拆」。
+                _ownsBrowserTabPool = true
+                _browserTabPoolRef = it
+            }
+        }
 
     internal val _showBrowserSheet = MutableStateFlow(false)
     val showBrowserSheet: StateFlow<Boolean> = _showBrowserSheet.asStateFlow()
@@ -3597,6 +3628,10 @@ class ChatViewModel(
             val next = chatRepository.dao.latestCompactMarker(sid)
             _cachedLatestMarker = next
             _compactSummary.value = next?.summary
+            // [T-ctx-measure-outbound] The reload below is what re-measures the
+            // restored history; only then can [CtxMeter] report what the revert
+            // actually put back (upstream ChatViewModel.kt:6518-6521).
+            pendingRevertLogMarker = current.id.take(8)
 
             // Rebuild UI from DB so the previous marker's divider re-emerges
             // (or all dividers vanish if there are no remaining markers).
@@ -3852,17 +3887,36 @@ class ChatViewModel(
     // 校正，评分却落到了错的模型上。这里把上游那套「记录本次派发的模型与窗口、
     // 溢出时按它们归因、新会话清空记录」补回来。
 
-    /** System prompt + tool schemas, the part a history-only estimate omits. */
-    private var contextFixedTokens = 0
+    /**
+     * System prompt + tool schemas, the part a history-only estimate omits.
+     * internal：循环每一轮都会按**这一轮**的 prompt / 工具表重播它
+     * （上游 1.14 ChatViewModel.kt:10912），而循环在本移植里是
+     * `ChatViewModelAgentLoopExt.kt` 的扩展函数。
+     */
+    internal var contextFixedTokens = 0
 
     /** Estimate of the request the last dispatch sent; 0 = nothing dispatched. */
     private var lastDispatchEstimate = 0
+
+    /** Ratio in force when that request was dispatched ([CtxMeter] dispatch log). */
+    private var lastDispatchRatio = 1.0
+
+    /** Its calibrated size — what `max_tokens` was sized from (upstream `lastDispatchPredicted`). */
+    private var lastDispatchPredicted = 0
 
     /** The model the last request was SENT TO — not the current selection. */
     private var lastDispatchModel: com.openminis.app.data.model.LLMModel? = null
 
     /** That model's window at dispatch time; 0 when it could not be resolved. */
     private var lastDispatchWindow = 0
+
+    /**
+     * [T-ctx-measure-outbound] (estimate, fixed, model) of the last PAIRED
+     * request — written into the turn's usage row so a reopened session
+     * re-seeds the RATIO rather than a stale raw size (upstream
+     * `ChatViewModel.kt:1389 lastCalibratedPair` / :1470).
+     */
+    private var lastCalibratedPair: Triple<Int, Int, String?>? = null
 
     /**
      * [T-ctx-measure-outbound] 最近一个样本算出的比值（见 [calibrateContextSize] /
@@ -3879,6 +3933,14 @@ class ChatViewModel(
      * 换会话从头开始 —— 否则上一个聊天的比值会被当成这个聊天的证据。
      */
     private var calibrationSessionId: String? = null
+
+    /**
+     * [T-ctx-measure-outbound] Marker id of a revert whose `[CtxMeter] reverted`
+     * line must wait for the reload's measurement — the reload is what makes the
+     * number meaningful (upstream `ChatViewModel.kt:1387`), and the reload runs
+     * from `ChatViewModelLoadExt.kt`, hence internal.
+     */
+    internal var pendingRevertLogMarker: String? = null
 
     /**
      * [T-ctx-valve-rearm] 本次 loop 是否已经「按外推比值判定超窗」放行过一次。上游
@@ -3943,21 +4005,25 @@ class ChatViewModel(
      * [inLoopContextCheck] 两处守卫在本移植里是拆出去的扩展函数，类内 private 不可达。
      */
     internal fun contextMeasurement(override: Double? = null): ContextMeasurement {
-        val history = com.openminis.app.data.ContextSizeMeter.estimateTokens(effectiveAgentHistoryUncounted())
+        val history = ContextSizeMeter.estimateTokens(effectiveAgentHistoryUncounted())
         val model = currentModel?.id
-        val ratio = override ?: contextCalibrationRatio()
-        val source = when {
-            override != null -> "forced"
-            model != null && com.openminis.app.data.TokenUsageCalibration.scale(model) != 1.0 -> "own"
-            lastLearnedCalibration != null -> "borrowed"
-            else -> "default"
-        }
+        // [T-ctx-measure-outbound] 比值与它的来源必须出自**同一处**（上游
+        // `ChatViewModel.kt:1402-1415`：`contextCalibrationRatio(model)` +
+        // `ContextSizeMeter.ratioSource(...)`）。这里此前是把来源另算一遍
+        // （`TokenUsageCalibration.scale(model) != 1.0` → own），而比值的「借来的
+        // 比值 + 余量」那一条只活在 [ContextSizeMeter.ratioFor] 里 —— 换个从没量过的
+        // 模型时比值掉回 1.0，密度更高的 tokenizer 于是按 1.0 的份额被低估、直接撞上
+        // provider 的天花板，而日志还会把它报成 borrowed。
+        val known = com.openminis.app.data.TokenUsageCalibration.snapshot()
+        val ratio = override ?: ContextSizeMeter.ratioFor(model, known, lastLearnedCalibration)
+        val source = if (override != null) "forced"
+            else ContextSizeMeter.ratioSource(model, known, lastLearnedCalibration)
         return ContextMeasurement(
             history = history,
             fixed = contextFixedTokens,
             ratio = ratio,
             source = source,
-            measured = com.openminis.app.data.ContextSizeMeter.calibrated(history + contextFixedTokens, ratio),
+            measured = ContextSizeMeter.calibrated(history + contextFixedTokens, ratio),
         )
     }
 
@@ -3975,18 +4041,56 @@ class ChatViewModel(
     }
 
     /**
-     * Record what this attempt is about to send: our estimate of the outbound
-     * history, plus the model (and its window) that will receive it.
+     * [T-ctx-measure-outbound] 发送前的这次判断跑在循环量过本轮 system prompt 之前；
+     * 少了这份固定份额，它判的就只剩历史 —— 同一个请求会被量到线下（上游
+     * `ChatViewModel.kt:1430-1438` `ensureContextFixedTokens`）。循环在第一次请求之前
+     * 会用精确值把它换掉（见 ChatViewModelAgentLoopExt 里 `contextFixedTokens =
+     * ContextSizeMeter.estimateFixedTokens(...)`），所以这里只在**没播过**时兜底。
+     *
+     * 上游的调用点恰好两处，本移植一一对应：发送前的 [checkContextBeforeSend]
+     * （ChatViewModelPreSendContext.kt）与压缩 / 回退之后的 [publishMeasuredContextUsage]。
+     * internal：这两处一个在本类内、一个在扩展函数里。
      */
-    private fun recordContextDispatch(
+    internal fun ensureContextFixedTokens() {
+        if (contextFixedTokens > 0) return
+        contextFixedTokens = ContextSizeMeter.estimateFixedTokens(buildSystemPrompt(), agentTools)
+    }
+
+    /**
+     * Record what this attempt is about to send: our estimate of the outbound
+     * history, plus the model (and its window) that will receive it. Returns the
+     * CALIBRATED size — that is what sizes `max_tokens`
+     * ([com.openminis.app.data.ContextSizeMeter.calibrated]), not the raw
+     * estimate: the provider's window is spent in the provider's own tokens.
+     *
+     * internal：循环每一轮都调用它（上游 1.14 ChatViewModel.kt:11292
+     * `recordContextDispatch(outboundHistory, currentProvider.model)`），而循环在
+     * 本移植里是 `ChatViewModelAgentLoopExt.kt` 的扩展函数。
+     */
+    internal fun recordContextDispatch(
         history: List<com.openminis.app.data.model.LLMMessage>,
         model: com.openminis.app.data.model.LLMModel? = currentModel,
     ): Int {
         lastDispatchModel = model
         lastDispatchWindow = resolvedContextWindow(model)?.first ?: 0
-        lastDispatchEstimate =
-            com.openminis.app.data.ContextSizeMeter.estimateTokens(history) + contextFixedTokens
-        return lastDispatchEstimate
+        lastDispatchEstimate = ContextSizeMeter.estimateTokens(history) + contextFixedTokens
+        lastDispatchRatio = contextCalibrationRatio(model?.id)
+        lastDispatchPredicted = ContextSizeMeter.calibrated(lastDispatchEstimate, lastDispatchRatio)
+        return lastDispatchPredicted
+    }
+
+    /**
+     * [T-ctx-measure-outbound] `[CtxMeter] dispatch` — the record taken above and
+     * the `max_tokens` it bought. Upstream logs the same line inline right before
+     * the provider call (ChatViewModel.kt:11293-11298); here the loop is an
+     * extension function, so it calls back in.
+     */
+    internal fun logContextDispatch(predicted: Int, maxTokens: Int) {
+        AppLogger.info(
+            TAG,
+            "[CtxMeter] dispatch model=${currentModel?.id ?: "?"} estimate=$lastDispatchEstimate " +
+                "ratio=${"%.3f".format(lastDispatchRatio)} predicted=$predicted maxTokens=$maxTokens",
+        )
     }
 
     /**
@@ -4000,9 +4104,25 @@ class ChatViewModel(
         // [T-ctx-measure-outbound] 顺手记下这份样本本身的比值：会话重载时它与内存里
         // 的每模型比值一起组成 CalibrationState，被 carryingOver 保住（上游
         // ChatViewModel.kt:1461-1482 的 lastLearnedCalibration）。
-        com.openminis.app.data.ContextSizeMeter.calibrationRatio(reportedTokens, lastDispatchEstimate)
-            ?.let { lastLearnedCalibration = it }
+        val sample = ContextSizeMeter.calibrationRatio(reportedTokens, lastDispatchEstimate)
+        sample?.let { lastLearnedCalibration = it }
         com.openminis.app.data.TokenUsageCalibration.observe(model, lastDispatchEstimate, reportedTokens)
+        // [T-ctx-measure-outbound] 这一对 (report, estimate) 描述的是同一个请求，随本轮
+        // usage 行落库（calibrationJsonFields），重载时按会话顺序回放 —— 一条行内样本
+        // 是「当时那个上下文」的证据，而 lastLearnedCalibration 只是一条瞬时值。
+        lastCalibratedPair = Triple(lastDispatchEstimate, contextFixedTokens, model)
+        // [CtxMeter] actual — the prediction made at dispatch vs what the
+        // provider counted; `err` is how wrong this request's decision could be.
+        // （上游 ChatViewModel.kt:1471-1481 同一行日志。）
+        if (sample != null) {
+            val err = if (lastDispatchPredicted > 0) (lastDispatchPredicted - reportedTokens) * 100.0 / reportedTokens else 0.0
+            AppLogger.info(
+                TAG,
+                "[CtxMeter] actual model=$model predicted=$lastDispatchPredicted reported=$reportedTokens " +
+                    "err=${"%+.1f".format(err)}% estimate=$lastDispatchEstimate sample=${"%.3f".format(sample)} " +
+                    "ratio=${"%.3f".format(lastDispatchRatio)}→${"%.3f".format(sample)}",
+            )
+        }
         return true
     }
 
@@ -4042,7 +4162,7 @@ class ChatViewModel(
      * then forget the previous dispatch: a new session must never attribute its
      * first rejection to the model the PREVIOUS chat was talking to.
      */
-    private fun seedContextCalibration(usageJsons: List<String>): Boolean {
+    internal fun seedContextCalibration(usageJsons: List<String>): Boolean {
         val sid = realSessionId.ifEmpty { sessionId }
         // [T-ctx-measure-outbound] 重载**同一个**会话时，内存里学到的比值必须保住：
         // 一条被 provider 拒绝的请求不会在行里留下任何 (report, estimate) 对，所以那个
@@ -4059,9 +4179,7 @@ class ChatViewModel(
         } else null
         // [T-ctx-ratio-smoothing] 行按会话顺序（旧 → 新）过与线上同一条 smoothed 规则
         // 回放，所以重载复现的是会话当时那个平滑过的比值，而不是最新一条原始样本。
-        val seeded = com.openminis.app.data.ContextSizeMeter.replayCalibration(
-            usageJsons.mapNotNull(com.openminis.app.data.ContextSizeMeter::calibrationSample),
-        )
+        val seeded = ContextSizeMeter.replayCalibration(usageJsons.mapNotNull(ContextSizeMeter::calibrationSample))
         val state = learned?.let { seeded.carryingOver(it) } ?: seeded
         // 应用口径与合并前一致：逐模型只升不降（TokenUsageCalibration.raise 的契约，
         // 见它的 KDoc）。上游这里对**每 ViewModel** 的比值表做 clear + putAll；本移植
@@ -4073,6 +4191,9 @@ class ChatViewModel(
         lastDispatchEstimate = 0
         lastDispatchModel = null
         lastDispatchWindow = 0
+        lastDispatchPredicted = 0
+        // [T-ctx-measure-outbound] 上一次的配对样本属于上一个会话，不能跟着走。
+        lastCalibratedPair = null
         // [T-ctx-valve-spend-survives-retry] 那次「按外推值放行一次」的额度与比值一样
         // 属于这个会话的证据：换会话重新武装，同一会话（回退 / 重载）保留被拒后的花费。
         if (learned == null) sentPastExtrapolatedLimitThisLoop = false
@@ -4086,32 +4207,19 @@ class ChatViewModel(
     }
 
     /**
-     * Entry point for the agent loop ([ChatViewModelAgentLoopExt]): record the
-     * request it is about to dispatch, against the model that serves it. The
-     * loop lives in its own file (the merge split upstream's monolith) while the
-     * recorder above is private to this class — the same call upstream makes
-     * inline at `ChatViewModel.kt:11292`.
-     */
-    internal fun recordOutboundDispatch(outboundHistory: List<com.openminis.app.data.model.LLMMessage>): Int =
-        recordContextDispatch(outboundHistory, currentProvider?.model)
-
-    /**
      * Entry point for the agent loop: a provider rejected this request as too
      * long. Over-length refusals arrive both typed
      * ([com.openminis.app.data.model.LLMError.ContextLengthExceeded]) and as
      * untyped prose, so both are accepted — the burden of proof is on ignoring
-     * one.
+     * one. 上游的调用点是 `noteContextOverflow(overflowErr?.detail ?: "")`
+     * （ChatViewModel.kt:11948），且只认 typed 的那一支；本移植的循环只拿到
+     * Throwable，所以把「拆出 detail」这一步收在这里，判据更宽而不是更窄。
      */
     internal fun noteProviderContextRejection(error: Throwable) {
         val typed = error as? com.openminis.app.data.model.LLMError.ContextLengthExceeded
         if (typed != null || isContextTooLargeError(error)) {
             noteContextOverflow(typed?.detail ?: error.message ?: "")
         }
-    }
-
-    /** Entry point for `loadSession` (an Ext file) — re-seed from persisted rows. */
-    internal fun seedContextCalibrationFromUsageRows(usageJsons: List<String>) {
-        seedContextCalibration(usageJsons)
     }
 
     // ── [T-ctx-warmup-fit] 压缩热身的裁剪 + 卸载的 warm-up 扫描计划 ──────────
@@ -4166,13 +4274,11 @@ class ChatViewModel(
             ratio = contextCalibrationRatio(),
             fixedTokens = contextFixedTokens,
         ) ?: return WarmUpTrim(warmUp, decided = false)
-        val restTokens = com.openminis.app.data.ContextSizeMeter.estimateTokens(rest) +
-            com.openminis.app.data.ContextSizeMeter.estimateTokens(summaryText)
-        if (com.openminis.app.data.ContextSizeMeter.estimateTokens(warmUp) + restTokens < budget) {
-            return WarmUpTrim(warmUp, decided = true)
-        }
+        val restTokens = ContextSizeMeter.estimateTokens(rest) +
+            ContextSizeMeter.estimateTokens(summaryText)
+        if (ContextSizeMeter.estimateTokens(warmUp) + restTokens < budget) return WarmUpTrim(warmUp, decided = true)
         val drop = ContextSizeMeter.warmUpDrop(
-            sizes = warmUp.map { com.openminis.app.data.ContextSizeMeter.estimateTokens(listOf(it)) },
+            sizes = warmUp.map { ContextSizeMeter.estimateTokens(listOf(it)) },
             startsTurn = warmUp.map { m ->
                 m.role == LLMMessage.Role.USER && m.contentParts.none { it is AgentContentPart.ToolResult }
             },
@@ -4182,6 +4288,21 @@ class ChatViewModel(
         AppLogger.info(TAG, "[CtxMeter] warmup trimmed to fit: kept ${warmUp.size - drop}/${warmUp.size} message(s) (budget=$budget raw tokens)")
         return WarmUpTrim(warmUp.drop(drop), decided = true)
     }
+
+    /**
+     * [T-ctx-measure-outbound] `"estimatedRequestTokens":…,"estimatedFixedTokens":…` for the
+     * usage row, or "". Same keys as iOS StoredTokenUsage — and the same keys
+     * [ContextSizeMeter.calibrationSample] reads back, so a reloaded session
+     * replays the pair instead of re-deriving a ratio from raw sizes.
+     *
+     * internal 而非上游的 private（`ChatViewModel.kt:1607`）：两处 usage 行写入器
+     * 在本移植里分居两个文件，`ChatViewModelPersistMessage.kt` 是扩展函数、够不到类内
+     * private 成员。函数体与上游一字不差。
+     */
+    internal fun calibrationJsonFields(): String = lastCalibratedPair?.let { (est, fixed, model) ->
+        val modelField = model?.let { ""","calibrationModelId":${org.json.JSONObject.quote(it)}""" } ?: ""
+        ""","estimatedRequestTokens":$est,"estimatedFixedTokens":$fixed$modelField"""
+    } ?: ""
 
     /**
      * [T-ctx-warmup-fit] [T-ctx-warmup-trim-undecided] 上游 1.14
@@ -4206,12 +4327,13 @@ class ChatViewModel(
         summaryWrappedText: String,
     ): List<LLMMessage> {
         val marker = _cachedLatestMarker ?: return preAnchorPruned
-        return warmUpDropByMarker[marker.id]?.let { drop ->
+        val warmUp = warmUpDropByMarker[marker.id]?.let { drop ->
             preAnchorPruned.drop(minOf(drop, preAnchorPruned.size))
         } ?: trimWarmUpToFit(preAnchorPruned, postAnchor, summaryWrappedText).let { trim ->
             if (trim.decided) warmUpDropByMarker[marker.id] = preAnchorPruned.size - trim.kept.size
             trim.kept
         }
+        return warmUp
     }
 
     /**
@@ -4775,7 +4897,7 @@ class ChatViewModel(
     //
     // 移植适配只有一处可见性：循环已经拆进 ChatViewModelAgentLoopExt.kt，扩展
     // 函数读不到 private 成员，所以 [pendingModelSwitch] / [systemPromptFor] 提到
-    // internal——与 recordOutboundDispatch / noteProviderContextRejection 同一条
+    // internal——与 recordContextDispatch / noteProviderContextRejection 同一条
     // 既有约定。
 
     /**
@@ -5122,7 +5244,10 @@ class ChatViewModel(
         // `destroyAllTabs()` 才是真的拆 WebView、释放内存。这里要的是后者——注释一直
         // 写的就是「丢掉本会话的浏览器资源」，而旧名字只做前者，于是被清空的会话把
         // 几十 MB 的 WebView 永远留在池子里。用上游的新名字。
-        if (helperConfig == null) _browserTabPoolRef?.destroyAllTabs() // helper 用的是父池，清空子会话不得拆父会话的标签
+        // [T-w1-pool-ownership] 只有自建池才归本会话拆：helper 借的是父池，清空子会话
+        // 不得拆父会话的标签（`helperConfig == null` 说的就是这件事，而自建标记才是
+        // 真正的判据——借入者不一定都带 helperConfig）。
+        if (helperConfig == null && _ownsBrowserTabPool) _browserTabPoolRef?.destroyAllTabs()
         runCatching {
             java.io.File(context.filesDir, "browser_tabs/$sid.json").delete()
         }
@@ -5662,6 +5787,13 @@ class ChatViewModel(
      * The message appears immediately in the chat with isQueued=true; when the
      * current agent loop finishes, drainQueuedPrompts() consumes the queue.
      * Mirrors iOS AIChatViewModel.enqueuePrompt().
+     *
+     * [T-scheduled-tool-prefill] Returns the queued prompt's id, or null when
+     * the queue refused it (blank prompt, nothing streaming any more). The
+     * caller needs that answer: upstream's send() reports Queued vs
+     * `enqueue_declined` off the queue length, which is wrong for a scheduled
+     * fire — a newer fire of the same task REPLACES an older pending one, so
+     * the length stays put while the prompt was in fact accepted.
      */
     fun enqueuePrompt(
         text: String,
@@ -5669,13 +5801,13 @@ class ChatViewModel(
         // [T-scheduled-tool-prefill] Runs as the first turn of whichever loop
         // eventually carries this prompt (drain or mid-loop injection).
         prefill: List<com.openminis.app.scheduled.PrefilledToolCall> = emptyList(),
-    ) {
+    ): String? {
         val trimmed = text.trim()
         // [T-p2-gentle-injection] Only a USER prompt owns the composer's staged
         // attachments. A programmatic prompt arriving while the user has files
         // staged must not walk off with them (and must not clear them below).
         val pendingAttachments = if (origin == QueuedPromptOrigin.USER) _attachments.value else emptyList()
-        if ((trimmed.isBlank() && pendingAttachments.isEmpty()) || !_isStreaming.value) return
+        if ((trimmed.isBlank() && pendingAttachments.isEmpty()) || !_isStreaming.value) return null
 
         val prompt = QueuedPrompt(
             id = "queued_${System.currentTimeMillis()}_${(Math.random() * 1_000_000).toInt()}",
@@ -5721,6 +5853,7 @@ class ChatViewModel(
         _messages.value = trimLoadedWindow(_messages.value + chatMsg)
         if (origin == QueuedPromptOrigin.USER) clearAttachments()
         Log.i(TAG, "Enqueued prompt (${trimmed.length}ch, ${pendingAttachments.size} attachments, origin=$origin), queue=${_promptQueue.value.size}")
+        return prompt.id
     }
 
     /** Remove a queued prompt and its chat message by prompt id. */
@@ -6110,8 +6243,8 @@ class ChatViewModel(
      * （ChatViewModelOffloadExt.offloadContextIfNeeded，本移植把它拆进了 ext 文件）
      * 必须用同一条校准比，否则 freed-tokens 与被扣减的 usage 不在一个尺度上。
      */
-    internal fun contextCalibrationRatio(): Double =
-        com.openminis.app.data.TokenUsageCalibration.scale(currentModel?.id ?: "")
+    internal fun contextCalibrationRatio(modelId: String? = currentModel?.id): Double =
+        ContextSizeMeter.ratioFor(modelId, com.openminis.app.data.TokenUsageCalibration.snapshot(), lastLearnedCalibration)
 
     /**
      * [T-android-image-downscale-parity] The model-facing shape of one attached
@@ -6307,7 +6440,7 @@ class ChatViewModel(
         if (parts.isEmpty()) return null
         val partsJson = buildAssistantPartsJson(parts, toolBlockMeta)
         val tokenJson = usage?.let {
-            """{"inputTokens":${it.inputTokens},"outputTokens":${it.outputTokens},"cacheCreationTokens":${it.cacheCreationInputTokens ?: 0},"cacheReadTokens":${it.cacheReadInputTokens ?: 0},"latestContextTokens":${it.latestContextTokens},"streamMs":$streamMs}"""
+            """{"inputTokens":${it.inputTokens},"outputTokens":${it.outputTokens},"cacheCreationTokens":${it.cacheCreationInputTokens ?: 0},"cacheReadTokens":${it.cacheReadInputTokens ?: 0},"latestContextTokens":${it.latestContextTokens},"streamMs":$streamMs${calibrationJsonFields()}}"""
         }
         val entity = chatRepository.appendMessage(
             realSessionId.ifEmpty { sessionId }, "assistant", partsJson, tokenJson,
@@ -6627,7 +6760,10 @@ class ChatViewModel(
     override fun onCleared() {
         unsubscribeSafeMode?.invoke()
         unsubscribeSafeMode = null
-        _browserTabPoolRef?.dispose()
+        // [T-w1-pool-ownership] 只拆自己建的池子：helper 子会话借的是父会话的池
+        // （adoptBrowserTabPool），而 store 淘汰子会话就是 ViewModelStore.clear →
+        // 这里；无条件 dispose 会把父会话正在用的池子一起拆掉（跨会话池销毁）。
+        if (_ownsBrowserTabPool) _browserTabPoolRef?.dispose()
         super.onCleared()
         // Tear down whichever shell was actually serving this VM. Terminate
         // both ids when the rename happened, since a draft shell may still
@@ -7536,7 +7672,7 @@ class ChatViewModel(
      * injected; re-arming only after another [personaReminderRearmTokens] of
      * growth is what stops this from firing every single round.
      */
-    private fun personaReminderIsDue(contextTokens: Int): Boolean {
+    internal fun personaReminderIsDue(contextTokens: Int): Boolean {
         if (contextTokens < personaReminderContextTokens) return false
         val last = lastPersonaReminderContextTokens
         if (last != null) {
@@ -7596,8 +7732,12 @@ class ChatViewModel(
      * that point still hits; only content after the insertion point is
      * re-created, which is the normal, unavoidable cost of any new message.
      * Being its own message also means it is never fused with tool output.
+     *
+     * [T-merge-upstream-1-14-persona-callsite] internal 而非上游的 private：调用点
+     * 在 `ChatViewModelAgentLoopExt.kt`（上游是单文件 11285-11287），扩展函数够不到
+     * 类内 private 成员。函数体与上游一字不差。
      */
-    private fun appendPersonaReminderToHistory(contextTokens: Int) {
+    internal fun appendPersonaReminderToHistory(contextTokens: Int) {
         val reminder = personaReminderText()
         val idx = agentHistory.size
         agentHistory.add(
@@ -7856,23 +7996,22 @@ class ChatViewModel(
      * After a compaction [_lastTurnContextTokens] otherwise keeps showing the
      * context that was just replaced, until some later response overwrites it.
      *
-     * Port of upstream ChatViewModel.kt:1557-1566. Upstream's
-     * `measureOutboundContextTokens()` is the same formula written here —
-     * `ContextSizeMeter.calibrated(estimateTokens(effectiveAgentHistoryUncounted())
-     * + contextFixedTokens, contextCalibrationRatio())` (upstream:1396-1418);
-     * [contextFixedTokens] is this port's share and is seeded from the first
-     * calibrated sample (see the [T-ctx-overflow-attribute-dispatch] block),
-     * so upstream's `ensureContextFixedTokens()` pre-estimate has no separate
-     * role here.
+     * Port of upstream ChatViewModel.kt:1557-1566: the glow reads the SAME
+     * measurement the guards do — [ensureContextFixedTokens] then
+     * [measureOutboundContextTokens] (→ [contextMeasurement]) — so the number on
+     * screen, the number the guards decide on and the [CtxMeter] logs all come
+     * from one place. (This used to re-derive
+     * `calibrated(estimateTokens(effectiveAgentHistoryUncounted()) + …)` here
+     * while the family above did not exist yet; a second formula is a second
+     * measurement that can drift from the one the decisions use.)
+     *
+     * internal：上游在 loadSession 里也调它（ChatViewModel.kt:6517，回退之后
+     * 「显示测量值」那一步），而 loadSession 在本移植里是
+     * `ChatViewModelLoadExt.kt` 的扩展函数。
      */
-    private fun publishMeasuredContextUsage() {
-        // 全限定名与本文件既有用法一致（ChatViewModel.kt:3774/3824）——这个文件没有
-        // import ContextSizeMeter，裸名解析不到。
-        val measured = com.openminis.app.data.ContextSizeMeter.calibrated(
-            com.openminis.app.data.ContextSizeMeter.estimateTokens(effectiveAgentHistoryUncounted()) +
-                contextFixedTokens,
-            contextCalibrationRatio(),
-        )
+    internal fun publishMeasuredContextUsage() {
+        ensureContextFixedTokens()
+        val measured = measureOutboundContextTokens()
         if (measured > 0) _lastTurnContextTokens.value = measured
     }
 
@@ -7930,10 +8069,13 @@ class ChatViewModel(
      * 成员，所以这里留一个 `internal` 收尾入口：那两行与上游逐字一致，可见性降级只
      * 是拆文件的后果，不是行为变化。
      */
-    internal fun onCompactionFinished(compactSucceeded: Boolean) {
+    internal fun onCompactionFinished(compactSucceeded: Boolean, compactMeasuredBefore: Int = -1) {
         if (compactSucceeded) runCatching {
             publishMeasuredContextUsage()
             announceContextUsageAfterCompaction()
+            // [T-ctx-measure-outbound] The glow now shows the measurement, so log
+            // what it moved from and to (upstream ChatViewModel.kt:3997).
+            AppLogger.info(TAG, "[CtxMeter] compacted marker=${_cachedLatestMarker?.id?.take(8)} measured $compactMeasuredBefore→${measureOutboundContextTokens()}")
         }
     }
 
@@ -8032,10 +8174,10 @@ class ChatViewModel(
     // The port's own send path is the audited one (T-android-* fixes: draft
     // handling, queue races, context consistency), so this ADAPTS rather than
     // replacing it: same entry point upstream's callers expect, routed through
-    // [sendMessage] / [enqueuePrompt] as they exist here. NOT ported: upstream's
-    // tool-prefill (`prefill`) and headless-send flags, which need the loop-side
-    // support from that refactor — a caller that needs a scheduled tool prefill
-    // currently gets a plain queued prompt (see the U6 leftover note).
+    // [sendMessage] / [enqueuePrompt] as they exist here. [T-scheduled-tool-prefill]
+    // `prefill` rides the whole way — the send funnel hands it to the loop's
+    // scripted first turn, and a busy session parks it on the queue entry so the
+    // drain carries it too, exactly as upstream's funnel does.
     sealed interface SubmitOutcome {
         /** The turn is streaming now. */
         data object Running : SubmitOutcome

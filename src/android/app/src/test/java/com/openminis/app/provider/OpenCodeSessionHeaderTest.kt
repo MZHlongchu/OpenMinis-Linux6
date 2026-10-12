@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import com.openminis.app.ProductionSources
+import com.openminis.app.SplitSourceScan
 import org.junit.Test
 
 /**
@@ -236,26 +237,30 @@ class OpenCodeSessionHeaderTest {
         // hand it the chat's id.
         val list = ProductionSources.read("ui/sessions/SessionListViewModel.kt")
         assertTrue(list.contains("providerRepository, context, entry, sessionId = id,"))
-        // [T-android-opencode-subtask-session] 本移植的自动标题那条路**不走**
-        // TitleCandidates：ChatViewModel.generateSessionTitleIfNeeded() 自己用
-        // resolveTitleProvider() 解析子系统条目（[T-android-regenerate-title-submodel]
-        // 只共享 ProviderRepository.resolveTitleSubEntry 这一半），所以上游那句
+        // [T-android-opencode-subtask-session] 要守的东西一个字没变：**替这个会话发出去
+        // 的请求必须带上这个会话的 id**（ProviderFactory 是 provider.sessionId 的唯一来源，
+        // OpenCodeSessionHeader 再从它推导 header）。
+        //
+        // [T-w2-titlegen-candidates-scan] 落点变了，所以扫描面跟着落点走：这一轮把上游 1.14
+        // 的**有序候选表**移植了进来 —— 自动标题不再自己解析单个子系统条目
+        // （`resolveTitleProvider()` 连同它上面那段 KDoc 一起删掉了），而是每个候选都由
         // `TitleCandidates.providerFor(providerRepository, context, entry, activeSessionId)`
-        // （upstream ChatViewModel.kt:16138）在本移植里不存在。要守的东西一个字没变：
-        // **替这个会话发出去的请求必须带上这个会话的 id** —— 断言因此落在
-        // "那个函数把 activeSessionId 交给 ProviderFactory"上（ProviderFactory 是
-        // provider.sessionId 的唯一来源，OpenCodeSessionHeader 再从它推导 header）。
-        val vm = ProductionSources.readClassSurface("ui/chat/ChatViewModel.kt")
-        val titleProvider = ProductionSources.functionWindow(vm, "resolveTitleProvider", 4_000).orEmpty()
-        assertTrue("resolveTitleProvider window not found in the ChatViewModel surface", titleProvider.isNotEmpty())
+        // 建（正是上游 ChatViewModel.kt:16138 那句，旧注释说它「在本移植里不存在」已经不成立）。
+        // 断言因此钉在同一条契约的新落点上，按函数名取窗口（[SplitSourceScan]），位置无关：
+        //   会红的情形一：自动标题那条路不再把 activeSessionId 交出去（改成不传 sessionId 的
+        //   构造、或写死 null）—— 会话 id 到不了 provider，OpenCode 又会 400；
+        //   会红的情形二：providerFor 的第 4 个形参不再是 sessionId（实参错位，id 落到别处）。
+        val titlePath = SplitSourceScan.memberBody("generateSessionTitleIfNeeded", subdir = "ui/chat")
         assertTrue(
             "the chat's own title request must carry the chat's id",
-            titleProvider.contains(
-                "ProviderFactory.create(instance, apiKey, entry.model, context, sessionId = activeSessionId)",
-            ),
+            titlePath.contains("TitleCandidates.providerFor(providerRepository, context, entry, activeSessionId)"),
         )
         val titles = ProductionSources.read("ui/chat/TitleCandidates.kt")
         assertTrue(titles.contains("sessionId = sessionId, overrides = entry.overrides"))
+        assertTrue(
+            "providerFor's fourth parameter must be the session id",
+            Regex("""entry: ModelEntry,\s*\n\s*sessionId: String,""").containsMatchIn(titles),
+        )
         // [T-android-model-use-provider-pollution] minis-model-use 那条路的 provider 是
         // createEphemeral 单独构建、不进 memo 的（memo 那份正是 UI 聊天共用的对象，
         // 按调用改它会污染后续请求），所以 sessionId / 覆盖参数改成**等价的两行手工

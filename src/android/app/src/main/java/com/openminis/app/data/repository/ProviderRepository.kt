@@ -1121,7 +1121,7 @@ class ProviderRepository(private val context: Context) {
      * `defaultSubGroupId` group. Returns null when no sub-group is configured or
      * every member sits behind a disabled provider (caller then falls back to
      * the primary model). Single source of truth for both the auto-title path
-     * (ChatViewModel.resolveTitleProvider) and the manual Regenerate path
+     * (TitleCandidates.walk（标题候选表）) and the manual Regenerate path
      * (SessionListViewModel.regenerateTitle), mirroring iOS resolveSubEntry.
      */
     fun resolveTitleSubEntry(): ModelEntry? {

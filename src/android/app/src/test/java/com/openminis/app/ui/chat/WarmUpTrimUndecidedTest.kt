@@ -47,7 +47,11 @@ class WarmUpTrimUndecidedTest {
     @Test
     fun `the trim reports undecided when there is no budget, and the caller caches only decisions`() {
         val trim = vm.substringAfter("private fun trimWarmUpToFit(")
-            .substringBefore("private fun calibrationJsonFields()")
+            // [T-ctx-measure-outbound] 上游把这段收尾标成 `private fun
+            // calibrationJsonFields()`；本移植的两处 usage 行写入器分居两个文件
+            // （ChatViewModelPersistMessage.kt 是扩展函数），它因此是 internal。
+            // 锚点的作用（「trimWarmUpToFit 的函数体到此为止」）与断言一字未动。
+            .substringBefore("internal fun calibrationJsonFields()")
         assertTrue("returns a WarmUpTrim", trim.contains("): WarmUpTrim {"))
         assertTrue("no budget → undecided", trim.contains(") ?: return WarmUpTrim(warmUp, decided = false)"))
         assertTrue("budget comes from the tested function", trim.contains("val budget = warmUpBudget("))

@@ -70,8 +70,13 @@ internal fun ChatViewModel.sendMessage(
     val trimmed = text.trim()
     // While streaming, enqueue instead of silently dropping (iOS: send vs enqueuePrompt).
     if (_isStreaming.value) {
-        enqueuePrompt(text)
-        return SubmitOutcome.Queued
+        // [T-p2-gentle-injection] A headless send is PROGRAMMATIC: it waits for
+        // the running loop to finish instead of cutting a plan short at the next
+        // tool gap. [T-scheduled-tool-prefill] The prefilled calls ride the queue
+        // entry, so the loop that finally carries the prompt still runs them.
+        val queuedId = enqueuePrompt(text, if (headless) QueuedPromptOrigin.PROGRAMMATIC else QueuedPromptOrigin.USER, prefill)
+        return if (queuedId != null) SubmitOutcome.Queued
+        else SubmitOutcome.Rejected("enqueue_declined")
     }
     // T180: allow attachments-only sends (no caption). Mirrors iOS, where
     // an empty text + non-empty attachments still produces a valid user
@@ -206,17 +211,14 @@ internal fun ChatViewModel.sendMessage(
     val editingId = if (internalGoalRun) null else _editingMessageId.value
     if (editingId != null) _editingMessageId.value = null
 
-    // [T-scheduled-tool-prefill] Upstream hands these to `runAgentLoop`'s
-    // scripted first turn. This port's loop has no such entry point yet — same
-    // documented gap as submitPrompt's [T-u6-vm-adapter] note — so the request
-    // is recorded here rather than dropped in silence: a scheduled task whose
-    // prefilled command never ran must be visible in the log.
-    if (prefill.isNotEmpty()) {
-        AppLogger.info(
-            ChatViewModel.TAG_STREAM,
-            "send: ${prefill.size} prefilled tool call(s) requested; tool prefill is not ported, sending a plain prompt",
-        )
-    }
+    // [T-scheduled-tool-prefill] The prefilled calls are NOT run here: they are
+    // handed to [runAgentLoop] below, which streams them as this loop's FIRST
+    // turn in place of a provider request (see `pendingScriptedTurn`). The
+    // command therefore executes through the ordinary tool path — same tool
+    // card, same dispatch, same persisted tool_use/tool_result rows — and the
+    // model's first real request already carries its output. A prefill that
+    // names a tool this session does not offer is dropped (with a warning) by
+    // `scriptedTurnFor`, leaving the old behaviour: the model decides for itself.
 
     viewModelScope.launch {
         var streamLaunched = false
@@ -430,7 +432,9 @@ internal fun ChatViewModel.sendMessage(
                             fallbackProviders = fallbackProviders,
                             fallbackStrategy = activeFallbackStrategy,
                             goalExecutionRun = internalGoalRun,
-
+                            // [T-scheduled-tool-prefill] Already-decided tool
+                            // calls run as this loop's first turn.
+                            prefill = prefill,
                         )
                         AppLogger.info(ChatViewModel.TAG_STREAM, "send runAgentLoop RETURN normal")
                         // Drain any prompts the user queued while this loop was running.

@@ -55,7 +55,18 @@ class ImageBudgetCallSiteTest {
         assertEquals("expected a single stream call site in runAgentLoop", 1, streamCalls)
         assertFalse("the loop must not bypass the stream seam", loop.contains("currentProvider.streamMessage("))
         val callIdx = loop.indexOf(".streamRound(")
-        val window = loop.substring(callIdx, loop.length.coerceAtMost(callIdx + 900))
+        // [T-loop-call-window-anchor] 窗口改成这次调用**自己的实参表**：从
+        // `.streamRound(` 到关闭它、挂看门狗的那个右括号。此前写的是「起点之后的 900
+        // 个字符」——那个 900 是注释长度的函数，不是语义：循环里每加一段 [T-…] 说明
+        // （本轮就加了派发记账、图片预算那几段注释），同一份没变的请求就被推到窗外，
+        // 2026-10-12 12:57 / 13:03 两次全量里它就是这么红的（生产语义一字未改：
+        // `messages = auditOutgoingPayload(applyRequestImageBudget(requestHistory))`）。
+        // 边界现在由调用本身给出，判定反而更紧：实参表里的 `messages =` 只允许一处。
+        val requestEnd = loop.indexOf(").streamStallWatchdog(", callIdx)
+        assertTrue("the round call must be closed by its stall watchdog", requestEnd > callIdx)
+        val window = loop.substring(callIdx, requestEnd)
+        assertEquals("the request takes exactly one messages argument",
+            1, Regex("""\bmessages\s*=""").findAll(window).count())
         assertTrue("outgoing history must be budgeted", window.contains("applyRequestImageBudget("))
         assertTrue("byte audit sits outermost", window.contains("auditOutgoingPayload("))
         // 上游把三者写成一条表达式，本移植把历史解析拆成了独立语句（withGoalContext
@@ -63,7 +74,7 @@ class ImageBudgetCallSiteTest {
         // requestHistory，而 requestHistory 必须来自 effectiveAgentHistory()。
         assertTrue(
             "the audit must wrap the budget, and the budget the outgoing history",
-            window.contains("auditOutgoingPayload(applyRequestImageBudget(requestHistory))"),
+            window.contains("messages = auditOutgoingPayload(applyRequestImageBudget(requestHistory)),"),
         )
         val historyIdx = loop.indexOf("val requestHistory = ")
         assertTrue("requestHistory must be built inside the loop", historyIdx > 0)

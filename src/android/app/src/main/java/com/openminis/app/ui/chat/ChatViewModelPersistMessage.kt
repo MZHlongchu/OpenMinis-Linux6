@@ -38,7 +38,10 @@ internal suspend fun ChatViewModel.persistAssistantMessage(
         append("]")
     }
     val tokenJson = usage?.let {
-        """{"inputTokens":${it.inputTokens},"outputTokens":${it.outputTokens},"cacheCreationTokens":${it.cacheCreationInputTokens ?: 0},"cacheReadTokens":${it.cacheReadInputTokens ?: 0},"latestContextTokens":${it.latestContextTokens}}"""
+        // [T-ctx-measure-outbound] 第二个 usage 行写入器也要带上 (report, estimate) 那一对
+        // ——上游 1.14 ChatViewModel.kt:15031 同一处；少了它，从这条路径落库的会话重载
+        // 时回放不出比值（ContextSizeMeter.calibrationSample 读的正是这几个键）。
+        """{"inputTokens":${it.inputTokens},"outputTokens":${it.outputTokens},"cacheCreationTokens":${it.cacheCreationInputTokens ?: 0},"cacheReadTokens":${it.cacheReadInputTokens ?: 0},"latestContextTokens":${it.latestContextTokens}${calibrationJsonFields()}}"""
     }
     chatRepository.appendMessage(
         realSessionId.ifEmpty { sessionId }, "assistant", partsJson, tokenJson,

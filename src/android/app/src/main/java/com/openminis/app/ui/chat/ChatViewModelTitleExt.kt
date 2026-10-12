@@ -221,7 +221,7 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded() {
                     messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
                     systemPrompt = effectiveSystemPrompt,
                     maxTokens = titleMaxTokens,
-                    temperature = titleTemperature(),
+                    temperature = null, // [T-android-titlegen-temperature] 上游 1.14：gpt-5.x 只接受 temperature=1，null 必须压过候选自身的 override（否则 400 会烧掉该候选）
                     thinkingLevel = ThinkingLevel.OFF,
                 )
 

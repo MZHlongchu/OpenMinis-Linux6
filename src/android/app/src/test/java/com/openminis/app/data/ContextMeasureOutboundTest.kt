@@ -361,13 +361,26 @@ class ContextMeasureOutboundTest {
         assertTrue(vm.contains("val canCompact = compactionsSoFar < maxInLoopCompactions && !lastInLoopCompactionMadeNoProgress"))
 
         // Dispatch: estimate recorded on the exact pre-budget history, and it sizes max_tokens.
-        val loop = vm.substring(vm.indexOf("suspend fun runAgentLoop"))
+        // [T-ctx-measure-outbound-scan-scope] 上游的入口是类内成员
+        // `private suspend fun runAgentLoop(`；本移植的循环是扩展函数
+        // （`internal suspend fun ChatViewModel.runAgentLoop(`，ChatViewModelAgentLoopExt.kt），
+        // 锚点跟着写成它的真实声明。
+        val loop = vm.substring(vm.indexOf("suspend fun ChatViewModel.runAgentLoop("))
         val record = loop.indexOf("val dispatchInputTokens = recordContextDispatch(outboundHistory, currentProvider.model)")
-        val send = loop.indexOf("currentProvider.streamMessage(")
+        // [T-ctx-measure-outbound-scan-scope] 上游直接调
+        // `currentProvider.streamMessage(`；本移植的循环走接缝一
+        // （ProviderStreamClient）——同一处「请求发出去」的位置，锚点换成
+        // `.streamRound(`。断言与次序要求（记账在发请求之前）一字未动。
+        val send = loop.indexOf(".streamRound(")
         assertTrue("dispatch recorded before the provider call", record in 1 until send)
         // [T-scheduled-tool-prefill] One level deeper: the provider request now
         // sits in the non-scripted branch of the turn's chunk source.
-        assertTrue(loop.contains("applyRequestImageBudget(\n                                    outboundHistory,"))
+        // [T-ctx-measure-outbound-scan-scope] 上游写成多行嵌套调用
+        // （`applyRequestImageBudget(\n outboundHistory,`）；本移植在同一处只写一行，
+        // 而且这份历史在循环里叫 `requestHistory`（记账那一行按上游的名字取了别名
+        // `outboundHistory = requestHistory`）。语义不变：记账看到的是**未经**图片预算
+        // 裁剪的历史。
+        assertTrue(loop.contains("applyRequestImageBudget(requestHistory)"))
         assertTrue(loop.contains("dynamicMaxTokens(currentProvider, dispatchInputTokens)"))
         assertTrue(loop.contains("lastContextTokens = measureOutboundContextTokens(),"))
         assertTrue(loop.contains("contextFixedTokens = ContextSizeMeter.estimateFixedTokens("))
@@ -385,8 +398,24 @@ class ContextMeasureOutboundTest {
         assertTrue(dao.contains("AND token_usage IS NOT NULL ORDER BY sort_order ASC\")"))
 
         // Optimisation round.
-        assertTrue(vm.contains("private val contextCalibrationRatios = mutableMapOf<String, Double>()"))
-        assertTrue("every context-length rejection raises the ratio", vm.contains("noteContextOverflow(overflowErr?.detail ?: \"\")"))
+        // [T-ctx-measure-outbound] 上游把每模型比值留在 ViewModel 上
+        // （`private val contextCalibrationRatios = mutableMapOf<String, Double>()`）；
+        // 本移植把它放在 [TokenUsageCalibration]（按模型 id 的全局表，跨会话共享密度），
+        // 并把 (report, estimate) 对回放到同一张表。意图不变：比值是**按模型**存的，
+        // 而测量（比值 + 来源）读的就是它 —— 见 contextMeasurement 里的
+        // `ContextSizeMeter.ratioFor(model, known, lastLearnedCalibration)`。
+        assertTrue(vm.contains("ContextSizeMeter.ratioFor(model, known, lastLearnedCalibration)"))
+        assertTrue(vm.contains("ContextSizeMeter.ratioSource(model, known, lastLearnedCalibration)"))
+        assertTrue(ProductionSources.read("data/TokenUsageCalibration.kt")
+            .contains("private val scales = ConcurrentHashMap<String, Double>()"))
+        // [T-ctx-overflow-attribute-dispatch] 上游在同一层写
+        // `noteContextOverflow(overflowErr?.detail ?: "")`（ChatViewModel.kt:11948），
+        // 且只认 typed 的 ContextLengthExceeded；本移植的循环只拿到 Throwable，于是
+        // 「拆 detail + 判据（typed 或未类型化的 prose）」收进
+        // noteProviderContextRejection。两者的共同点被下面两条钉住：调用点是这一处，
+        // 抬比值的那一句用的仍是 provider 给的 detail。
+        assertTrue("every context-length rejection raises the ratio", vm.contains("noteProviderContextRejection(actual)"))
+        assertTrue(vm.contains("noteContextOverflow(typed?.detail ?: error.message ?: \"\")"))
         assertTrue("valve is once per loop", vm.contains("uncalibratedSendUsed = sentPastExtrapolatedLimitThisLoop,")
             && vm.contains("sentPastExtrapolatedLimitThisLoop = false"))
         assertTrue("seeding replays the rows through the shared replay",
@@ -395,7 +424,12 @@ class ContextMeasureOutboundTest {
 
         // A pinned model's overflow is recovered by compaction, never by
         // answering from another model (parity with iOS).
-        assertTrue(vm.contains("val shouldFallback = !isDirectEntryOverflow && (isRateLimit || is5xx || isFallbackableError ||"))
+        // [T-ctx-overflow-no-cross-fallback] 上游在判定里显式排除「直连（非组）会话 +
+        // 上下文溢出」这一格（ChatViewModel.kt:11991-11994 `!isDirectEntryOverflow`）；
+        // 本移植的候选门本身就要求 `_selectedGroupId.value != null`，于是直连会话对
+        // **任何**错误都不回退——同一条语义更强地成立，锚点落在这道门 + 回退判定上。
+        assertTrue(vm.contains("val shouldFallback = com.openminis.app.harness.agent.StreamRetryPolicy.shouldFallback(errorClass, loopFallbackStrategy)"))
+        assertTrue(vm.contains("val nextCandidate = if (shouldFallback && _selectedGroupId.value != null) {"))
 
         // Same-session reload keeps learned (incl. overflow-raised) ratios.
         // (Behaviour: CompactionDecisionTest `revert keeps a ratio that exists only in memory`.)
@@ -404,15 +438,128 @@ class ContextMeasureOutboundTest {
 
         // Warm-up trimming.
         assertTrue(vm.contains("} ?: trimWarmUpToFit(preAnchorPruned, postAnchor, summaryWrappedText).let { trim ->"))
-        assertTrue(vm.contains("result.addAll(warmUp)"))
+        // [T-android-seam-extraction] 热身投影（`result.addAll(warmUp)` 那一句）在合并时
+        // 被拆进 `:harness` 模块（CompactHistoryProjector），`ui/chat` 里不再有这行；
+        // 断言改为读它真正的落点——「决定过的热身就是被发出去的那一段」这句话没变。
+        assertTrue(ProductionSources.readHarness("agent/CompactHistoryProjector.kt")
+            .contains("result.addAll(warmUp)"))
         assertTrue("warm-up trim is decided once per marker (stable prompt-cache prefix)",
             vm.contains("val warmUp = warmUpDropByMarker[marker.id]?.let { drop ->")
                 && vm.contains("if (trim.decided) warmUpDropByMarker[marker.id] = preAnchorPruned.size - trim.kept.size"))
         assertTrue(vm.contains("if (ContextSizeMeter.estimateTokens(warmUp) + restTokens < budget) return WarmUpTrim(warmUp, decided = true)"))
 
         // The glow follows the measurement after a compaction and on (re)load.
-        assertTrue(vm.contains("if (compactSucceeded) runCatching {\n                    publishMeasuredContextUsage()"))
+        // [T-ctx-measure-outbound-scan-scope] 上游那段 `if (compactSucceeded)
+        // runCatching { … }` 内联在压缩函数里（缩进 20 空格）；本移植的压缩在
+        // ChatViewModelCompactExt，收尾入口是 ChatViewModel.onCompactionFinished，
+        // 缩进因此不同——锚点改成缩进容忍的正则，次数与语义不变。
+        assertTrue(Regex("if \\(compactSucceeded\\) runCatching \\{\\s*publishMeasuredContextUsage\\(\\)").containsMatchIn(vm))
         assertTrue(vm.contains("runCatching { publishMeasuredContextUsage() }"))
+    }
+
+    // ── the fixed share both consumers must seed ───────────────────────────
+
+    /**
+     * [T-ctx-measure-outbound] 测量 = (历史 + 固定份额) × 比值，而固定份额
+     * （system prompt + 工具表）在**循环**里每一轮按本轮 prompt 重算
+     * （ChatViewModelAgentLoopExt 的 `contextFixedTokens = …estimateFixedTokens(`）。
+     * 于是循环之外的两个消费点必须自己先播一次 —— 上游 `ChatViewModel.kt:1430-1438`
+     * 的 `ensureContextFixedTokens()`，调用点恰好两处：:1563（压缩 / 回退之后把辉光
+     * 指向测量）与 :5399（发送前的那次判断）。少了它，发送前的判断只按历史算，
+     * 同一个请求会被量到线下 —— 判定说「没事」，请求出门就撞天花板。
+     */
+    @Test
+    fun `both consumption points seed the fixed share before they measure`() {
+        val vm = chatSrc
+        // 定义一处、调用两处（与上游同形）：定义在 ChatViewModel.kt，两个消费点分别在
+        // 类内的 publishMeasuredContextUsage 与 ChatViewModelPreSendContext.kt。
+        assertEquals("exactly one definition", 1, Regex("fun ensureContextFixedTokens\\(\\)").findAll(vm).count())
+        assertEquals("definition + exactly two consumption sites", 3,
+            Regex("ensureContextFixedTokens\\(\\)").findAll(vm).count())
+        // 已经播过就不再动它：循环每轮量出的精确值不能被一次旧估算盖掉。
+        assertTrue("only an unseeded share is filled in", vm.contains("if (contextFixedTokens > 0) return"))
+        assertTrue("seeded from the same inputs the loop measures",
+            vm.contains("contextFixedTokens = ContextSizeMeter.estimateFixedTokens(buildSystemPrompt(), agentTools)"))
+
+        assertTrue("pre-send seeds before it measures",
+            ProductionSources.read("ui/chat/ChatViewModelPreSendContext.kt")
+                .contains("ensureContextFixedTokens()\n    val m = contextMeasurement()"))
+        assertTrue("the glow seeds, then reads the shared measurement",
+            vm.contains("ensureContextFixedTokens()\n        val measured = measureOutboundContextTokens()"))
+        // 辉光不再自己重写那条公式：整族只有一个测量入口（source 与比值也才同出一处）。
+        val glow = vm.substringAfter("internal fun publishMeasuredContextUsage() {").substringBefore("\n    }")
+        assertTrue("glow body window (${glow.length} chars)", glow.length in 1..400)
+        assertFalse("the glow must not re-derive the measurement", glow.contains("ContextSizeMeter.calibrated("))
+        assertTrue("the glow reads measureOutboundContextTokens()", glow.contains("measureOutboundContextTokens()"))
+
+        // 这一份份额本身就参与判定：同一个请求，少了它在线下，带上它过线。
+        val share = ContextSizeMeter.estimateFixedTokens(
+            "You are Minis, a capable AI assistant running on the user's Android device.",
+            listOf(
+                AgentToolDefinition(
+                    name = "shell_execute",
+                    description = "Run a shell command inside the session sandbox and return its output.",
+                    parameters = mapOf("command" to AgentToolParam("string", "The command line to run.")),
+                ),
+            ),
+        )
+        assertTrue("a prompt plus one tool schema is a real share (got $share)", share > 0)
+        val historyOnly = policy.compactThreshold - share
+        assertEquals("the same request WITHOUT the share reads as under the line",
+            ContextPolicy.CheckResult.OK, policy.check(historyOnly, window))
+        assertEquals("…and over it once the share is added, so the share decides the verdict",
+            ContextPolicy.CheckResult.NEEDS_COMPACT, policy.check(historyOnly + share, window))
+    }
+
+    // [T-ctx-measure-outbound] 比值与它的**来源**出自同一处：source 描述的就是
+    // [ContextSizeMeter.ratioFor] 实际走的那条分支。此前本移植把来源另算一遍
+    // （`scale(model) != 1.0` → own），于是一个「没量过的模型 + 内存里有旧比值」的
+    // 请求会报成 borrowed，比值却是 1.0 —— 日志与判定说的不是同一件事。
+    @Test
+    fun `the measurement source names the branch ratioFor actually took`() {
+        val known = mapOf("gpt-5" to 1.05)
+        assertEquals("own", ContextSizeMeter.ratioSource("gpt-5", known, 1.30))
+        assertEquals(1.05, ContextSizeMeter.ratioFor("gpt-5", known, 1.30), 1e-9)
+        assertEquals("borrowed", ContextSizeMeter.ratioSource("gemini-4", known, 1.05))
+        assertEquals("a borrowed ratio carries the margin — 1.0 would under-read a denser tokenizer",
+            1.05 * ContextSizeMeter.UNCALIBRATED_MODEL_MARGIN,
+            ContextSizeMeter.ratioFor("gemini-4", known, 1.05), 1e-9)
+        assertEquals("default", ContextSizeMeter.ratioSource("gemini-4", known, null))
+        assertEquals(1.0, ContextSizeMeter.ratioFor("gemini-4", known, null), 1e-9)
+        // No model selected at all takes the same two branches.
+        assertEquals("default", ContextSizeMeter.ratioSource(null, emptyMap(), null))
+        assertEquals("borrowed", ContextSizeMeter.ratioSource(null, emptyMap(), 1.4))
+    }
+
+    // [T-ctx-measure-outbound] 消费点一致：测量只在**真的发请求**的那一支被记账，
+    // 而且记账的返回值就是这次请求的 max_tokens 输入。脚本回合（预置工具调用）不发
+    // 请求，所以它既不记账也不改 max_tokens —— 否则一次预置命令会把上一轮请求的
+    // 估算与窗口记录冲掉，溢出归因从此落到错的一轮上。
+    @Test
+    fun `the dispatch record is taken only for a real request, and it sizes max_tokens`() {
+        val loop = chatSrc.substringAfter("suspend fun ChatViewModel.runAgentLoop(")
+        val branchStart = loop.indexOf("val turnChunks: kotlinx.coroutines.flow.Flow<LLMStreamChunk> = if (scriptedTurn != null) {")
+        assertTrue("the scripted branch exists", branchStart > 0)
+        val elseStart = loop.indexOf("} else {", branchStart)
+        val scripted = loop.substring(branchStart, elseStart)
+        val real = loop.substring(elseStart, loop.indexOf("turnChunks.collect { chunk ->", elseStart))
+        assertFalse("a scripted turn makes no request", scripted.contains("recordContextDispatch("))
+        assertFalse("and it must not size a request it never makes", scripted.contains("dynamicMaxTokens("))
+        assertTrue("recorded on the request branch",
+            real.contains("val dispatchInputTokens = recordContextDispatch(outboundHistory, currentProvider.model)"))
+        assertTrue("max_tokens is sized from THIS dispatch's measurement",
+            real.contains("maxTokens = dynamicMaxTokens(currentProvider, dispatchInputTokens),"))
+        // …and the recorder returns the CALIBRATED size: the provider's window is
+        // spent in the provider's own tokens, not in our raw character estimate.
+        assertTrue(chatSrc.contains("lastDispatchPredicted = ContextSizeMeter.calibrated(lastDispatchEstimate, lastDispatchRatio)"))
+        assertTrue(chatSrc.contains("return lastDispatchPredicted"))
+        // The pair is persisted with the keys the reload parses back.
+        val row = """{"latestContextTokens":140000,"estimatedRequestTokens":100000,"estimatedFixedTokens":9000,"calibrationModelId":"gpt-5"}"""
+        val sample = ContextSizeMeter.calibrationSample(row)!!
+        assertEquals(140_000, sample.reported)
+        assertEquals(100_000, sample.estimated)
+        assertEquals(9_000, sample.fixedTokens)
+        assertEquals("gpt-5", sample.modelId)
     }
 
     // [T-ctx-ratio-smoothing] A rise applies at once (under-counting is what

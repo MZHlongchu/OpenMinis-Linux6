@@ -7,6 +7,7 @@ import com.openminis.app.data.db.MessageEntity
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.logging.AppLogger
 import com.openminis.app.provider.ProviderFactory
 import com.openminis.app.service.SessionActivityTracker
 import kotlinx.coroutines.Dispatchers
@@ -507,12 +508,23 @@ internal fun ChatViewModel.loadSession() {
                     .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
             }
             refreshContextUsage()
+            // [T-ctx-measure-outbound] The glow's source was never reset on load,
+            // so it could show the previous state's number (or, after a revert,
+            // the compacted context's). Show the measurement.
+            runCatching { publishMeasuredContextUsage() }
+            pendingRevertLogMarker?.let { marker ->
+                pendingRevertLogMarker = null
+                AppLogger.info(
+                    ChatViewModel.TAG,
+                    "[CtxMeter] reverted marker=$marker measured=${runCatching { measureOutboundContextTokens() }.getOrDefault(-1)}",
+                )
+            }
             // [T-ctx-overflow-attribute-dispatch] 上游在 loadSession 里按本会话的
             // 持久化 usage 行重新播种校准，并清掉上一次派发的记录
             // （ChatViewModel.kt:6504 `seedContextCalibration(chatRepository
             // .sessionTokenUsages(...))`）。放在开门之前：门一开，等在
             // [sessionLoaded] 上的那次发送就会用这条校准比去判断上下文压力。
-            seedContextCalibrationFromUsageRows(chatRepository.sessionTokenUsages(sid))
+            seedContextCalibration(chatRepository.sessionTokenUsages(realSessionId.ifEmpty { sessionId }))
             restoreQueuedPromptsFromDisk(sid) // [T-queue-disk-persistence]
             replaySafeDanglingToolCalls() // [T-recovery-layer]
             // [T-p2-checkpoint-restore-warmup] checkpoint 的磁盘恢复是懒加载：首个

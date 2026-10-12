@@ -256,7 +256,12 @@ class StreamWatchdogAndCancelTest {
 
     private val truncateSrc by lazy { chatSourceWith("fun ChatViewModel.truncateBeforeEdit(messageId: String)") }
     private val checkpointSrc by lazy { chatSourceWith("subList(0, idx + 1)") }
-    private val deleteSrc by lazy { chatSourceWith("val retainedHead = messages.subList(0, index)") }
+    // [T-w2-truncate-kept-copy] deleteFromMessage 的保留头与 truncateBeforeEdit 同批改名：
+    // 截断点由 `index`（编辑到的那一条）变成 `cutFrom`（它所在气泡组的第一条，
+    // [T-android-bubble-anchor-drain]）。定位锚点因此落在**函数声明**上（声明仍然唯一），
+    // 不再钉保留头那一行的变量名 —— 本包 retryLast 也有一个叫 retainedHead 的局部量，
+    // 按行定位会同时命中两个文件，chatSourceWith 的「恰好一个」判定当场变红。
+    private val deleteSrc by lazy { chatSourceWith("fun ChatViewModel.deleteFromMessage(") }
 
     /** 从 [signature] 起括号配平地截出函数体（含首尾花括号）。 */
     private fun functionBody(src: String, signature: String): String {
@@ -287,14 +292,28 @@ class StreamWatchdogAndCancelTest {
         //   2) rewind 检查点截断与 deleteFromMessage 的保留头也必须拷贝
         //      （这两处合并后曾把 subList 活视图直接写进 _messages.value）；
         //   3) 派生 sink 自己不得吐活视图，只做 filterNot / 原样返回。
-        assertTrue(truncateSrc.contains("val kept = messages.subList(0, index).toList()"))
+        // [T-w2-truncate-kept-copy] 截断点这一轮从「编辑到的那一条」变成了「它所在气泡组的
+        // 第一条」（[T-android-bubble-anchor-drain]，上游 1.14 ChatViewModel.kt:8515-8516），
+        // 变量名随之由 `index` 变成 `cutFrom` —— 被守的不变式没有变：**保留头必须是拷贝，
+        // 绝不能是活视图**（活 SubList 写进 `_messages.value` 就是
+        // [T-android-uimessages-sublist-cme] 那条 CME）。这里只对**变量名**容差，
+        // `.toList()` 一个字都不放过：
+        //   会红的情形一：`val kept = messages.subList(0, X)` 少了 `.toList()`（活视图又回来了）；
+        //   会红的情形二：保留头那一行被删掉或改名成别的形状（不再有「保留头」可守）。
+        assertTrue(
+            "truncateBeforeEdit's retained head must be a copy, not a live SubList view",
+            Regex("""val kept = messages\.subList\(0, \w+\)\.toList\(\)""").containsMatchIn(truncateSrc),
+        )
         assertTrue(
             "rewind checkpoints must publish a copy, not a live SubList view",
             checkpointSrc.contains("_messages.value = _messages.value.subList(0, idx + 1).toList()"),
         )
         assertTrue(
             "deleteFromMessage's retained head must be a copy",
-            deleteSrc.contains("val retainedHead = messages.subList(0, index).toList()"),
+            // 与上面同一条不变式：只对**变量名**容差，`.toList()` 一个字都不放过。
+            //   会红的情形：删除路径的保留头少了 `.toList()`（活视图写进 `_messages.value`），
+            //   或这行被删/改名成别的形状。
+            Regex("""val retainedHead = messages\.subList\(0, \w+\)\.toList\(\)""").containsMatchIn(deleteSrc),
         )
         val sinkSrc = chatSourceWith("val uiMessages: StateFlow<List<ChatMessage>> =")
         val sink = sinkSrc.substringAfter("val uiMessages: StateFlow<List<ChatMessage>> =")

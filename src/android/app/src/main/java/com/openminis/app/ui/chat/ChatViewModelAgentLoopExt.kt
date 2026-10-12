@@ -16,6 +16,7 @@ import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.data.ContextSizeMeter
 import com.openminis.app.data.repository.MultiAgentSettings
 import com.openminis.app.i18n.TranslationPrefs
 import com.openminis.app.logging.AppLogger
@@ -517,10 +518,23 @@ internal suspend fun ChatViewModel.runAgentLoop(
         // [T-context-window-live-read] Live read per loop turn — a stale
         // snapshot inside a long-running agent turn is exactly the iOS
         // fcc22b66 item-3 bug.
+        // [T-ctx-measure-outbound] System prompt + tool schemas ride on every
+        // request; measure them for this iteration (the helper wrap-up path
+        // drops the tools) so the guards and the calibration pair see the
+        // real fixed share. 上游 1.14 ChatViewModel.kt:10912-10915；合并时
+        // 这一行丢了，于是 contextFixedTokens 永远停在「发送时那一次」的估算上，
+        // 收尾回合把工具表撤掉之后它仍然按有工具的份额计账。
+        contextFixedTokens = ContextSizeMeter.estimateFixedTokens(
+            loopSystemPrompt,
+            if (helperWrapUpInjected) emptyList() else agentTools,
+        )
         effectiveContextWindowTokens()?.takeIf { it > 0 }?.let { window ->
             offloadContextIfNeeded(
                 contextWindow = window,
-                lastContextTokens = lastContextTokens,
+                // [T-ctx-measure-outbound] Not `lastContextTokens`: after an
+                // in-loop compaction that still describes the old request.
+                // （上游 ChatViewModel.kt:10921 同一处。）
+                lastContextTokens = measureOutboundContextTokens(),
             )
         }
 
@@ -766,7 +780,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
         // log it at turn-end alongside the empty-turn warning.
         var turnFinishReason: String? = null
         var lastUsage: LLMUsage? = null
-        val maxTokens = dynamicMaxTokens(provider, lastContextTokens)
+            // [T-merge-upstream-1-14] 旧的动态上限口径已废弃：请求用 :914 的 dispatchMaxTokens（派发测量值）。这条死代码删掉，避免后来者误当作生效口径。
         val toolCalls = mutableListOf<Triple<String, String, JSONObject>>() // id, name, args
         // [T-android-gemini3-thoughtsig / #179] toolCallId -> Gemini 3.x
         // thoughtSignature for this turn's calls (null for other providers).
@@ -841,93 +855,137 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     break
                 }
                 val requestGoalPrompt = requestGoalState?.let(goalManager::continuationPrompt)
-                val requestHistory = com.openminis.app.goal.withGoalContext(
-                    effectiveAgentHistory(),
-                    requestGoalPrompt,
-                    appendNewUser = goalExecutionRun && turn == 0,
-                ).let { history ->
-                    // [T-stall-resume] A previous attempt stalled mid-stream:
-                    // append the bounded continuation note so this attempt picks
-                    // up where it stopped instead of regenerating the same text.
-                    val resumeNote = stallResumeContext
-                    if (resumeNote == null) history else history + LLMMessage(
-                        role = LLMMessage.Role.USER,
-                        content = resumeNote,
-                        contentParts = listOf(
-                            com.openminis.app.data.model.AgentContentPart.Text(resumeNote),
-                        ),
-                    )
-                }
-                // [T-ctx-overflow-attribute-dispatch] 记录这次请求要发给谁：真正收到
-                // 它的模型与它的窗口。上游在同一位置调用（ChatViewModel.kt:11292
-                // `recordContextDispatch(outboundHistory, currentProvider.model)`），
-                // 溢出归因读的就是这条记录 —— 少了它，1M 的备用模型一旦接手，
-                // 128K 那次拒绝会被按 1M 的窗口评分，真正溢出的模型永远不被校正。
-                // [T-ctx-measure-outbound] 派发测量值同时决定这次请求的 max_tokens。
-                // 上游 1.14 把它记成 `dispatchInputTokens`（ChatViewModel.kt:11292 记账 +
-                // 11300 用它算 max_tokens）；本移植此前只把这条记录用于溢出归因，
-                // max_tokens 却仍读上一轮报回来的 `lastContextTokens` —— 压缩或换模型之后
-                // 那个数字描述的是**上一个**请求，于是留给回复的预算按旧上下文算。
-                val dispatchInputTokens = recordOutboundDispatch(requestHistory)
-                // 与上游同一处：守卫判定之后、请求发出之前算这一次的 max_tokens，
-                // 用的是这次派发的测量值本身。
-                val dispatchMaxTokens = dynamicMaxTokens(currentProvider, dispatchInputTokens)
-                // [T-first-event-watchdog] A hung relay below the provider
-                // never throws — the stream below will cancel itself and surface
-                // a TransientError, letting the existing retry chain take over.
-                val baseFirstEventTimeoutMs = if ((if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF).isEnabled) 90_000L else 45_000L
-                // [T-stream-watchdog-budget-parity / #188] Phase 1 shares the
-                // provider's own pre-first-chunk budget when it declares one
-                // (OpenAI: 120s upload cap + 120s TTFB). The flat 45s/90s window
-                // used to fire first on every OpenAI path, so the provider's
-                // internal 120s TTFB — raised for slow relays — and its separate
-                // upload budget could never take effect.
-                val firstEventTimeoutMs = currentProvider.streamFirstEventBudgetMs(baseFirstEventTimeoutMs)
-                // [T-stream-stall-watchdog] Phase 2: once the stream is alive,
-                // silence longer than twice the first-event budget means
-                // progress stopped, not that it is slow to start. Derived from
-                // the existing constant so there is no second number to tune
-                // per vendor, and it replaces a 600s transport read timeout as
-                // the only bound on a mid-stream stall. Deliberately keyed on the
-                // BASE budget, not on the provider-widened phase 1: after the
-                // first chunk the connect budget is irrelevant and a stall must
-                // keep surfacing at 90s/180s.
-                val streamIdleTimeoutMs = baseFirstEventTimeoutMs * 2
+                // [T-scheduled-tool-prefill] A prefilled turn streams the
+                // calls that were decided ahead of time instead of asking the
+                // provider. Everything downstream of `collect` is the same code a
+                // model-emitted call runs through: the tool card, dispatch,
+                // persistence as tool_use + tool_result rows, agentHistory — so
+                // the prefilled command really RUNS and the model's next request
+                // already carries its output. The request-side bookkeeping below
+                // (persona reminder, context meter, payload audit) describes a
+                // request that is not made, so it is skipped. Consumed here, on
+                // the first attempt, so a retry of this turn could never replay it
+                // (the scripted stream cannot fail).
+                // 上游 1.14 ChatViewModel.kt:11248-11265；合并时这一支整个丢了，
+                // 于是 pendingScriptedTurn 被赋值却从来没人读，预置命令永远不执行。
+                val scriptedTurn = pendingScriptedTurn?.takeUnless { helperWrapUpInjected }
+                pendingScriptedTurn = null
                 // [T-switch-model-retry-counter-reset] 首个 chunk 是「这次请求真的在产出」
                 // 的唯一信号。上游 1.14 ChatViewModel.kt:11227 在本回合内声明它，由下面的
                 // collector 翻转；合并时这个钩子整个丢了。
                 val firstChunkSeen = java.util.concurrent.atomic.AtomicBoolean(false)
-                // [T-android-seam-extraction] 片段三：流入口走接缝一（ProviderStreamClient）
-                // ——循环体自此不直接攥 provider 对象；请求形状搬运即适配。
-                com.openminis.app.provider.LlmProviderStreamClient(currentProvider).streamRound(
-                    HarnessRoundRequest(
-                        // [T-android-payload-size-audit] (上游 1.14
-                        // ChatViewModel.kt:11300-11307) 字节侧交叉校验放在**最外层**：
-                        // 它必须看到的正是即将离开设备的那份历史，所以套在图片预算
-                        // 之外（审计 → 预算 → 历史）。纯诊断，见
-                        // ChatViewModelImageBudgetExt.auditOutgoingPayload。
-                        messages = auditOutgoingPayload(applyRequestImageBudget(requestHistory)),
-                        // [T-android-switch-model-next-request] 循环的 prompt，不是
-                        // 发送时那一份：中途换模型后它会按新 provider 重算 OAuth 前缀
-                        // （上游 1.14 ChatViewModel.kt:11308 同一处）。
-                        systemPrompt = loopSystemPrompt,
-                        maxTokens = dispatchMaxTokens,
-                        temperature = samplingTemperature(_activeEntryId.value),
-                        // [T-agent-wrapup-turn] 上游 1.14 ChatViewModel.kt:10914：
-                        // 收尾回合把工具表收走——没有工具可调的模型只能给文本，
-                        // 而父级收到的正是这段文本。
-                        tools = if (helperWrapUpInjected) emptyList() else agentTools,
-                        // [T-switch-model-thinking-gate] Gate on the provider that
-                        // serves THIS turn. selectEntry swaps the class-level
-                        // currentModel mid-turn while the turn keeps its local
-                        // provider, so reading the class-level model would send the
-                        // NEW model's reasoning decision to the OLD model.
-                        // （上游 1.14 ChatViewModel.kt:11310-11315；合并时这里退回了
-                        // 读类级 currentModelSupportsReasoning。）
-                        thinkingLevel = if (currentProvider.model.supportsReasoning == true) _thinkingLevel.value else ThinkingLevel.OFF,
-                        systemStablePrefixLen = systemPromptStablePrefixLen,
-                    ),
-                ).streamStallWatchdog(firstEventTimeoutMs, streamIdleTimeoutMs).collect { chunk ->
+                val turnChunks: kotlinx.coroutines.flow.Flow<LLMStreamChunk> = if (scriptedTurn != null) {
+                    AppLogger.info(
+                        ChatViewModel.TAG_STREAM,
+                        "[ScheduledPrefill] turn=$turn streaming ${scriptedTurn.calls.size} prefilled tool call(s) " +
+                            "[${scriptedTurn.calls.joinToString { it.toolName + ":" + it.id }}] in place of a model request",
+                    )
+                    kotlinx.coroutines.flow.flowOf(*scriptedTurn.asStreamChunks().toTypedArray())
+                } else {
+                    // Route through effectiveAgentHistory() so a populated
+                    // [_compactSummary] is injected as a `<context-summary>` part
+                    // on the first surviving user turn (v1/detached markers use a
+                    // standalone user message instead). Falls through to the raw
+                    // agentHistory when no compact has happened, so the common path
+                    // stays zero-copy.
+                    // [T-longctx-persona-reminder-cachebreak] Past ~100k tokens,
+                    // remind the model that the user's SOUL.md / GLOBAL.md rules at
+                    // the head of the system prompt still apply (issue #37).
+                    // 上游 1.14 ChatViewModel.kt:11285-11287 同一处：它 APPEND 成自己的
+                    // 一条 USER 消息（早期字节不动，缓存前缀照样命中）。
+                    if (personaReminderIsDue(lastContextTokens)) {
+                        appendPersonaReminderToHistory(lastContextTokens)
+                    }
+                    val requestHistory = com.openminis.app.goal.withGoalContext(
+                        effectiveAgentHistory(),
+                        requestGoalPrompt,
+                        appendNewUser = goalExecutionRun && turn == 0,
+                    ).let { history ->
+                        // [T-stall-resume] A previous attempt stalled mid-stream:
+                        // append the bounded continuation note so this attempt picks
+                        // up where it stopped instead of regenerating the same text.
+                        val resumeNote = stallResumeContext
+                        if (resumeNote == null) history else history + LLMMessage(
+                            role = LLMMessage.Role.USER,
+                            content = resumeNote,
+                            contentParts = listOf(
+                                com.openminis.app.data.model.AgentContentPart.Text(resumeNote),
+                            ),
+                        )
+                    }
+                    // [T-ctx-measure-outbound] 上游把「这次要发出的历史」叫
+                    // outboundHistory（ChatViewModel.kt:11291）并直接拿它记账；本移植的
+                    // 那份历史在循环里就叫 requestHistory（goal 上下文与 stall 续写都在
+                    // 这里拼好，`auditOutgoingPayload(applyRequestImageBudget(requestHistory))`
+                    // 一直读的也是它）。这里按上游的名字取一次**别名**，于是记账那一行与
+                    // 上游逐字一致（`recordContextDispatch(outboundHistory, currentProvider.model)`），
+                    // 而 requestHistory 仍然是预算/审计真正吃到的那份 —— 两个名字指同一个
+                    // List，没有任何拷贝。
+                    val outboundHistory = requestHistory
+                    // [T-ctx-overflow-attribute-dispatch] 记录这次请求要发给谁：真正收到
+                    // 它的模型与它的窗口。上游在同一位置调用（ChatViewModel.kt:11292
+                    // `recordContextDispatch(outboundHistory, currentProvider.model)`），
+                    // 溢出归因读的就是这条记录 —— 少了它，1M 的备用模型一旦接手，
+                    // 128K 那次拒绝会被按 1M 的窗口评分，真正溢出的模型永远不被校正。
+                    // [T-ctx-measure-outbound] 派发测量值同时决定这次请求的 max_tokens
+                    // （上游 ChatViewModel.kt:11292 记账 + 11308 用它算 max_tokens）。
+                    val dispatchInputTokens = recordContextDispatch(outboundHistory, currentProvider.model)
+                    logContextDispatch(dispatchInputTokens, dynamicMaxTokens(currentProvider, dispatchInputTokens))
+                    // [T-first-event-watchdog] A hung relay below the provider
+                    // never throws — the stream below will cancel itself and surface
+                    // a TransientError, letting the existing retry chain take over.
+                    val baseFirstEventTimeoutMs = if ((if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF).isEnabled) 90_000L else 45_000L
+                    // [T-stream-watchdog-budget-parity / #188] Phase 1 shares the
+                    // provider's own pre-first-chunk budget when it declares one
+                    // (OpenAI: 120s upload cap + 120s TTFB). The flat 45s/90s window
+                    // used to fire first on every OpenAI path, so the provider's
+                    // internal 120s TTFB — raised for slow relays — and its separate
+                    // upload budget could never take effect.
+                    val firstEventTimeoutMs = currentProvider.streamFirstEventBudgetMs(baseFirstEventTimeoutMs)
+                    // [T-stream-stall-watchdog] Phase 2: once the stream is alive,
+                    // silence longer than twice the first-event budget means
+                    // progress stopped, not that it is slow to start. Derived from
+                    // the existing constant so there is no second number to tune
+                    // per vendor, and it replaces a 600s transport read timeout as
+                    // the only bound on a mid-stream stall. Deliberately keyed on the
+                    // BASE budget, not on the provider-widened phase 1: after the
+                    // first chunk the connect budget is irrelevant and a stall must
+                    // keep surfacing at 90s/180s.
+                    val streamIdleTimeoutMs = baseFirstEventTimeoutMs * 2
+                    // [T-android-seam-extraction] 片段三：流入口走接缝一（ProviderStreamClient）
+                    // ——循环体自此不直接攥 provider 对象；请求形状搬运即适配。脚本回合不经过
+                    // provider，也就不需要看门狗（它在内存里同步产出，卡不住）。
+                    com.openminis.app.provider.LlmProviderStreamClient(currentProvider).streamRound(
+                        HarnessRoundRequest(
+                            // [T-android-payload-size-audit] (上游 1.14
+                            // ChatViewModel.kt:11300-11307) 字节侧交叉校验放在**最外层**：
+                            // 它必须看到的正是即将离开设备的那份历史，所以套在图片预算
+                            // 之外（审计 → 预算 → 历史）。纯诊断，见
+                            // ChatViewModelImageBudgetExt.auditOutgoingPayload。
+                            messages = auditOutgoingPayload(applyRequestImageBudget(requestHistory)),
+                            // [T-android-switch-model-next-request] 循环的 prompt，不是
+                            // 发送时那一份：中途换模型后它会按新 provider 重算 OAuth 前缀
+                            // （上游 1.14 ChatViewModel.kt:11308 同一处）。
+                            systemPrompt = loopSystemPrompt,
+                            maxTokens = dynamicMaxTokens(currentProvider, dispatchInputTokens),
+                            temperature = samplingTemperature(_activeEntryId.value),
+                            // [T-agent-wrapup-turn] 上游 1.14 ChatViewModel.kt:10914：
+                            // 收尾回合把工具表收走——没有工具可调的模型只能给文本，
+                            // 而父级收到的正是这段文本。
+                            tools = if (helperWrapUpInjected) emptyList() else agentTools,
+                            // [T-switch-model-thinking-gate] Gate on the provider that
+                            // serves THIS turn. selectEntry swaps the class-level
+                            // currentModel mid-turn while the turn keeps its local
+                            // provider, so reading the class-level model would send the
+                            // NEW model's reasoning decision to the OLD model.
+                            // （上游 1.14 ChatViewModel.kt:11310-11315；合并时这里退回了
+                            // 读类级 currentModelSupportsReasoning。）
+                            thinkingLevel = if (currentProvider.model.supportsReasoning == true) _thinkingLevel.value else ThinkingLevel.OFF,
+                            systemStablePrefixLen = systemPromptStablePrefixLen,
+                        ),
+                    ).streamStallWatchdog(firstEventTimeoutMs, streamIdleTimeoutMs)
+                }
+                turnChunks.collect { chunk ->
             // [T-stream-trace-live] 运行时轨迹录制（日志页开关控制，默认关）。
             com.openminis.app.provider.StreamTraceRecorder.record(chunk)
             // [T-switch-model-retry-counter-reset] The retried attempt is
@@ -2426,7 +2484,16 @@ internal suspend fun ChatViewModel.runAgentLoop(
             // Loop-detector check BEFORE execution. CRITICAL outcomes short-circuit
             // the call: synthesize an error result so the tool_use/tool_result pair
             // stays balanced and the LLM sees the block reason.
-            val precheck = toolLoopDetector.check(name, paramsMap)
+            // [T-scheduled-tool-prefill] A prefilled call is the scheduler repeating
+            // a fixed command on purpose (the same command every day is the point),
+            // not the model looping. Exempt it from the pre-check so a long-lived
+            // follow-up session cannot trip the same-args threshold on it.
+            // （上游 1.14 ChatViewModel.kt:12602-12611 同一处。）
+            val precheck = if (com.openminis.app.scheduled.ScriptedToolTurn.isScriptedId(id)) {
+                com.openminis.app.harness.agent.LoopCheckResult.NONE
+            } else {
+                toolLoopDetector.check(name, paramsMap)
+            }
             if (precheck.level == Level.CRITICAL) {
                 val blockedMsg = precheck.message ?: "[LOOP BLOCKED] tool execution blocked"
                 android.util.Log.w("ToolChain[VM]",

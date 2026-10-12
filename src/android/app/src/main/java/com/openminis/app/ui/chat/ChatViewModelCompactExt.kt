@@ -185,6 +185,10 @@ private inline fun ChatViewModel.compactAllImpl(
         // Distinguishes "we gave up on time" from other failures so the
         // user-facing message can say so and invite a retry.
         var timedOut = false
+        // [T-ctx-measure-outbound] 压缩前后的测量值成对进 [CtxMeter] 日志（上游
+        // ChatViewModel.kt:3601 取 before、:3997 打 after）：只报 after 的话，
+        // 「这次压缩到底压小了多少」在复盘时看不出来。
+        val compactMeasuredBefore = runCatching { measureOutboundContextTokens() }.getOrDefault(-1)
         try {
             val existing = _compactSummary.value
             val summary = runTwoShotCompact(
@@ -411,7 +415,7 @@ private inline fun ChatViewModel.compactAllImpl(
             // 压缩前的 80%+，看起来压缩没生效。上游 ChatViewModel.kt:3990-3998 原文；
             // 具体两步在 ChatViewModel.onCompactionFinished（本文件是扩展函数，读不到
             // 那边的 private 成员——可见性降级只是拆文件的后果，顺序语义不变）。
-            onCompactionFinished(compactSucceeded)
+            onCompactionFinished(compactSucceeded, compactMeasuredBefore)
             // [T-android-auto-compact-inloop] Signal the awaiting in-loop
             // caller. In `finally` so a thrown/cancelled compaction can
             // never strand the agent loop waiting on a callback.

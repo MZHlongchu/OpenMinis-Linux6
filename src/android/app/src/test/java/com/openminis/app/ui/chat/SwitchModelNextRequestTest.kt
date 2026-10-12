@@ -116,7 +116,9 @@ class SwitchModelNextRequestTest {
     @Test
     fun `calibration and overflow are scored against the model the request went to`() {
         assertTrue(vm.contains("recordContextDispatch(outboundHistory, currentProvider.model)"))
-        val calibrate = vm.substringAfter("private fun calibrateContextSize(").substringBefore("private fun noteContextOverflow(")
+        // [T-ctx-measure-outbound-scan-scope] 函数体锚点跟着可见性走：循环是扩展函数，
+        // 这两个成员因此是 internal（上游是 private）。截取范围与断言不变。
+        val calibrate = vm.substringAfter("internal fun calibrateContextSize(").substringBefore("private fun noteContextOverflow(")
         assertTrue(calibrate.contains("val model = lastDispatchModel?.id ?: currentModel?.id"))
         val overflow = vm.substringAfter("private fun noteContextOverflow(").substringBefore("private fun seedContextCalibration(")
         assertTrue(overflow.contains("val model = lastDispatchModel?.id ?: currentModel?.id"))

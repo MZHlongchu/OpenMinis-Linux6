@@ -237,4 +237,55 @@ class TitleCandidatesTest {
         assertTrue(list.contains("PrimarySource.parse(session.modelBinding)"))
         assertTrue(list.contains("com.openminis.app.ui.chat.TitleCandidates.walk(candidates, origin = origin)"))
     }
+
+    // [T-r2-titlegen-temperature-null] 自动标题那条路必须和上游、以及手动 Regenerate
+    // 一样**不带** temperature 发请求 —— [T-android-titlegen-temperature]：gpt-5.x 系
+    // 只接受 temperature=1（等于省略该字段），带上候选自己的 override 会 400，那个候选
+    // 就在 walk 里被烧掉、静默失去位置（SessionListViewModel 那半边在合并时按上游改回来
+    // 了，`SessionListViewModel.kt:1026-1031`）。
+    //
+    // 上游 1.14 `ChatViewModel.kt:16085` 就是 `temperature = null,`（原注释：Mirror iOS
+    // AIChatViewModel.swift:11244 —— pass null so gpt-5.x family doesn't reject the
+    // request）。本移植的 ask()（`ChatViewModelTitleExt.kt:204-236`）在取值那一行
+    // （`:224`）一度写成 `titleTemperature()`，等于把这条审计修复连同它的 [T-xxx] 标注
+    // 一起覆盖掉了。下面按 file:line 钉住取值、位置、标注三件事。
+    @Test
+    fun `the auto title request never carries a temperature`() {
+        val ext = ProductionSources.read("ui/chat/ChatViewModelTitleExt.kt")
+        val askStart = "suspend fun ask(provider: LLMProvider): TitleGenResult? {"
+        val askEnd = "val parsed: TitleGenResult? ="
+        // 锚点缺失时 substringAfter 会退化成「整份文件」，断言就变成恒真 —— 先钉锚点。
+        assertTrue("ask() anchor missing (window would be vacuous)", ext.contains(askStart))
+        assertTrue("ask() end anchor missing", ext.contains(askEnd))
+        val ask = ext.substringAfter(askStart).substringBefore(askEnd)
+
+        assertTrue("ask() must build the one title request", ask.contains("provider.sendMessage("))
+        val req = ask.substringAfter("provider.sendMessage(")
+        val iMax = req.indexOf("maxTokens = titleMaxTokens,")
+        val iTemp = req.indexOf("temperature = null,")
+        val iThink = req.indexOf("thinkingLevel = ThinkingLevel.OFF,")
+        assertTrue(
+            "the title request must pass temperature = null inside its argument list " +
+                "(upstream 1.14 ChatViewModel.kt:16085) — maxTokens@$iMax temperature@$iTemp thinkingLevel@$iThink",
+            iMax >= 0 && iTemp > iMax && iThink > iTemp,
+        )
+        assertTrue(
+            "the [T-android-titlegen-temperature] audit tag must stay on the call site",
+            ask.contains("[T-android-titlegen-temperature]"),
+        )
+        assertTrue(
+            "a candidate's own override must never reach the title request",
+            !ask.contains("titleTemperature()"),
+        )
+
+        // 手动 Regenerate 是同一条审计修复的另一半：两条路取值不许漂移。
+        val list = ProductionSources.read("ui/sessions/SessionListViewModel.kt")
+        val regenStart = "com.openminis.app.ui.chat.TitleCandidates.walk(candidates, origin = origin)"
+        assertTrue("regenerate walk anchor missing", list.contains(regenStart))
+        val regen = list.substringAfter(regenStart).substringBefore("thinkingLevel = ThinkingLevel.OFF")
+        assertTrue(
+            "the regenerate path must keep temperature = null too",
+            regen.contains("temperature = null,"),
+        )
+    }
 }

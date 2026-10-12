@@ -1,7 +1,7 @@
 package com.openminis.app.ui.chat
 
+import com.openminis.app.ProductionSources
 import com.openminis.app.data.ContextSizeMeter
-import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -29,11 +29,17 @@ import org.junit.Test
  */
 class ContextReviewFollowupParityTest {
 
-    private val vm: String by lazy {
-        val f = File("src/main/java/com/openminis/app/ui/chat/ChatViewModel.kt")
-        assertTrue("missing ${f.absolutePath}", f.exists())
-        f.readText()
-    }
+    /**
+     * [T-ctx-measure-outbound-scan-scope] 上游那版 ChatViewModel 是单文件，直接读
+     * `ChatViewModel.kt` 就够。本移植把它拆成了 `ChatViewModel.kt` + 一批
+     * `ChatViewModel*Ext.kt`，而本用例要断言的「循环真的把派发记到了这条线上」那句
+     * （`recordContextDispatch(outboundHistory, currentProvider.model)`）住在循环
+     * 所在的 Ext 文件里——只读主文件会把「这条线还在不在」判成不存在。扫描面换成
+     * 「这个类的全部片段」（[ProductionSources.readClassSurface]，本仓库拆类守卫的
+     * 既有约定）；断言本身一条没动。锚点跟着可见性走：循环是扩展函数，所以
+     * `recordContextDispatch` / `calibrateContextSize` 按本移植的跨文件惯例是 internal。
+     */
+    private val vm: String by lazy { ProductionSources.readClassSurface("ui/chat/ChatViewModel.kt") }
 
     // ── [1] warm-up trim cache ────────────────────────────────────────────
 
@@ -137,12 +143,14 @@ class ContextReviewFollowupParityTest {
 
     @Test
     fun `source - dispatch records the model and window, overflow prefers them, a new session clears them`() {
-        val record = vm.substringAfter("private fun recordContextDispatch(").substringBefore("private fun calibrateContextSize(")
+        // [T-ctx-measure-outbound-scan-scope] 函数体锚点跟着可见性走：循环是扩展函数，
+        // 这两个成员因此是 internal（上游是 private）。截取范围与断言不变。
+        val record = vm.substringAfter("internal fun recordContextDispatch(").substringBefore("internal fun calibrateContextSize(")
         assertTrue(record.contains("lastDispatchModel = model"))
         assertTrue(record.contains("lastDispatchWindow = resolvedContextWindow(model)?.first ?: 0"))
         assertTrue("the loop records the model that serves the request",
             vm.contains("recordContextDispatch(outboundHistory, currentProvider.model)"))
-        val overflow = vm.substringAfter("private fun noteContextOverflow(").substringBefore("private fun seedContextCalibration(")
+        val overflow = vm.substringAfter("private fun noteContextOverflow(").substringBefore("internal fun seedContextCalibration(")
         assertTrue(overflow.contains("val model = lastDispatchModel?.id ?: currentModel?.id"))
         assertTrue(overflow.contains("val window = lastDispatchWindow.takeIf { lastDispatchModel != null && it > 0 }"))
         assertTrue("a new session's calibration seed clears the dispatch record",

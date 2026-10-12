@@ -47,6 +47,12 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
                 systemPrompt = systemPrompt,
                 fallbackProviders = fallbackProviders,
                 fallbackStrategy = fallbackStrategy,
+                // [T-scheduled-tool-prefill] A queued scheduled prompt keeps
+                // its prefilled calls: they run as this loop's first turn.
+                // Upstream 1.14 ChatViewModel.kt:8928-8942 同一处；合并时
+                // 只留下了批处理规则，drain 这一侧没有把 prefill 交回来，
+                // 于是排队过的预置命令永远不执行。
+                prefill = queued.flatMap { it.prefill },
             )
             }
         } catch (e: CancellationException) {

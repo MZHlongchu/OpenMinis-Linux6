@@ -16,6 +16,11 @@ internal fun ChatViewModel.checkContextBeforeSend(): PreSendContextAction {
     // [T-ctx-measure-outbound] 判**即将发出**的那个请求，不是上一轮 provider 报回来的
     // 数：一次 /compact 或一次回退之后，那个数描述的是一个已经不存在的上下文。上游
     // 1.14 `ChatViewModel.kt:5395-5445`。
+    // 先播下这次请求的固定份额（system prompt + 工具表）：这条判断跑在循环之前，而
+    // 循环要到第一次请求才量 prompt —— 少了它这里判的只是历史，量出来的数偏小，
+    // 判定会说「没事」而请求出门撞天花板（上游 :5399 就是这一行的
+    // `ensureContextFixedTokens`，一字未改地搬到本移植）。
+    ensureContextFixedTokens()
     val m = contextMeasurement()
     val tokens = m.measured
     if (tokens <= 0) return PreSendContextAction.PROCEED

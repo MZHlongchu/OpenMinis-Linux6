@@ -404,6 +404,11 @@ object ScheduledAgentRunner {
                     parentSessionId = parentSid, parentToolUseId = "", jobId = job.id,
                     maxTurns = com.openminis.app.agent.jobs.HelperRunner.MAX_TURNS, title = title, tierUsed = resolution.tierUsed,
                 )
+                // [T-w1-pool-ownership] 借父会话的池子走的是 adopt（而不是绕过它去
+                // 直连 VM 的 `_browserTabPoolRef` 那个私有池引用）：子 VM 的
+                // `browserTabPool` 从此读到的就是父会话这一份，页面与登录态共享；
+                // 并且**只借不拥有**——子会话被淘汰（ViewModelStore.clear →
+                // onCleared）时不得 dispose 它（[T-w1-pool-ownership] 自建标记）。
                 it.adoptBrowserTabPool(parentVm.browserTabPool)
                 // [T-sub-agents-steer] 上游 1.14 ChatViewModel.kt:13428-13429 的接线，
                 // 合并时丢了：纠偏 hook 与 missed 排空都必须挂在这个 job 上——hook 让

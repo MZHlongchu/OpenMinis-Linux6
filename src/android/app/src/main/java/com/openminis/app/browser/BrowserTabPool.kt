@@ -215,7 +215,14 @@ class BrowserTabPool(private val context: Context) : BrowserTabPoolRegistry.Regi
         tabLocks.remove(tab.id)
     }
 
-    /** Permanent owner teardown. Do not use for merely hiding a browser sheet. */
+    /**
+     * Permanent owner teardown. Do not use for merely hiding a browser sheet.
+     *
+     * [T-w1-pool-ownership] **只有创建者能调**：一个池子可以经
+     * `ChatViewModel.adoptBrowserTabPool` 借给 helper 子会话共用（同一个 WebView 池，
+     * 共享页面与登录态），借入方被淘汰时若调这里，父会话正在用的标签会被一起拆掉
+     * （见 ChatViewModel.onCleared / clearChat 的自建标记）。
+     */
     fun dispose() {
         if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
             android.os.Handler(android.os.Looper.getMainLooper()).post { dispose() }

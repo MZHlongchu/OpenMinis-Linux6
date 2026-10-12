@@ -18,7 +18,16 @@ import org.junit.Test
  */
 class ScheduledPrefillWiringTest {
 
-    private val vm by lazy { ProductionSources.read("ui/chat/ChatViewModel.kt") }
+    /**
+     * [T-a7-vm-split] 上游那版 ChatViewModel 是**单文件**，所以守卫
+     * `ProductionSources.read("ui/chat/ChatViewModel.kt")` 就够。本移植把它拆成了
+     * `ChatViewModel.kt` + 一批 `ChatViewModel*Ext.kt`（循环、发车、队列各在一处），
+     * 只读主文件会把「这条线还在不在」判成不存在。因此扫描面换成「这个类的全部片段」
+     * （[ProductionSources.readClassSurface]，本仓库拆类守卫的既有约定）——
+     * （[ProductionSources.readClassSurface]，本仓库拆类守卫的既有约定）——
+     * **断言本身一条没动**，变的只是去哪个文件里找。
+     */
+    private val vm by lazy { ProductionSources.readClassSurface("ui/chat/ChatViewModel.kt") }
 
     @Test
     fun `the runner stamps the envelope and passes the prefill to every prompting target`() {
@@ -42,7 +51,10 @@ class ScheduledPrefillWiringTest {
         assertTrue(vm.contains("QueuedPromptOrigin.USER, prefill)"))
         assertTrue(vm.contains("prefill = queued.flatMap { it.prefill },"))
         // Mid-loop injection re-arms the one-shot for the next turn.
-        assertTrue(vm.contains("return InjectedTurn(newAssistantId, queued.flatMap { it.prefill })"))
+        // [T-a7-vm-split] `InjectedTurn` 是 ChatViewModel 的嵌套类型，本移植的注入点
+        // 在扩展文件里，构造时写全限定名（`ChatViewModel.InjectedTurn`）——同一个
+        // 构造、同一对实参，只是多了外层类名。
+        assertTrue(vm.contains("return ChatViewModel.InjectedTurn(newAssistantId, queued.flatMap { it.prefill })"))
         assertTrue(vm.contains("scriptedTurnFor(handled.prefill)?.let { pendingScriptedTurn = it }"))
         // Auto-compact before send parks it with the text and sends it after.
         assertTrue(vm.contains("pendingSendPrefill = prefill"))
@@ -61,8 +73,11 @@ class ScheduledPrefillWiringTest {
         assertTrue(branch.contains("scriptedTurn.asStreamChunks()"))
         // The provider request, and its request-side bookkeeping, only happen
         // on the non-scripted branch.
+        // [T-a7-vm-split] 上游直接调 `currentProvider.streamMessage(`；本移植的循环
+        // 走接缝一（ProviderStreamClient）——同一个「请求就从这里发出」的位置，锚点
+        // 跟着换成 `.streamRound(`（意图与其余断言一字未动）。
         val elseBranch = branch.substringAfter("} else {")
-        assertTrue(elseBranch.contains("currentProvider.streamMessage("))
+        assertTrue(elseBranch.contains(".streamRound("))
         assertTrue(elseBranch.contains("recordContextDispatch(outboundHistory, currentProvider.model)"))
         assertTrue(elseBranch.contains("appendPersonaReminderToHistory(lastContextTokens)"))
     }
@@ -73,7 +88,14 @@ class ScheduledPrefillWiringTest {
         // through the same tool card, dispatch and persistence code a model
         // call does. A second collector would be a second code path.
         assertEquals(1, Regex("""turnChunks\.collect \{ chunk ->""").findAll(vm).count())
-        assertEquals(0, Regex("""\)\.collect \{ chunk ->""").findAll(vm.substringAfter("private suspend fun runAgentLoop(").substringBefore("private suspend fun executeTool(")).count())
+        // [T-a7-vm-split] 上游两处都是类内成员，所以「从 runAgentLoop 起到 executeTool
+        // 前」正好是循环体。本移植把两者拆成扩展函数、各在自己的 Ext 文件里（而且
+        // 循环体与工具执行不再相邻），于是扫描面改成**循环所在的那个文件**里
+        // runAgentLoop 之后的全部内容 —— 同样是「循环这一侧不许有第二个 collector」，
+        // 断言（0 处 `).collect { chunk ->`）一字未动。
+        val loopSide = ProductionSources.read("ui/chat/ChatViewModelAgentLoopExt.kt")
+            .substringAfter("suspend fun ChatViewModel.runAgentLoop(")
+        assertEquals(0, Regex("""\)\.collect \{ chunk ->""").findAll(loopSide).count())
     }
 
     @Test
