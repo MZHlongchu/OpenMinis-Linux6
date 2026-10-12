@@ -239,7 +239,7 @@ internal fun ChatViewModel.sendMessage(
         // `ensureSession()`（会话行）、`chatRepository.appendMessage`（落库）
         // 和 `_messages.value`（上屏）之前。
         if (!sessionLoaded.value && !com.openminis.app.crash.CrashFrequencyDetector.isSafeMode()) {
-            AppLogger.info(ChatViewModel.TAG_STREAM, "send waiting for session load (sid=${this@ChatViewModel.activeSessionId})")
+            AppLogger.info(ChatViewModel.TAG_STREAM, "send waiting for session load (sid=${activeSessionId})")
             sessionLoaded.first { it }
         }        // [T-delete-from-here-inflight] 「从此处删除」的 DB 截断是异步的，而它
         // 的 deleteMessagesAfter 按 `sort_order >= cutoff` 删行：本函数此前会在这

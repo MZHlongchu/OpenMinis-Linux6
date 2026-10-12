@@ -27,7 +27,9 @@ import org.junit.Test
  * snapshot is an oracle for its own side. Unifying them is a deliberate behaviour change
  * and belongs in its own commit.
  *
- * [T-gemini-25-family-ladder] RE-BASELINED ROWS — the `gemini-2.5-flash/*` block only.
+ * [T-gemini-25-family-ladder] RE-BASELINED ROWS — the `gemini-2.5-flash` family only.
+ * （[T-r2-comment-nesting] 原文把这一族写成带通配符的路径，`斜杠加星号` 会被 Kotlin 的
+ * 嵌套块注释当成注释开头，把整个 KDoc 撕开、测试源集编译不过；改成家族名，判据不变。）
  * The [T-thinking-ladder-shared] refactor had given Pro and Flash ONE shared
  * 32 768-scaled fallback ladder, so the two families emitted byte-identical budgets and
  * the snapshot recorded that equality. That is the regression `GeminiThinkingBranchTest`

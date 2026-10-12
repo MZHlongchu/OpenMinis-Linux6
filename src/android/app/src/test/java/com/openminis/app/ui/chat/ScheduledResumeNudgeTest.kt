@@ -12,7 +12,14 @@ import org.junit.Test
  */
 class ScheduledResumeNudgeTest {
 
-    private val vm by lazy { ProductionSources.read("ui/chat/ChatViewModel.kt") }
+    /**
+     * [T-a7-package-surface] 扫描面：上游把整条循环放在单文件
+     * `ui/chat/ChatViewModel.kt` 里，本移植按职责拆成了 `ChatViewModel.kt` 加几十个
+     * `ChatViewModelXxxExt.kt`（循环体在 `ChatViewModelAgentLoopExt.kt`，`cleanStop`
+     * 闸门与 `Auto-title after first exchange` 都在那里）。这条用例断言的是"循环里
+     * 的那段 nudge 逻辑"，所以按**整个包面**读。断言文本一字未改。
+     */
+    private val vm by lazy { ProductionSources.readPackageSurface("ui/chat") }
 
     @Test fun `nudge text is the iOS text verbatim and hidden`() {
         val ios = File("../../ios/Agent/Chat/ChatStore.swift").takeIf { it.exists() }?.readText()

@@ -15,7 +15,9 @@ import com.openminis.app.data.model.LLMMessage
  * - 无摘要或无标记 → 全量历史原样返回；
  * - v2 锚点可解析 → 回走 N 个用户文本轮（cap 100 条）→ preAnchor 剪枝
  *   （>1000 字符的 tool_result 连带同 id tool_use 一起丢）→ 角色对齐
- *   （剥头部非 user）→ 摘要内联进锚后首个 user 轮（保严格交替）；
+ *   （剥头部非 user）→ **宿主热身裁剪钩子**（[project] 的 trimWarmUp，
+ *   对齐后、拼结果前那一步：仍塞不下就丢最旧的热身轮，见
+ *   `trimWarmUpToFit`）→ 摘要内联进锚后首个 user 轮（保严格交替）；
  * - v2 锚点被逐出有界窗 → 摘要 + 尾部 DETACHED_TAIL_MESSAGES 条逐字
  *   （摘要与锚无关，丢摘要会让会话永远超预算）；
  * - v1 遗留标记 → summaryHead + firstKept/boundary 起切片，行为原样保留；
@@ -134,6 +136,19 @@ object CompactHistoryProjector {
         keepRecentUserTurns: Int,
         chunkRetriever: ((chunksJson: String, query: String) -> List<String>)? = null,
         log: (String) -> Unit = {},
+        /**
+         * [T-ctx-warmup-fit] 宿主的热身裁剪（上游 `trimWarmUpToFit`，
+         * ChatViewModel.kt:1583-1604）。投影是纯半边、读不到预算与按 marker 的
+         * 决策缓存，所以接缝按**它的回吐形状**开：入参是投影此刻手上的三段
+         * （剪枝并对齐过角色、尚未裁的 v2 锚前热身；锚后那一段；真正会发出去的摘要
+         * 文本），出参是**要发出去的热身**。null（默认）表示不裁，行为与以前逐字
+         * 一致——这是留给宿主的唯一可变点，v2 锚点分支之外不调用。
+         */
+        trimWarmUp: ((
+            warmUp: List<LLMMessage>,
+            rest: List<LLMMessage>,
+            summaryText: String,
+        ) -> List<LLMMessage>)? = null,
     ): List<LLMMessage> {
         if (summary.isNullOrBlank() || marker == null) return history.toList()
 
@@ -232,14 +247,25 @@ object CompactHistoryProjector {
                 preAnchorPruned.removeAt(0)
             }
 
-            val result = mutableListOf<LLMMessage>()
-            result.addAll(preAnchorPruned)
-
             val postAnchor = if (anchorIdx + 1 < history.size) {
                 history.subList(anchorIdx + 1, history.size)
             } else {
                 emptyList()
             }
+
+            // [T-ctx-warmup-fit] 热身轮次是可选上下文——摘要已经盖住它们了。整套留着
+            // 会把请求顶到压缩线之上（大轮次、或者模型的分词器比会话当时那台更密）
+            // 时，从最旧开始丢；见上游 trimWarmUpToFit（ChatViewModel.kt:1583-1604）与
+            // 它在那里的调用点（:4750-4768）。决定**按 marker 只做一次**再复用：每个
+            // 请求重决定会让热身窗口每来一条消息滑一轮，请求前缀每回合都变，prompt
+            // caching 直接失效——缓存与「算不出预算时不缓存」的纪律都在宿主侧
+            // （ChatViewModel.warmUpKeptForCurrentMarker）。不注入钩子时热身原样穿过，
+            // 与接线前的行为逐字一致。
+            val warmUp = trimWarmUp?.invoke(preAnchorPruned, postAnchor, effectiveSummaryWrappedText)
+                ?: preAnchorPruned
+
+            val result = mutableListOf<LLMMessage>()
+            result.addAll(warmUp)
 
             val preAnchorRawCount = maxOf(0, anchorIdx - priorIdx + 1)
             val priorIdxSource =

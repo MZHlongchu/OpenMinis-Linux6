@@ -53,6 +53,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
     goalExecutionRun: Boolean = false,
     /** [T-android-instant-thinking] send 路径已预插占位气泡，复用其 id。 */
     overrideAssistantId: String? = null,
+    /**
+     * [T-scheduled-tool-prefill] Tool calls already decided for this loop's
+     * FIRST turn: a scheduled task's preset command runs as an already-completed
+     * tool call instead of being asked of the model (see [pendingScriptedTurn]).
+     */
+    prefill: List<com.openminis.app.scheduled.PrefilledToolCall> = emptyList(),
 ) {
     // Room is the transcript authority. Rebuild immediately before the first
     // request so UI paging, cold-open tail limits, and the resident hot-cache
@@ -185,10 +191,52 @@ internal suspend fun ChatViewModel.runAgentLoop(
         else          -> 2_000L
     }
 
+    // [T-android-switch-model-next-request] 上游 1.14 `ChatViewModel.kt:10605-10616`，
+    // 合并时丢了：这个循环要发出去的 system prompt。用 var 只为了中途换模型——
+    // Claude Code 的 OAuth 前缀是它唯一因 provider 而异的部分。
+    var loopSystemPrompt = systemPrompt
+    // [T-android-switch-model-next-request] 类级 provider 在这一轮**出发时**的样子。
+    // 取在这里是必须的：紧接着的 `var currentProvider = provider` 会在整个函数体里
+    // 遮住类级属性这个名字，再往后任何 `currentProvider` 读到的都是这一轮的局部值。
+    // 上游写的是 `this@ChatViewModel.currentProvider`，本移植同样的读法就是遮蔽发生
+    // 之前取一次快照。
+    val classProviderAtLoopStart = currentProvider
+    // 上一轮没来得及生效就结束了的标志，在这一轮从类级 provider 起步时就是陈的；
+    // 而调用方捕获 `provider` **之后**才发生的切换（类级 provider 已经走开了）要留
+    // 着，并在第一次请求之前生效（iOS d6e475a35 的回合起点竞态）。
+    withContext(Dispatchers.Main) {
+        if (classProviderAtLoopStart === provider) pendingModelSwitch = false
+    }
+
     // Fallback state — mirrors iOS streamWithGroupFallback
+    // [T-fallback-respects-user-switch] 上游 1.14 `ChatViewModel.kt:10620-10625`，
+    // 合并时丢了：这一轮出发时的类级绑定。取在这个位置是必须的——紧随其后的
+    // `var currentProvider = provider` 会在余下整个函数体里遮住类级属性这个名字
+    // （上游写 `this@ChatViewModel.currentProvider`，本移植同样的读法就是遮蔽发生
+    // 之前取一次快照）：下面的组内回退只有在这个值仍然成立时，才把新成员当作
+    // **会话绑定**接纳下来；用户在这轮跑着的时候另挑了模型的话，回退不许覆盖那个
+    // 选择（类级 provider、顶栏、落库的绑定都不动）。
+    var classProviderAtSend = currentProvider
     var currentProvider = provider
     val remainingFallbacks = fallbackProviders.toMutableList()
+    // [T-android-switch-model-fallback-rebind] 回退策略跟着中途换模型一起走，像
+    // 回退队列一样（见下面切换生效的地方）。
+    var loopFallbackStrategy = fallbackStrategy
     val fallbackReasons = mutableListOf<String>()
+    // [T-android-fallback-chain-refill] 上游 1.14 `ChatViewModel.kt:10632-10652`，
+    // 合并时丢了：`remainingFallbacks` 是一次性队列，而且声明在回合循环**之外**——
+    // 一次多回合的工具运行共用它。第 1 回合就把候选花光的长任务，于是到第 5 回合
+    // 撞上一个空队列直接抛错，哪怕组里还有完全可用的成员（第 1 回合的一次 503 抖动
+    // 并不说明那个模型接下来十分钟都死了）。
+    //
+    // 修法是把这条链当成**派生**状态而不是消耗品：记住这次失败连串里已经试过哪些
+    // entry，每次需要回退时从活着的组里重建候选表、再减掉这个集合。
+    //
+    // 收敛性正是这个集合买来的：entry 只进不出，重建时永远排除它，于是这次连串
+    // 最多把每个组成员访问一次，然后链空、错误上抛。集合在任何成功的一轮上清空，
+    // 于是第 5 回合能用第 1 回合失败过的模型——新的失败连串从完整的组重新开始。
+    val triedEntryIds = mutableSetOf<String>()
+    _activeEntryId.value?.let { triedEntryIds.add(it) }
 
     // Accumulate tool inputs across all turns (so persist includes all, not just current turn)
     val allToolInputs = mutableMapOf<String, String>()
@@ -202,6 +250,18 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // auto-continuations after a relay-side stream cut (see the
     // turnFinishReason == null branch below).
     var streamDropContinuations = 0
+
+    // [T-scheduled-tool-prefill] A prefill rides the loop as a ONE-SHOT scripted
+    // turn: the first iteration streams the already-decided tool calls instead of
+    // asking the model (see the stream entry below). A mid-loop scheduled insert
+    // re-arms it for the turn it just started.
+    var pendingScriptedTurn: com.openminis.app.scheduled.ScriptedToolTurn? = scriptedTurnFor(prefill)
+
+    // [T-android-scheduled-resume-nudge] Owed once a scheduled fire was inserted
+    // at a tool gap of THIS loop and the model has answered it: if the model then
+    // stops cleanly without resuming the task the fire interrupted, one hidden
+    // <system-reminder> user turn is sent (iOS c9131e862 scheduledResumeNudgeOwed).
+    var scheduledResumeNudgeOwed = false
 
 
     // Add placeholder assistant message (once). Mark as awaiting so the
@@ -239,6 +299,14 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // cap is hit, a still-over-threshold history stops the turn rather than
     // compacting forever. Mirrors iOS maxInLoopCompactions.
     var inLoopCompactions = 0
+    // [T-ctx-measure-outbound] 上一次 loop 内压缩「没把请求压小」的结论只在 loop 内
+    // 有效，每轮起点清掉（上游 ChatViewModel.kt:10691）。
+    lastInLoopCompactionMadeNoProgress = false
+    // [T-ctx-valve-spend-survives-retry] 这里**不**重新武装那次「按外推值放行一次」的
+    // 额度（上游 ChatViewModel.kt:10692-10698）：provider 拒绝一个超长请求时
+    // noteContextOverflow 会把它花掉，用户点重试时如果在这里重置，就会把刚刚被拒的那
+    // 个请求原样再发一遍。它只由「被接受的响应」（见 usage 落点）或换会话
+    // （seedContextCalibration）重新武装。
     // [T-android-empty-after-toolresult-reminder] One-shot guard for the
     // "<system-reminder> + retry one round" recovery when the server returns
     // an empty response right after a tool result. Fires at most once per
@@ -268,6 +336,52 @@ internal suspend fun ChatViewModel.runAgentLoop(
     for (turn in 0 until turnCap) {
         noteRunRound() // [T-run-metrics-wiring]
         currentCoroutineContext().ensureActive()
+        // [T-android-switch-model-next-request] 上游 1.14
+        // `ChatViewModel.kt:10730-10777`，合并时整段丢了：用户在这一轮跑着的时候
+        // 挑了另一个模型。就在这里生效，赶在下一次请求之前——他们切换时正在飞的
+        // 那次请求 / 工具调用在旧模型上跑完，不被打扰（iOS 86a045284 的移植）。
+        // 挑选器已经把类级 provider、entry、名字和上下文窗口都改好了，循环只需
+        // 采纳它。而这一轮里发生的组内回退是**留在本轮**的
+        // （fallbackMayRebindSession），所以它覆盖不了这个选择（iOS d6e475a35）。
+        if (pendingModelSwitch) {
+            // [T-android-switch-model-fallback-rebind] 回退链与策略在读取它们的
+            // 同一个主线程快照里、为这个选择重建。从前它们一直停在发送时按
+            // 「用户刚离开的那个组」建好的那一份：新模型上的第一次 429 会弹出旧
+            // 组里的成员，而 classProviderAtSend 已经等于这个选择了，于是那次回退
+            // 被允许重绑会话——把用户的挑法覆盖成他已经走开的模型。
+            // iOS 86a045284 出于同样的理由在切换时移动 activeGroupId。
+            val switched = withContext(Dispatchers.Main) {
+                // 类级 provider：这里不能写 `this@ChatViewModel`（本文件是扩展函数，
+                // 那个标签不存在），`this` 又被 withContext 的 CoroutineScope 接
+                // 收者占着。用函数自己的标签取扩展接收者，与本文件既有的
+                // `this@runAgentLoop`（feedThinkingTranslate 调用点）同一写法。
+                val c = this@runAgentLoop.currentProvider
+                if (c != null && ChatViewModel.modelSwitchToApply(pendingModelSwitch, c, currentProvider)) {
+                    pendingModelSwitch = false
+                    val strategy = _selectedGroupId.value
+                        ?.let { gid -> providerRepository.config.value.modelGroups.find { it.id == gid }?.fallbackStrategy }
+                        ?: com.openminis.app.data.model.FallbackStrategy.default
+                    Triple(c, buildFallbackProviders(c), strategy)
+                } else null
+            }
+            val chosen = switched?.first
+            if (switched != null && chosen != null) {
+                remainingFallbacks.clear()
+                remainingFallbacks.addAll(switched.second)
+                loopFallbackStrategy = switched.third
+                val from = currentProvider.model.displayName
+                currentProvider = chosen
+                classProviderAtSend = chosen
+                // 换了模型就是新的一段失败连串。
+                triedEntryIds.clear()
+                _activeEntryId.value?.let { triedEntryIds.add(it) }
+                loopSystemPrompt = systemPromptFor(chosen, loopSystemPrompt)
+                AppLogger.info(
+                    ChatViewModel.TAG_STREAM,
+                    "[SwitchModel] applied at next request: $from → ${chosen.model.displayName} turn=${turn + 1}",
+                )
+            }
+        }
         // Sanitize history before each API call (mirrors iOS pre-API validation)
         sanitizeAgentHistory()
 
@@ -337,16 +451,55 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 val note = steers.joinToString("\n") {
                     "[Course correction from the delegating agent] $it"
                 }
-                val lastIdx = agentHistory.lastIndex
-                if (lastIdx >= 0 && agentHistory[lastIdx].role == LLMMessage.Role.USER) {
-                    val last = agentHistory[lastIdx]
-                    agentHistory[lastIdx] = if (last.contentParts.isEmpty()) {
-                        last.copy(content = (last.content + "\n\n" + note).trim())
+                // [T-android-subagent-steer-visible] Persist the correction as a
+                // real user message in the CHILD's own transcript, instead of
+                // only folding it into agentHistory.
+                //
+                // A steer is the parent doing what a person does when they
+                // interject mid-task, so it belongs in the conversation the same
+                // way. Appended to agentHistory alone it reached the model and
+                // nothing else: opening the sub agent showed it changing
+                // direction with nothing to explain why, and a relaunch — which
+                // rebuilds agentHistory from the DB — lost the instruction
+                // outright. Observed on device: three "补充黄牛行情" steers were
+                // delivered (status=queued, all consumed) and left no trace in
+                // any child transcript.
+                //
+                // Written as its own message rather than merged into the
+                // preceding one, so it keeps its own row, timestamp and cell.
+                // [T-android-bubble-anchor] Persisted BEFORE the bubble is made,
+                // so the bubble can carry the row's id like every other user
+                // bubble; retry / delete / edit then find its row by id.
+                // 上游 1.14 ChatViewModel.kt:10851-10876。
+                val steerRow = runCatching {
+                    chatRepository.appendMessage(
+                        activeSessionId, "user",
+                        """[{"type":"text","value":${escapeJson(note)}}]""",
+                    )
+                }.onFailure {
+                    AppLogger.warning(ChatViewModel.TAG, "[subagent_task] steer persist failed: ${it.message}")
+                }.getOrNull()
+                agentHistory.add(LLMMessage(role = LLMMessage.Role.USER, content = note, dbMessageId = steerRow?.id))
+                val steerUi = ChatMessage(
+                    id = steerRow?.id ?: "steer_${System.currentTimeMillis()}",
+                    role = "user",
+                    content = note,
+                )
+                // Insert BEFORE the assistant bubble this turn streams into, not
+                // at the end. runAgentLoop appends that bubble before the loop
+                // starts, so `messages` already ends with it — appending would
+                // put the correction visually AFTER the reply it was meant to
+                // steer, reading as though it arrived too late to matter. It
+                // belongs where a person's interjection would go: above the turn
+                // that answers it.
+                withContext(Dispatchers.Main) {
+                    val cur = _messages.value
+                    val at = cur.indexOfLast { it.id == assistantId }
+                    _messages.value = if (at >= 0) {
+                        cur.subList(0, at) + steerUi + cur.subList(at, cur.size)
                     } else {
-                        last.copy(contentParts = last.contentParts + AgentContentPart.Text(note))
+                        cur + steerUi
                     }
-                } else {
-                    appendBoundedHistory(LLMMessage(role = LLMMessage.Role.USER, content = note))
                 }
                 AppLogger.info(ChatViewModel.TAG, "[subagent_task] steer delivered count=${steers.size} turn=${turn + 1}/$turnCap")
             }
@@ -548,6 +701,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
         // Matches iOS's per-turn RawMessage persistence.
         val turnStartedAtMs = System.currentTimeMillis()
         val turnStartBlockIndex = allToolBlocks.size
+        // [T-android-token-usage-output-speed] 上游 1.14
+        // `ChatViewModel.kt:11146-11152`，合并时丢了：这一轮流式花掉的墙钟毫秒，
+        // 跨每一次尝试累加（一次重试过的 5xx 会流不止一次）。随本轮的 usage 行一起
+        // 落库，于是 Output Speed 能扛过应用重启，和 Token Usage 表里其他每个数字
+        // 一样——不像 iOS 把等价物留在内存里，view model 一走就没了。
+        var turnStreamMs = 0L
         // T307: per-delta StringBuilder for the running turn text + the
         // currently-open trailing text block. `turnText` snapshots are
         // taken (via .toString()) at flush boundaries only, never per
@@ -655,6 +814,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // Non-Anthropic providers ignore it (cast fails silently).
                 (currentProvider as? com.openminis.app.provider.anthropic.AnthropicProvider)
                     ?.enhancedCache = _enhancedCacheEnabled.value
+                // [T-android-token-usage-output-speed] 上游 1.14
+                // `ChatViewModel.kt:11226`：这次尝试出闸时打一次单调时钟，下面流的
+                // `finally` 用它与现在的差累加本轮流式耗时。声明必须在内层 `try {`
+                // **之前**：Kotlin 的 finally 块看不见 try 块里声明的局部量，而上游的
+                // 同名声明同样落在包住 finally 的那个 try 之外。
+                val streamStartMs = android.os.SystemClock.elapsedRealtime()
                 try {
                 // Route through effectiveAgentHistory() so a populated
                 // [_compactSummary] is injected as a `<context-summary>` part
@@ -698,7 +863,15 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // `recordContextDispatch(outboundHistory, currentProvider.model)`），
                 // 溢出归因读的就是这条记录 —— 少了它，1M 的备用模型一旦接手，
                 // 128K 那次拒绝会被按 1M 的窗口评分，真正溢出的模型永远不被校正。
-                recordOutboundDispatch(requestHistory)
+                // [T-ctx-measure-outbound] 派发测量值同时决定这次请求的 max_tokens。
+                // 上游 1.14 把它记成 `dispatchInputTokens`（ChatViewModel.kt:11292 记账 +
+                // 11300 用它算 max_tokens）；本移植此前只把这条记录用于溢出归因，
+                // max_tokens 却仍读上一轮报回来的 `lastContextTokens` —— 压缩或换模型之后
+                // 那个数字描述的是**上一个**请求，于是留给回复的预算按旧上下文算。
+                val dispatchInputTokens = recordOutboundDispatch(requestHistory)
+                // 与上游同一处：守卫判定之后、请求发出之前算这一次的 max_tokens，
+                // 用的是这次派发的测量值本身。
+                val dispatchMaxTokens = dynamicMaxTokens(currentProvider, dispatchInputTokens)
                 // [T-first-event-watchdog] A hung relay below the provider
                 // never throws — the stream below will cancel itself and surface
                 // a TransientError, letting the existing retry chain take over.
@@ -734,8 +907,11 @@ internal suspend fun ChatViewModel.runAgentLoop(
                         // 之外（审计 → 预算 → 历史）。纯诊断，见
                         // ChatViewModelImageBudgetExt.auditOutgoingPayload。
                         messages = auditOutgoingPayload(applyRequestImageBudget(requestHistory)),
-                        systemPrompt = systemPrompt,
-                        maxTokens = dynamicMaxTokens(currentProvider, lastContextTokens),
+                        // [T-android-switch-model-next-request] 循环的 prompt，不是
+                        // 发送时那一份：中途换模型后它会按新 provider 重算 OAuth 前缀
+                        // （上游 1.14 ChatViewModel.kt:11308 同一处）。
+                        systemPrompt = loopSystemPrompt,
+                        maxTokens = dispatchMaxTokens,
                         temperature = samplingTemperature(_activeEntryId.value),
                         // [T-agent-wrapup-turn] 上游 1.14 ChatViewModel.kt:10914：
                         // 收尾回合把工具表收走——没有工具可调的模型只能给文本，
@@ -1122,6 +1298,16 @@ internal suspend fun ChatViewModel.runAgentLoop(
                         // 与通用 observe 的区别：它只在两者描述**同一个请求**时生效，
                         // 用的是派发时记录下来的 estimate。
                         calibrateContextSize(lastContextTokens)
+                        // [T-ctx-measure-outbound] 一个被 provider 接受的响应就是新证据：
+                        // 上一次 loop 内压缩「没压小」的结论到此作废（上游
+                        // ChatViewModel.kt:11663）。
+                        lastInLoopCompactionMadeNoProgress = false
+                        // [T-ctx-valve-rearm] 同一个道理，那次「按外推值放行一次」的额度
+                        // 重新可用（上游 ChatViewModel.kt:11664-11673）：比值经过平滑之后，
+                        // 一次成功不再把偏高的比值一路拉回来，没有这一步，provider 刚接受
+                        // 完一个同样大小的请求，同一个 loop 的下一轮就可能以「超窗」停下。
+                        // 被拒绝**不**重新武装，所以真的溢出该停还是停。
+                        sentPastExtrapolatedLimitThisLoop = false
                         // [T-token-usage-calibration] 用真实 usage 校准估算器。
                         val modelKey = currentModel?.id ?: ""
                         if (modelKey.isNotEmpty()) {
@@ -1222,6 +1408,16 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // [T-stall-resume] The stream attempt succeeded — no resume
                 // context should leak into a later turn.
                 stallResumeContext = null
+                // [T-android-fallback-chain-refill] 上游 1.14
+                // `ChatViewModel.kt:11734-11744`：干净流完的一轮结束了这次失败连串
+                // ——我们跳过的那些成员到底出过什么问题，很可能已经过去了；把它们
+                // 在整段长工具运行里一直挡在外面，正是后面几轮一个候选都不剩的原因。
+                // 当前 entry 留在集合里，于是紧接着再失败一次仍会换掉它、而不是先
+                // 重试同一个模型。
+                if (triedEntryIds.size > 1) {
+                    triedEntryIds.clear()
+                    _activeEntryId.value?.let { triedEntryIds.add(it) }
+                }
                 // Stream completed without error — clear any lingering retry UI state.
                 if (_autoRetryAttempt.value != 0 || _autoRetryCountdown.value != 0) {
                     _autoRetryAttempt.value = 0
@@ -1229,6 +1425,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 }
                 } finally {
                     // [T-first-event-watchdog] The operator cancels itself; nothing to clean here.
+                    // [T-android-token-usage-output-speed] 上游 1.14
+                    // `ChatViewModel.kt:11761-11766`：耗时累加放在 `finally` 里，于是
+                    // 流了 20 秒然后失败的一轮，照样把它真花掉的秒数交出来——只挂在
+                    // 成功路径上会静默少报。elapsedRealtime 是单调的，改时钟或 doze
+                    // 都不会算出负的间隔。
+                    turnStreamMs += android.os.SystemClock.elapsedRealtime() - streamStartMs
                 }
             } catch (e: Exception) {
                 if (e is CancellationException && e.cause == null) throw e  // real job cancellation
@@ -1247,7 +1449,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 val errorClass = com.openminis.app.harness.agent.StreamRetryPolicy.classify(actual)
                 val maxRetries = effectiveMaxRetries()
                 val decision = com.openminis.app.harness.agent.StreamRetryPolicy.decide(
-                    errorClass, retryAttempt, maxRetries, remainingFallbacks.size, fallbackStrategy,
+                    errorClass, retryAttempt, maxRetries, remainingFallbacks.size, loopFallbackStrategy,
                 )
                 if (decision is com.openminis.app.harness.agent.StreamRetryPolicy.Decision.RetrySameProvider) {
                     val delaySec = decision.delaySec
@@ -1370,12 +1572,32 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // [T-loop-retry-cut] 回退判定与同桶跳过走策略；宿主只补
                 // 组上下文（选中组才回退）与 provider 切换副作用。
                 // shouldFallback 不看剩余候选数——终局路径单成员组也要建轨迹。
-                val shouldFallback = com.openminis.app.harness.agent.StreamRetryPolicy.shouldFallback(errorClass, fallbackStrategy)
+                // [T-android-switch-model-fallback-rebind] 用的是**这一轮**的策略
+                // 变量（中途换模型后它已经跟着换过），不是发送时那个参数。
+                val shouldFallback = com.openminis.app.harness.agent.StreamRetryPolicy.shouldFallback(errorClass, loopFallbackStrategy)
                 val curGate = currentProvider.callGateKey
+                // [T-android-fallback-chain-refill] 上游 1.14
+                // `ChatViewModel.kt:11995-12018`，合并时丢了：队列里的下一个候选
+                // 先照旧取（同桶跳过见 nextCandidate）；队列空了就从**活着的组**重建
+                // 候选表，减掉这次失败连串里已经试过的 entry，而不是就此认输。
+                // 预建的 `remainingFallbacks` 仍是第一个来源，所以一次运行里第一次
+                // 回退的行为不变（直连模型的会话——buildFallbackProviders 返回空——
+                // 也完全照旧）。
                 val nextCandidate = if (shouldFallback && _selectedGroupId.value != null) {
+                    _activeEntryId.value?.let { triedEntryIds.add(it) }
                     com.openminis.app.harness.agent.StreamRetryPolicy.nextCandidate(
                         remainingFallbacks, curGate,
-                    ) { it.provider.callGateKey }
+                    ) { it.provider.callGateKey }?.also { triedEntryIds.add(it.entryId) }
+                        ?: buildFallbackProviders(currentProvider)
+                            .firstOrNull { it.entryId !in triedEntryIds }
+                            ?.also {
+                                triedEntryIds.add(it.entryId)
+                                Log.i(
+                                    ChatViewModel.TAG,
+                                    "🔁 fallback chain refilled — retrying ${it.provider.model.displayName} " +
+                                        "(tried=${triedEntryIds.size} this streak)",
+                                )
+                            }
                 } else null
                 val next = nextCandidate?.provider
                 if (next != null && nextCandidate != null) {
@@ -1395,51 +1617,80 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     fallbackReasons.add("⚠️ ${currentProvider.model.displayName}: $reason")
                     Log.i(ChatViewModel.TAG, "🔀 $reason on ${currentProvider.model.displayName}, switching to ${next.model.displayName} (realModelChange=$isRealModelChange)")
                     currentProvider = next
+                    // [T-fallback-5xx-status] 刚换上的成员的同类重试预算重新开始。
+                    // 计数器是按回合的，不重置的话第一个成员之后的每一个都拿不到重试：
+                    // A 花光 3 次、回退到 B，B 的第一次 5xx 立刻又变成一次回退。B 上
+                    // 一次 1s 重试就能扛过去的瞬时抖动，就这样把 B 也烧掉了。iOS 给
+                    // 每个 entry 各自一条阶梯。
                     retryAttempt = 0
-                    // Also update class-level provider so the next sendMessage() starts from here
-                    this.currentProvider = next
-                    // Update top bar model info + active entry. (For a same-
-                    // model endpoint recovery these are no-ops on the visible
-                    // model name, but still keep activeEntryId / provider name
-                    // in sync with the instance we actually used.)
-                    _modelName.value = currentProvider.model.displayName
-                    // Update activeEntryId so model picker reflects the switch.
-                    // [T-android-fallback-entry-identity] Look the entry up by
-                    // its OWN id, carried on the candidate. The previous
-                    // `find { it.model.id == currentProvider.model.id }` was
-                    // ambiguous: two instances can expose the same model id, so
-                    // it returned whichever entry sits earlier in modelEntries.
-                    // Observed in the field — falling back onto
-                    // `deepseek-v4-flash` served by "DeekSeak" showed the
-                    // provider as "Bailian OpenAI", because Bailian also has a
-                    // `deepseek-v4-flash` entry and happened to be found first.
-                    // That also poisoned activeEntryId and the persisted
-                    // binding, so re-entering the session resumed on the WRONG
-                    // instance.
-                    val newEntry = providerRepository.config.value.modelEntries.find {
-                        it.id == nextCandidate.entryId
-                    }
-                    if (newEntry != null) {
-                        _activeEntryId.value = newEntry.id
-                        currentModel = newEntry.model
-                        val newInstance = providerRepository.instance(newEntry.providerInstanceId)
-                        if (newInstance != null) {
-                            _providerName.value = newInstance.label.ifEmpty { newEntry.model.provider }
+                    // [T-fallback-respects-user-switch] 上游 1.14
+                    // `ChatViewModel.kt:12050-12068`，合并时丢了：回退是**这一轮**的
+                    // 事，会话绑定是用户的。如果这一轮跑着的时候 selectEntry 换掉了
+                    // 类级 provider，就保住用户的选择：只有这一轮的局部 provider 走
+                    // 到 `next`，类级写入、顶栏/entry 更新与 persistBinding 全部跳过。
+                    val userSwitchedMidTurn = !ChatViewModel.fallbackMayRebindSession(
+                        this.currentProvider, classProviderAtSend,
+                    )
+                    if (userSwitchedMidTurn) {
+                        AppLogger.info(
+                            ChatViewModel.TAG_STREAM,
+                            "[SwitchModel] fallback to ${next.model.displayName} stays turn-local — " +
+                                "user switched model mid-turn, binding kept",
+                        )
+                    } else {
+                        // Also update class-level provider so the next sendMessage() starts from here
+                        this.currentProvider = next
+                        // [T-fallback-respects-user-switch] 我们自己的回退把基准也一起
+                        // 挪走，于是同一轮里的第二次回退仍然允许重绑。
+                        classProviderAtSend = next
+                        // Update top bar model info + active entry. (For a same-
+                        // model endpoint recovery these are no-ops on the visible
+                        // model name, but still keep activeEntryId / provider name
+                        // in sync with the instance we actually used.)
+                        _modelName.value = currentProvider.model.displayName
+                        // Update activeEntryId so model picker reflects the switch.
+                        // [T-android-fallback-entry-identity] Look the entry up by
+                        // its OWN id, carried on the candidate. The previous
+                        // `find { it.model.id == currentProvider.model.id }` was
+                        // ambiguous: two instances can expose the same model id, so
+                        // it returned whichever entry sits earlier in modelEntries.
+                        // Observed in the field — falling back onto
+                        // `deepseek-v4-flash` served by "DeekSeak" showed the
+                        // provider as "Bailian OpenAI", because Bailian also has a
+                        // `deepseek-v4-flash` entry and happened to be found first.
+                        // That also poisoned activeEntryId and the persisted
+                        // binding, so re-entering the session resumed on the WRONG
+                        // instance.
+                        val newEntry = providerRepository.config.value.modelEntries.find {
+                            it.id == nextCandidate.entryId
                         }
-                    }
-                    // Flash ONLY on a genuine model switch — never on a
-                    // transparent same-model endpoint retry.
-                    if (isRealModelChange) _fallbackTrigger.value++
-                    // [T-android-cross-window-compact] REVERTED by design:
-                    // auto-compacting on a model switch silently dropped
-                    // context the user could still see (reads as data loss).
-                    // The new model's own provider error, the in-loop
-                    // threshold guard, and dynamicMaxTokens() handle the
-                    // smaller window without surprise truncation.
-                    // Persist the fallback model so re-entering the session starts from here
-                    val groupId = _selectedGroupId.value
-                    if (groupId != null && newEntry != null) {
-                        persistBinding("""{"type":"group","groupId":"$groupId","lastEntryId":"${newEntry.id}"}""")
+                        if (newEntry != null) {
+                            _activeEntryId.value = newEntry.id
+                            currentModel = newEntry.model
+                            val newInstance = providerRepository.instance(newEntry.providerInstanceId)
+                            if (newInstance != null) {
+                                _providerName.value = newInstance.label.ifEmpty { newEntry.model.provider }
+                            }
+                        }
+                        // Flash ONLY on a genuine model switch — never on a
+                        // transparent same-model endpoint retry.
+                        if (isRealModelChange) _fallbackTrigger.value++
+                        // [T-android-cross-window-compact] REVERTED by design:
+                        // auto-compacting on a model switch silently dropped
+                        // context the user could still see (reads as data loss).
+                        // The new model's own provider error, the in-loop
+                        // threshold guard, and dynamicMaxTokens() handle the
+                        // smaller window without surprise truncation.
+                        // Persist the fallback model so re-entering the session starts from here
+                        val groupId = _selectedGroupId.value
+                        if (groupId != null && newEntry != null) {
+                            persistBinding("""{"type":"group","groupId":"$groupId","lastEntryId":"${newEntry.id}"}""")
+                        } else if (newEntry != null) {
+                            // [T-fallback-respects-user-switch] 上游 1.14
+                            // `ChatViewModel.kt:12105-12107`：直连 entry 的会话（没有
+                            // 选中组）也要把回退后的模型落库，否则重进会话又回到旧模型。
+                            persistBinding("""{"type":"entry","entryId":"${newEntry.id}"}""")
+                        }
                     }
                     val infoText = fallbackReasons.joinToString("\n") + "\n🔄 Switched to ${currentProvider.model.displayName}"
                     allToolBlocks.removeAll { it.kind == "info" }
@@ -1577,6 +1828,8 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 val blockMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
                 val persistedId = persistAssistantTurnForRun(
                     checkNotNull(activeRun) { "Agent loop has no persistence owner" }, turnParts, lastUsage, turnReasoningContent, blockMeta, accumulatedText,
+                    // [T-android-token-usage-output-speed] 本轮流式耗时随 usage 行落库。
+                    streamMs = turnStreamMs,
                 )
                 if (activeRun?.isStopped == true) { loopExitedNormally = true; break }
                 val steering = goalManager.continuationPrompt(goal)
@@ -1644,6 +1897,8 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 val blockMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
                 persistAssistantTurnForRun(
                     checkNotNull(activeRun) { "Agent loop has no persistence owner" }, turnParts, lastUsage, turnReasoningContent, blockMeta, accumulatedText,
+                    // [T-android-token-usage-output-speed] 本轮流式耗时随 usage 行落库。
+                    streamMs = turnStreamMs,
                 )
                 if (activeRun?.isStopped == true) { loopExitedNormally = true; break }
                 appendBoundedHistory(
@@ -1673,6 +1928,8 @@ internal suspend fun ChatViewModel.runAgentLoop(
             val blockMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
             val persistedId = persistAssistantTurnForRun(
                 checkNotNull(activeRun) { "Agent loop has no persistence owner" }, turnParts, lastUsage, turnReasoningContent, blockMeta, accumulatedText,
+                // [T-android-token-usage-output-speed] 本轮流式耗时随 usage 行落库。
+                streamMs = turnStreamMs,
             )
             if (activeRun?.isStopped == true) { loopExitedNormally = true; break }
             // [T-error-persist-android] Empty-response hint: the model ended a
@@ -1826,6 +2083,44 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     withContext(Dispatchers.Main) { setInlineError(hint) }
                 }
             }
+            // [T-android-scheduled-resume-nudge] A scheduled fire was inserted
+            // at a tool gap of this loop, the model has answered it and stopped
+            // cleanly — possibly without resuming the task the fire interrupted.
+            // Send ONE hidden <system-reminder> user turn and keep going in the
+            // same bubble; the model stops for real if the task was in fact
+            // complete. Once per insertion. Not when a user prompt is waiting:
+            // the drain after the loop hands the turn to the user's own message,
+            // which decides instead (iOS clears the flag when user prompts are
+            // injected at turn end). 上游 1.14 ChatViewModel.kt:12360-12395。
+            val isEmptyTurn = !hasVisibleContent
+            val cleanStop = turnFinishReason == "stop" || turnFinishReason == "end_turn"
+            val userPromptWaiting = _promptQueue.value.any { it.origin == QueuedPromptOrigin.USER }
+            if (scheduledResumeNudgeOwed && !isEmptyTurn && cleanStop && !userPromptWaiting) {
+                scheduledResumeNudgeOwed = false
+                val nudge = ChatMessage.SCHEDULED_RESUME_NUDGE_TEXT
+                agentHistory.add(
+                    LLMMessage(
+                        role = LLMMessage.Role.USER,
+                        content = nudge,
+                        contentParts = listOf(AgentContentPart.Text(nudge)),
+                    ),
+                )
+                // Persisted like resume()'s stop-continue reminder, so a reload
+                // keeps user/assistant alternation; rows starting with
+                // <system-reminder> never get a bubble.
+                val nudgeSid = activeSessionId
+                viewModelScope.launch(Dispatchers.IO) {
+                    chatRepository.appendMessage(nudgeSid, "user", """[{"type":"text","value":${escapeJson(nudge)}}]""")
+                }
+                withContext(Dispatchers.Main) {
+                    updateAssistantMessage(assistantId, accumulatedText, true, allToolBlocks)
+                }
+                AppLogger.info(
+                    ChatViewModel.TAG_STREAM,
+                    "⏰[ScheduledPreempt] model stopped after an inserted scheduled fire — sent the one-shot resume nudge (turn=$turn)",
+                )
+                continue
+            }
             // [T-subagent-steer-continues-loop] 上游 1.14 ChatViewModel.kt:12394-12421
             // （iOS 671a12ce2），合并时整段丢了：在这一轮收敛时到达的纠偏，要让循环
             // 再活一个回合。
@@ -1942,6 +2237,8 @@ internal suspend fun ChatViewModel.runAgentLoop(
                         val blockMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
                         val assistantDbId = persistAssistantTurnForRun(
                             commitRun, turnParts, lastUsage, turnReasoningContent, blockMeta, accumulatedText,
+                            // [T-android-token-usage-output-speed] 本轮流式耗时随 usage 行落库。
+                            streamMs = turnStreamMs,
                         )
                         // 与 post-result 路径同理：回填 agentHistory 尾条 assistant 的
                         // DB id，compact 标记边界解析依赖它。
@@ -2344,6 +2641,8 @@ internal suspend fun ChatViewModel.runAgentLoop(
         val blockMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
         val assistantDbId = persistAssistantTurnForRun(
             checkNotNull(activeRun) { "Agent loop has no persistence owner" }, turnParts, lastUsage, turnReasoningContent, blockMeta, accumulatedText,
+            // [T-android-token-usage-output-speed] 本轮流式耗时随 usage 行落库。
+            streamMs = turnStreamMs,
         )
         if (activeRun?.isStopped == true) { loopExitedNormally = true; break }
         if (assistantDbId != null) {
@@ -2459,16 +2758,38 @@ internal suspend fun ChatViewModel.runAgentLoop(
         // The bridge lives in agentHistory only (NOT persisted) —
         // it's purely a wire-format spacer for the API call.
         // [T-queue-shelved] 搁置消息不参与边界自动注入。
-        if (_promptQueue.value.any { !it.shelved }) {
+        // [T-scheduled-preemptive-insert] 这个边界只在"这一轮的工具调用已经全部跑完、
+        // 结果都进了历史、模型还没被问下一步"时才到达，所以插进来的东西不会打断任何
+        // 在飞的工具。规则在 [QueuedPromptBatching.nextInsertBatch] 里：
+        //   - 一个 scheduled fire 独自成批、按"插入信封"投递，它的预置命令
+        //     （若有）由 pendingScriptedTurn 作为下一回合直接跑，然后模型作答并回到
+        //     原任务；
+        //   - 用户跟进照旧带走其余非 scheduled 的提示；
+        //   - 其余 programmatic 提示（agent 回调、RPC/CLI 发送）继续等 drain。
+        val insertBatch = QueuedPromptBatching.nextInsertBatch(_promptQueue.value)
+        if (insertBatch.isEmpty() && _promptQueue.value.isNotEmpty()) {
             AppLogger.info(
                 ChatViewModel.TAG_STREAM,
-                "📨[QueueInterrupt] turn=$turn ${_promptQueue.value.size} queued prompt(s) — interrupting after current tool call to start a standalone turn",
+                "📨[QueueHold] turn=$turn ${_promptQueue.value.size} programmatic prompt(s) queued — holding until the loop converges",
+            )
+        }
+        if (insertBatch.isNotEmpty()) {
+            val scheduledFire = insertBatch.singleOrNull()?.takeIf { it.isScheduledFire }
+            AppLogger.info(
+                ChatViewModel.TAG_STREAM,
+                if (scheduledFire != null) {
+                    "📨[ScheduledInsert] turn=$turn inserting scheduled task ${scheduledFire.scheduledTaskId} " +
+                        "between tool calls (prefill=${scheduledFire.prefill.size}, queue=${_promptQueue.value.size})"
+                } else {
+                    "📨[QueueInterrupt] turn=$turn ${insertBatch.size} queued prompt(s) (user follow-up) — interrupting after current tool call to start a standalone turn"
+                },
             )
             val handled = try {
                 injectQueuedPromptsAsNewTurn(
                     finishedAssistantId = assistantId,
                     finishedAccumulatedText = accumulatedText,
                     finishedAllToolBlocks = allToolBlocks,
+                    batch = insertBatch,
                 )
             } catch (e: CancellationException) {
                 // [T-queue-inject-atomic] 与 pre-dispatch 点同一条纪律：取消不是
@@ -2479,6 +2800,9 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 null
             }
             if (handled != null) {
+                // [T-android-scheduled-resume-nudge] 只有 scheduled 插入才欠一次"回到
+                // 原任务"的提醒；用户跟进自己会决定被打断的任务怎么办，不该被催。
+                scheduledResumeNudgeOwed = scheduledFire != null
                 // Switch loop-scope state to the new bubble. Subsequent
                 // iterations populate `handled.newAssistantId` and slice
                 // `allToolBlocks` from the freshly-zeroed start index
@@ -2486,6 +2810,9 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // iteration top, so clearing means new turn's blocks
                 // span [0..size).
                 assistantId = handled.newAssistantId
+                // [T-scheduled-tool-prefill] 预置命令随注入的提示词一起交回循环：
+                // 下一回合照它跑，而不是再问模型一次。
+                scriptedTurnFor(handled.prefill)?.let { pendingScriptedTurn = it }
                 accumulatedText = ""
                 allToolBlocks.clear()
                 allToolInputs.clear()

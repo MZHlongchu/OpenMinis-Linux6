@@ -225,7 +225,12 @@ class ScheduledPreemptiveInsertTest {
         // A single scheduled fire is re-wrapped and bridged as an insertion.
         assertTrue(inject.contains("val scheduledInsert = queued.size == 1 && queued[0].isScheduledFire"))
         assertTrue(inject.contains("if (scheduledInsert) insertedScheduledEnvelope(prompt.text) else prompt.text"))
-        assertTrue(inject.contains("if (scheduledInsert) ChatMessage.SCHEDULED_INSERT_BRIDGE_TEXT else ChatMessage.INTERNAL_BRIDGE_TEXT"))
+        // [T-plan-board-prompt] 用户跟进那一侧用的是本移植的 [BRIDGE_TEXT]，它比上游的
+        // `ChatMessage.INTERNAL_BRIDGE_TEXT` 多一句「未完成项在 agent_plan 看板上，
+        // 处理完用户消息后从看板续跑」——那是本移植刻意加的（[T-plan-board-prompt]），
+        // 删掉它会让被打断的计划丢掉唯一的持久恢复点。本用例要钉的是「scheduled 插入
+        // 用自己那句桥接、用户跟进用另一句」，这一点不变。
+        assertTrue(inject.contains("if (scheduledInsert) ChatMessage.SCHEDULED_INSERT_BRIDGE_TEXT else BRIDGE_TEXT"))
         // Its prefill still re-arms the scripted turn after the injection.
         assertTrue(vm.contains("scriptedTurnFor(handled.prefill)?.let { pendingScriptedTurn = it }"))
     }
@@ -245,6 +250,15 @@ class ScheduledPreemptiveInsertTest {
     fun `the subagent background switch still answers only a user follow-up`() {
         // A scheduled fire must not turn a synchronous subagent_task into a
         // background job — that is a reaction to the USER wanting an answer.
-        assertTrue(vm.contains("if (_promptQueue.value.any { it.origin == QueuedPromptOrigin.USER }) {"))
+        //
+        // [T-subagent-background] 扫描面/形态按本移植：上游那条「等待孩子跑完时
+        // 收到 USER 跟进就把同步 job 转后台」的等待循环在本移植里不存在——本移植的
+        // 委派走「波次 + dispatch_id」，同波次是否脱离调用方**只**由调用方或模型显式
+        // 传的 `background` 参数决定，队列内容从不参与，所以「scheduled fire 不得把
+        // 同步委派变成后台任务」这条不变式在这里是构造性成立的（第一条断言把它钉住）。
+        // 第二条断言钉住同一件事的另一半：凡「有用户在等」的判断都必须以
+        // QueuedPromptOrigin.USER 为准——scheduled fire 是 PROGRAMMATIC，不算数。
+        assertTrue(vm.contains("val detached = background || runCatching {"))
+        assertTrue(vm.contains("val userPromptWaiting = _promptQueue.value.any { it.origin == QueuedPromptOrigin.USER }"))
     }
 }

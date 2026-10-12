@@ -10,8 +10,11 @@ import com.openminis.app.logging.AppLogger
  * 三路切片（v2 锚点 / v1 遗留 / 分离锚点）、回走边界、preAnchor 剪枝、
  * 角色对齐、摘要内联——全部在 harness（CompactHistoryProjector）。这里
  * 只做状态读取（_compactSummary / _cachedLatestMarker / agentHistory）、
- * chunk 检索器接线（selectSummaryChunks）与日志路由（分离告警按
- * _compactMarkerDetached 一次语义降噪）。
+ * chunk 检索器接线（selectSummaryChunks）、日志路由（分离告警按
+ * _compactMarkerDetached 一次语义降噪），以及 [T-ctx-warmup-fit] 的热身裁剪
+ * 钩子（[ChatViewModel.warmUpKeptForCurrentMarker]：上游这段内联在单体
+ * `effectiveAgentHistoryUncounted` 里，投影搬去 harness 后按投影的回吐形状
+ * 接回来）。
  */
 internal fun ChatViewModel.effectiveAgentHistoryUncounted(): List<LLMMessage> {
     val marker = _cachedLatestMarker
@@ -32,6 +35,20 @@ internal fun ChatViewModel.effectiveAgentHistoryUncounted(): List<LLMMessage> {
         keepRecentUserTurns = ChatViewModel.COMPACT_KEEP_RECENT_USER_TURNS,
         chunkRetriever = { chunksJson, query ->
             ChatViewModel.selectSummaryChunks(chunksJson, query)
+        },
+        // [T-ctx-warmup-fit] 热身裁剪的**真实调用点**。上游把 trimWarmUpToFit 内联在
+        // 单体 effectiveAgentHistoryUncounted 里（ChatViewModel.kt:4750-4768），本移植
+        // 的投影在 harness，所以按投影的回吐形状把宿主那半边钩回来：
+        // (剪枝+对齐后的锚前热身, 锚后那一段, 真正发出去的摘要文本) → 要发出去的热身。
+        // 决定按 marker 只下一次、由一个 marker 缓存复用（warmUpDropByMarker），于是
+        // 请求前缀跨回合稳定；算不出预算时那次「不裁」不会被缓存，下一请求重判。
+        // 同一个缓存也喂 offloadWarmUpScanPlan，两边必须读同一份决定。
+        trimWarmUp = { warmUp, rest, summaryText ->
+            warmUpKeptForCurrentMarker(
+                preAnchorPruned = warmUp,
+                postAnchor = rest,
+                summaryWrappedText = summaryText,
+            )
         },
         log = { message ->
             when {

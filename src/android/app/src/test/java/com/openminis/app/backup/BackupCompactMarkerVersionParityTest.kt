@@ -48,9 +48,13 @@ class BackupCompactMarkerVersionParityTest {
     private data class SwiftProp(val name: String, val optional: Boolean)
 
     /**
-     * [T-merge-upstream-1-14] 本移植删掉了 `src/ios/**`（仓库只剩 `src/android`
+     * [T-merge-upstream-1-14] 本移植删掉了 `src/ios` 整棵源码树（仓库只剩 `src/android`
      * 与 `src/shared`），所以「Android 写出的键必须覆盖 iOS 合成 Codable 必需的键」
      * 这类断言的**被测对象不在仓库里**：断言本身没有被推翻，只是无从执行。
+     *
+     * [T-r2-comment-nesting] 上面那处路径原文写作带通配符的形式，`斜杠加星号` 会被
+     * Kotlin 的嵌套块注释当成注释开头（本仓库 ProductionSources 的 KDoc 记过同一条
+     * 坑），把类 KDoc 撕开、整个测试源集编译不过；改写为文字，判据一字未动。
      *
      * 按本仓库对缺失平台的约定显式跳过（Assume，不是放宽断言）：解析器、必需键
      * 推导与全部断言一字未改，在带 `src/ios/Agent/Chat/ChatStore.swift` 的

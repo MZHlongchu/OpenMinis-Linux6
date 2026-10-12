@@ -319,6 +319,32 @@ class SupportsReasoningDefaultsTest {
         // 「逐字继承、绝不臆造」这半句仍然成立，只是要钉在它真正属于的那一层：
         assertNull("nothing was invented on the base model", unknown.baseModel.supportsReasoning)
         assertTrue("no override was materialised", unknown.overrides.isEmpty)
+        // 承接上面的 [T-A12-supports-reasoning-unknown-stamp]：上游在此处断言
+        // `assertNull(unknown.model.supportsReasoning)`（「没有 override 就逐字继承」）。
+        // 本移植的 getter 末端多跑一级共享兜底，解析值必然是 true，逐字继承那句在解析层
+        // 已不可能成立，所以改成把「不得凭空推断」钉在有判别力的地方：解析层唯一合法的
+        // 来源就是那个共享兜底函数（下一条 [U14-merge] 链的末端，由 ModelEntryDefaultsTest
+        // 钉住）。这里用同一份 baseModel 现算一遍兜底结果，再要求解析值与之逐字相等 ——
+        // 这不是恒真式：兜底函数是独立入口，getter 完全可能不经过它。
+        //   会红的情形一：getter 重新长出上游那条
+        //   `overrides.isEmpty && !fallbackPending → return baseModel` 快路径（正是本移植
+        //   刻意不取的那条），解析值退回 null，兜底侧仍是 true，两侧不等 → 红。
+        //   会红的情形二：entry 层另写一套自己的推断（例如「中继 id 一律不支持推理」），
+        //   解析值与共享兜底分叉 → 红。
+        //   （两条都实测过：把 `if (overrides.isEmpty) return baseModel` 放回 getter 顶部，
+        //   红的正是下面这条。）
+        assertEquals(
+            "the entry layer must reuse the shared hole-fill, not infer on its own",
+            applyUnrecognizedModelDefaults(unknown.baseModel).supportsReasoning,
+            unknown.model.supportsReasoning,
+        )
+        // 兜底值的方向也必须钉死，且与 ModelEntryDefaultsTest 的既有约定一致（未识别 id
+        // 拿 256K / 128K / thinking max / text）。这个 true 就是 9938d0686 与 f1b8e397f
+        // 报的那两个形状要的结果：中继/自建模型在输入框里必须出现 Thinking 开关
+        // （Android 的闸门是 `== true`，null 与 false 一样把开关关掉）。
+        //   会红的情形：兜底被改成 `?: false`，或某个上游热修把它换成「只有目录认识的
+        //   id 才算支持推理」——两条断言里这一条负责抓方向，上一条负责抓来源。
+        //   （实测：`?: true` 改成 `?: false` 后，两侧一起翻成 false，上一条同步绿、这一条红。）
         assertEquals("the last-resort stamp, not an override", true, unknown.model.supportsReasoning)
         // A value the model DOES state is never overwritten — the stamp only
         // fills null, so a deliberate `false` (a model that 400s on

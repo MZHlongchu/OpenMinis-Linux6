@@ -1,12 +1,11 @@
 package com.openminis.app.ui.chat
 
-import android.util.Log
 import androidx.lifecycle.viewModelScope
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.provider.LLMProvider
-import com.openminis.app.provider.ProviderFactory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.isActive
@@ -51,13 +50,27 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded() {
     // [T-title-gen-fallback-first-message-android] If no provider can be
     // resolved at all, the session would silently stay "New Chat". Log the
     // reason and fall back to the first user message as the title.
-    val subProvider = resolveTitleProvider()
-    if (subProvider == null) {
-        AppLogger.info("TitleGen", "resolveTitleProvider=null — falling back to currentProvider")
-    }
-    val provider = subProvider ?: currentProvider
-    if (provider == null) {
-        AppLogger.warning("TitleGen", "no provider available (sub + current both null) — fallback-to-first-message path")
+    //
+    // [T-r2-titlegen-candidates] 上游 1.14 `ChatViewModel.kt:15920-15937` 在这里先
+    // 组出**有序候选表**，再交给 walk 逐个尝试；合并时这块丢了，自动标题路径退回
+    // 「只解析一个模型」（resolveTitleProvider），于是被限流的那一个标题模型会让会话
+    // 一直停在 "New Chat"，而用户专门为这种情况排好序的标题子组其余成员一次都没被问
+    // 到。按上游原文移植：标题子组（整组，按 agent loop 的回退顺序）→ 本会话自己的
+    // 模型/组 → 默认主组 → 其余全部可用模型。只有「一个候选都建不出来」时才退到本
+    // 会话当前的 provider（lastResortProvider）。
+    val titleSid = realSessionId.ifEmpty { sessionId }
+    val primarySource = _selectedGroupId.value
+        ?.let { TitleCandidates.PrimarySource.Group(it, _activeEntryId.value) }
+        ?: _activeEntryId.value?.let { TitleCandidates.PrimarySource.Entry(it) }
+    val candidates = TitleCandidates.forSession(providerRepository, titleSid, primarySource, currentModel?.id)
+    val lastResortProvider = if (candidates.isEmpty()) currentProvider else null
+    AppLogger.info(
+        "TitleGen",
+        "candidates=${candidates.size} [${candidates.take(TitleCandidates.MAX_TRIES).joinToString { it.model.id }}]" +
+            (if (lastResortProvider != null) " lastResort=${lastResortProvider.model.id}" else ""),
+    )
+    if (candidates.isEmpty() && lastResortProvider == null) {
+        AppLogger.warning("TitleGen", "no provider available (no candidate + no current provider) — fallback-to-first-message path")
         viewModelScope.launch(Dispatchers.IO) {
             applyFallbackTitleFromFirstMessage("no provider available")
         }
@@ -184,36 +197,87 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded() {
             // previous manual prefix branch here was redundant.
             val effectiveSystemPrompt = TITLE_GEN_SYSTEM_PROMPT
 
-            AppLogger.info(
-                "TitleGen",
-                "dispatch attempt=$titleGenerationAttempts provider=${provider.javaClass.simpleName} model=${provider.model.id}",
-            )
-            // [T-android-titlegen-reasoning] Match iOS callSubModelForTitle:
-            // explicitly disable thinking (thinkingLevel = OFF). The provider
-            // layer's injectThinkingParams honors OFF — e.g. DeepSeek V4 gets
-            // an explicit {"thinking":{"type":"disabled"}}, o-series/gpt-5
-            // omit reasoning_effort, Anthropic sends no thinking block — so a
-            // reasoning sub-model doesn't burn the whole budget on hidden
-            // thinking and return empty text. As a belt-and-suspenders for
-            // models where OFF is still a no-op (e.g. Qwen3, which thinks by
-            // default), keep the T334 budget bump so it can finish thinking
-            // and still emit the JSON. Unified with regenerateTitle's ladder.
-            val titleMaxTokens = if (provider.model.supportsReasoning == true) 2048 else 100
-            val response = provider.sendMessage(
-                messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
-                systemPrompt = effectiveSystemPrompt,
-                maxTokens = titleMaxTokens,
-                temperature = titleTemperature(),
-                thinkingLevel = ThinkingLevel.OFF,
-            )
+            // 一个模型的一次标题请求；null = 没拿到可用标题（空响应 / 解析不出），
+            // walk 把它当成这个模型的失败、继续问下一个候选。
+            // [T-titlegen-retry-not-retrying] 上游 1.14 `ChatViewModel.kt:16059-16108`：
+            // 请求本身抽成 ask(provider)，walk 与「最后一个模型」两条路共用它。
+            suspend fun ask(provider: LLMProvider): TitleGenResult? {
+                AppLogger.info(
+                    "TitleGen",
+                    "dispatch attempt=$titleGenerationAttempts provider=${provider.javaClass.simpleName} model=${provider.model.id}",
+                )
+                // [T-android-titlegen-reasoning] Match iOS callSubModelForTitle:
+                // explicitly disable thinking (thinkingLevel = OFF). The provider
+                // layer's injectThinkingParams honors OFF — e.g. DeepSeek V4 gets
+                // an explicit {"thinking":{"type":"disabled"}}, o-series/gpt-5
+                // omit reasoning_effort, Anthropic sends no thinking block — so a
+                // reasoning sub-model doesn't burn the whole budget on hidden
+                // thinking and return empty text. As a belt-and-suspenders for
+                // models where OFF is still a no-op (e.g. Qwen3, which thinks by
+                // default), keep the T334 budget bump so it can finish thinking
+                // and still emit the JSON. Unified with regenerateTitle's ladder.
+                val titleMaxTokens = if (provider.model.supportsReasoning == true) 2048 else 100
+                val response = provider.sendMessage(
+                    messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
+                    systemPrompt = effectiveSystemPrompt,
+                    maxTokens = titleMaxTokens,
+                    temperature = titleTemperature(),
+                    thinkingLevel = ThinkingLevel.OFF,
+                )
 
-            AppLogger.info(
-                "TitleGen",
-                "response stopReason=${response.stopReason} textLen=${response.text.length} " +
-                    "raw='${response.text.take(200).replace("\n", "\\n")}'",
-            )
-            val (title, category, folderName) = parseTitleResponse(response.text)
-            if (title.isNotEmpty()) {
+                AppLogger.info(
+                    "TitleGen",
+                    "response stopReason=${response.stopReason} textLen=${response.text.length} " +
+                        "raw='${response.text.take(200).replace("\n", "\\n")}'",
+                )
+                val parsed = parseTitleResponse(response.text)
+                if (parsed.title.isEmpty()) {
+                    // [T-title-gen-fallback-first-message-android] 请求成功但没有
+                    // 可用标题（空响应，或者推理模型把预算全花在思考上）。这是**这一个
+                    // 模型**的失败：walk 继续下一个。
+                    AppLogger.warning(
+                        "TitleGen",
+                        "outcome=no-title model=${provider.model.id} (empty / unparseable response) " +
+                            "stopReason=${response.stopReason} textLen=${response.text.length}",
+                    )
+                    return null
+                }
+                return parsed
+            }
+            val parsed: TitleGenResult? = if (lastResortProvider != null) {
+                try {
+                    ask(lastResortProvider)
+                } catch (e: Exception) {
+                    // [T-android-titlegen-stream-error-walk] provider 的流中错误是以
+                    // LLMError 为 cause 的 CancellationException 送到的；只有**真的**
+                    // 取消才结束标题生成。
+                    if (e is CancellationException && TitleCandidates.isRealCancellation(e)) throw e
+                    AppLogger.warning(
+                        "TitleGen",
+                        "outcome=exception model=${lastResortProvider.model.id} ${e.javaClass.simpleName}: ${e.message?.take(200)}",
+                    )
+                    null
+                }
+            } else {
+                // [T-titlegen-retry-not-retrying] 按顺序试候选：某个模型 429 之后停顿
+                // 一下换下一个，而不是让整次尝试作废。会话中途被改名（用户手改优先）
+                // 就提前停。
+                TitleCandidates.walk(
+                    candidates,
+                    origin = "auto",
+                    pauseMs = TitleCandidates.AUTO_PAUSE_MS,
+                    shouldStop = {
+                        val t = chatRepository.getSession(titleSid)?.title?.trim()
+                        !t.isNullOrEmpty() && t != ChatViewModel.UNTITLED_SESSION_TITLE
+                    },
+                ) { entry ->
+                    val p = TitleCandidates.providerFor(providerRepository, context, entry, activeSessionId)
+                        ?: return@walk null
+                    ask(p)
+                }
+            }
+            if (parsed != null) {
+                val (title, category, folderName) = parsed
                 val sid = realSessionId.ifEmpty { sessionId }
                 chatRepository.updateSessionTitleAndCategory(sid, title, category)
                 withContext(Dispatchers.Main) {
@@ -268,23 +332,16 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded() {
                     }
                 }
             } else {
-                // [T-title-gen-fallback-first-message-android] The request
-                // succeeded but yielded no usable title — empty body or a
-                // response parseTitleResponse couldn't extract a title from
-                // (e.g. reasoning model that spent its whole budget thinking,
-                // or non-JSON output). Previously this was silent and left
-                // the session as "New Chat". Log the real cause and, on the
-                // final attempt, fall back to the first user message.
-                AppLogger.warning(
-                    "TitleGen",
-                    "outcome=no-title attempt=$titleGenerationAttempts/$TITLE_MAX_ATTEMPTS " +
-                        "(empty / unparseable response) stopReason=${response.stopReason} " +
-                        "textLen=${response.text.length}",
-                )
-                if (titleGenerationAttempts >= TITLE_MAX_ATTEMPTS) {
-                    AppLogger.warning("TitleGen", "outcome=gave-up ($titleGenerationAttempts/$TITLE_MAX_ATTEMPTS) — applying first-message fallback title")
-                    applyFallbackTitleFromFirstMessage("empty/unparseable title response")
-                }
+                // [T-titlegen-retry-not-retrying] Every candidate failed
+                // (or none could be built). Only NOW the first-message
+                // fallback — and no further automatic attempts: the walk
+                // already was the retry. iOS sets titleGenAttempts = 3 here.
+                // [T-r2-titlegen-candidates] 上游 1.14 `ChatViewModel.kt:16198-16206`：
+                // 「整张候选表都失败」才落第一条用户消息兜底，并把尝试数打满，于是不会
+                // 再有下一次自动尝试。
+                titleGenerationAttempts = TITLE_MAX_ATTEMPTS
+                AppLogger.warning("TitleGen", "outcome=gave-up (all title candidates failed) — applying first-message fallback title")
+                applyFallbackTitleFromFirstMessage("all title candidates failed")
             }
         } catch (e: Exception) {
             // [T-title-gen-fallback-first-message-android] Request error /
@@ -397,11 +454,13 @@ private suspend fun ChatViewModel.applyFallbackTitleFromFirstMessage(reason: Str
 }
 
 /**
- * Resolve the provider used for title generation. Mirrors iOS resolveSubEntry:
- * prefer an explicitly configured sub-model (cheap, non-OAuth) so title
- * generation doesn't hit the expensive primary model or fail under the
- * OAuth-Anthropic Claude-Code-only gate. Falls back to null if no sub is
- * configured — caller uses the primary provider then.
+ * [T-android-titlegen-temperature] The serving entry's own sampling override,
+ * used by the agent loop's small side calls.
+ *
+ * [T-r2-titlegen-candidates] 上游 1.14 里「标题用哪个 provider」不再由这个文件里
+ * 的单一解析器决定（那个 `resolveTitleProvider` 连同它上面这段 KDoc 一起删掉了）：
+ * 候选表与建 provider 都归 [TitleCandidates.forSession] /
+ * [TitleCandidates.providerFor]，自动标题与手动 Regenerate 共用同一套。
  */
 internal fun ChatViewModel.samplingTemperature(entryId: String?): Double? {
     if (entryId.isNullOrBlank()) return null
@@ -415,56 +474,6 @@ internal fun ChatViewModel.samplingTemperature(entryId: String?): Double? {
 private fun ChatViewModel.titleTemperature(): Double? {
     val sub = providerRepository.resolveTitleSubEntry()
     return if (sub != null) sub.overrides.temperature else samplingTemperature(_activeEntryId.value)
-}
-
-private fun ChatViewModel.resolveTitleProvider(): LLMProvider? {
-    // [T-disabled-provider-via-group-android] Resolve the dedicated
-    // title-generation sub-model (first enabled member of defaultSubGroupId).
-    // [T-android-regenerate-title-submodel] Shares
-    // ProviderRepository.resolveTitleSubEntry with the manual Regenerate
-    // path so both prefer the same sub-model. Silently degrades (caller
-    // falls back to the primary provider) when no sub-group is configured or
-    // every member sits behind a disabled provider.
-    val entry = providerRepository.resolveTitleSubEntry() ?: return null
-    val instance = providerRepository.instance(entry.providerInstanceId) ?: return null
-    // [T-android-keyless-provider-selection] usableApiKey — a keyless
-    // self-hosted sub-model is usable; loadApiKey returned null and made
-    // title generation silently fall back. See QuickTestSheet.
-    var apiKey = providerRepository.usableApiKey(instance) ?: return null
-
-    // [T-android-titlegen-oauth-refresh] Refresh the OAuth token before
-    // building the provider — matches the manual Regenerate path
-    // (SessionListViewModel.regenerateTitle) and iOS. Without this, an
-    // OAuth sub-model (e.g. OAuth Anthropic Claude Code) with an expired
-    // cached token would 401 during auto-title-gen and silently drop to the
-    // first-message fallback title. A refresh failure is non-fatal: log it
-    // and proceed with the stale token so the request's own 401 flows into
-    // the existing error/fallback handling. runBlocking is safe here — this
-    // is only reached from the suspend agent loop on a background thread.
-    if (instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth) {
-        try {
-            val manager = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
-            val freshToken = kotlinx.coroutines.runBlocking { manager?.validAccessToken() }
-            if (freshToken != null && freshToken != apiKey) {
-                providerRepository.saveApiKey(instance.id, freshToken)
-                apiKey = freshToken
-            }
-        } catch (e: Exception) {
-            Log.w(ChatViewModel.TAG, "TitleGen OAuth refresh failed: ${e.message}")
-        }
-    }
-    // [T-android-opencode-subtask-session] 标题生成是**这个会话**发起的请求，
-    // 必须带上会话 id：上游 1.14 的对应调用点就是这么做的（
-    // `git show upstream-1.14:.../ui/chat/ChatViewModel.kt` 第 16138 行
-    // `TitleCandidates.providerFor(providerRepository, context, entry, activeSessionId)`）。
-    // 不传的话 provider.sessionId 留在 null，OpenCode Go 的 `x-opencode-session`
-    // 永远不会挂上，替会话发的这条请求只会拿回
-    // 400 "Request is missing x-opencode-session"。
-    // [T-android-regenerate-title-submodel] 手动 Regenerate 那条路
-    // （SessionListViewModel.regenerateTitle → TitleCandidates.providerFor）早就传了，
-    // 这里补的是自动标题那条。草稿 id（`__new__…`）由 ProviderFactory /
-    // OpenCodeSessionHeader 侧按形状拦掉，所以照传 activeSessionId 即可。
-    return ProviderFactory.create(instance, apiKey, entry.model, context, sessionId = activeSessionId)
 }
 
 /** Parse LLM response for title/category JSON. Multiple fallback strategies. */

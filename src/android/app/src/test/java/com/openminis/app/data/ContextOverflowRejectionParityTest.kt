@@ -32,9 +32,13 @@ import java.io.File
 class ContextOverflowRejectionParityTest {
 
     /**
-     * [T-merge-upstream-1-14] 本移植删掉了 `src/ios/**`（仓库只剩 `src/android`
+     * [T-merge-upstream-1-14] 本移植删掉了 `src/ios` 整棵源码树（仓库只剩 `src/android`
      * 与 `src/shared`），因此「iOS 认得的每一种 overflow 措辞 Android 也必须认得」
      * 这类对齐断言的**被测对象不在仓库里** —— 断言没有被推翻，只是无从执行。
+     *
+     * [T-r2-comment-nesting] 上面那处路径原文写作带通配符的形式，`斜杠加星号` 会被
+     * Kotlin 的嵌套块注释当成注释开头，把类 KDoc 撕开、整个测试源集编译不过；改写为
+     * 文字，判据一字未动。
      *
      * 按本仓库对缺失平台的约定用 Assume 显式跳过并说明原因，而不是删断言或放宽
      * 语义：marker 列表的解析、逐条比对与 ContextOverflowGuard 全部原样保留，

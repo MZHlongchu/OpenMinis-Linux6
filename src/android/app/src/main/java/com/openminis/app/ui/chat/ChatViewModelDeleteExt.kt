@@ -114,7 +114,13 @@ fun ChatViewModel.deleteFromMessage(messageId: String) {
     // Snapshot what's about to go so any memory_write tool blocks inside
     // can be revoked — otherwise the on-disk daily log keeps entries from
     // messages the user just deleted.
-    val deletedMessages = messages.subList(index, messages.size).toList()
+    //
+    // [T-android-bubble-anchor-drain] 「从此处删除」从一个合并排队批次的**第一个**
+    // 气泡起切：批内气泡共享同一行，删掉那一行就必须把兄弟气泡一起带走，
+    // 否则屏幕上会留下模型已经没有的正文。单个气泡时 groupSpan 就是它自己，
+    // 与旧写法逐字等价。上游 1.14 ChatViewModel.kt:8130-8131。
+    val cutFrom = BubbleRowLocator.groupSpan(messages, index).first
+    val deletedMessages = messages.subList(cutFrom, messages.size).toList()
 
     // Truncate the UI to everything BEFORE the target message, and drop
     // any queued prompts that belonged to the deleted range so a later
@@ -122,7 +128,7 @@ fun ChatViewModel.deleteFromMessage(messageId: String) {
     // [T-android-uimessages-sublist-cme] `subList` 返回的是与父表共享 modCount 的
     // 活视图；下面要把它发布成 `_messages.value`（= Compose 状态），所以必须拷贝。
     // 与 truncateBeforeEdit / 上游 uiMessages 尾部窗口同一条纪律。
-    val retainedHead = messages.subList(0, index).toList()
+    val retainedHead = messages.subList(0, cutFrom).toList()
     for (m in deletedMessages) {
         // [T-queue-disk-persistence] forgetQueuedPrompt 连带撤掉磁盘镜像，
         // 否则重启会给这批已删除的消息还原出幽灵排队气泡。

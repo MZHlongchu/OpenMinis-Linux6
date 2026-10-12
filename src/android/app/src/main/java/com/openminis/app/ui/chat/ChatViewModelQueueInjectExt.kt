@@ -16,6 +16,20 @@ internal const val BRIDGE_TEXT =
         "agent_plan task list — after addressing the user's message, resume the pending items from the board " +
         "instead of restarting the plan.)"
 
+/**
+ * [T-scheduled-preemptive-insert] [envelopeText] 重写为"中途插入"信封；不是
+ * scheduled 信封时原样返回。上游 1.14 ChatViewModel.kt:8668-8673。
+ *
+ * 为什么必须重写：scheduled fire 平时是"用户轮"里的一个信封，模型会把它当成一次
+ * 用户请求；从工具边界插进来时它不是用户改主意，而是**插队**——信封带上
+ * `inserted="1"`，模型由此知道这不是它上一次工具调用的结果、也不是用户在说话，
+ * 处理完要回到原先的任务（与 [ChatMessage.SCHEDULED_INSERT_BRIDGE_TEXT] 配套）。
+ */
+internal fun insertedScheduledEnvelope(envelopeText: String): String =
+    com.openminis.app.scheduled.ScheduledTaskMarker.parse(envelopeText)
+        ?.copy(insertedMidTask = true)?.xml
+        ?: envelopeText
+
 internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     finishedAssistantId: String,
     finishedAccumulatedText: String,
@@ -59,6 +73,17 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     // [T-queue-shelved] 搁置消息不参与自动注入；只注入 pending 态。
     val queued = batch.filter { !it.shelved }
     if (queued.isEmpty()) return null
+    // [T-scheduled-preemptive-insert] 一个 scheduled fire 独自成批（见
+    // [QueuedPromptBatching.nextInsertBatch]），所以这一批要么恰好是它、要么没有它。
+    // 这一个布尔值决定：信封要不要重写成"插入"形态、桥接文案用哪一句。
+    val scheduledInsert = queued.size == 1 && queued[0].isScheduledFire
+    // [T-scheduled-preemptive-insert] scheduled fire 不是用户改主意，它有自己的一句
+    // 桥接：暂停一下处理任务，然后回到计划。用户跟进仍用原文案（[BRIDGE_TEXT]，
+    // 含 [T-plan-board-prompt] 的看板续跑指向——本移植比上游
+    // `ChatMessage.INTERNAL_BRIDGE_TEXT` 多这一句，是刻意保留的本地行为）。
+    // 两句文案都在 ChatMessage 里由 isInternalBridge 挡在聊天 UI 之外。
+    // 位置与上游一致：紧挨着 [scheduledInsert] 判定，落库/上屏都用同一个值。
+    val bridgeText = if (scheduledInsert) ChatMessage.SCHEDULED_INSERT_BRIDGE_TEXT else BRIDGE_TEXT
 
     // [T-android-queued-message-duplicated-on-inject] REMOVE the queued
     // placeholder bubbles (the ones enqueuePrompt added with
@@ -102,10 +127,14 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     val combinedParts = mutableListOf<AgentContentPart>()
     val combinedText = StringBuilder()
     for (prompt in queued) {
-        if (prompt.text.isNotEmpty()) {
+        // [T-scheduled-preemptive-insert] 中途插队的 scheduled fire 重写成"插入"
+        // 信封：reminder 告诉模型这一轮从哪来、处理完回到原任务；落库的也是重写
+        // 后的正文，所以重载会话时模型看到的与实时一致。
+        val text = if (scheduledInsert) insertedScheduledEnvelope(prompt.text) else prompt.text
+        if (text.isNotEmpty()) {
             if (combinedText.isNotEmpty()) combinedText.append("\n\n")
-            combinedText.append(prompt.text)
-            combinedParts.add(AgentContentPart.Text(prompt.text))
+            combinedText.append(text)
+            combinedParts.add(AgentContentPart.Text(text))
         }
     }
     prepared.imageParts.forEachIndexed { idx, part ->
@@ -178,10 +207,13 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     // （agent_plan）每轮注入系统提示——bridge 指向它，模型处理完新消息后
     // 按看板续跑未完成项，而不是把剩余计划丢在脑内（旧 bridge 只靠模型
     // 记住被打断前的进度）。
+    // [T-scheduled-preemptive-insert] 桥接文案在上面按 [scheduledInsert] 选好
+    // （scheduled fire 用 [ChatMessage.SCHEDULED_INSERT_BRIDGE_TEXT]，用户跟进用
+    // [BRIDGE_TEXT]）。
     val bridgeMessage = LLMMessage(
         role = LLMMessage.Role.ASSISTANT,
-        content = BRIDGE_TEXT,
-        contentParts = listOf(AgentContentPart.Text(BRIDGE_TEXT)),
+        content = bridgeText,
+        contentParts = listOf(AgentContentPart.Text(bridgeText)),
     )
     appendBoundedHistory(bridgeMessage)
 
@@ -354,5 +386,7 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
         "injectQueuedPromptsAsNewTurn: injected ${queued.size} queued prompt(s) as new turn, " +
             "finishedId=$finishedAssistantId newId=$newAssistantId userRow=${userEntity?.id ?: "none"}",
     )
-    return ChatViewModel.InjectedTurn(newAssistantId)
+    // [T-scheduled-tool-prefill] 被注入提示词的预置工具调用交给循环：它作为下一轮
+    // 的第一回合"照着跑"，而不是再问模型一次（上游 1.14 同一处返回）。
+    return ChatViewModel.InjectedTurn(newAssistantId, queued.flatMap { it.prefill })
 }

@@ -26,6 +26,10 @@ import com.openminis.app.data.BPETokenizer
 import com.openminis.app.ui.chat.retention.HotWindow
 import com.openminis.app.ui.chat.retention.ResidentWindow
 import com.openminis.app.data.ContextPolicy
+// [T-ctx-warmup-fit] warmUpDrop 这一处按上游原文写裸名（盘面守卫按
+// `val drop = ContextSizeMeter.warmUpDrop(` 这条字面量找它，见
+// CompactionDecisionTest）；文件里其余位置仍用全限定名。
+import com.openminis.app.data.ContextSizeMeter
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.data.FileMentionIndex
 import com.openminis.app.data.db.CompactMarkerEntity
@@ -171,6 +175,65 @@ class ChatViewModel(
 
     companion object {
         internal const val TAG = "ChatViewModel"
+
+        /**
+         * [T-fallback-respects-user-switch] 上游 1.14 `ChatViewModel.kt:114-122`
+         * （合并时整段丢了，这里按原样重落）：一轮进行中发生的组内回退，能不能把
+         * 它新换上的成员**写回会话绑定**——只有当类级 provider 还是这一轮出发时
+         * 的那个才行。比的是对象 Identity，不是模型 id：用户重新挑一次会构造出
+         * 新的 provider 实例。不相等，就说明这一轮跑着的时候用户自己换了模型，
+         * 那个选择优先，回退只准停在这一轮本地。
+         */
+        internal fun fallbackMayRebindSession(classProviderNow: Any?, classProviderAtSend: Any?): Boolean =
+            classProviderNow === classProviderAtSend
+
+        /**
+         * [T-android-switch-model-next-request] 上游 1.14
+         * `ChatViewModel.kt:124-132`：循环现在就该采纳用户的挑法吗——有挂起的
+         * 切换，并且挑选器已经把另一个 provider 装好了。挑选器还没重绑时保持
+         * 挂起，好让夹在标志与重绑之间的循环头不会把这次切换弄丢。
+         */
+        internal fun modelSwitchToApply(pending: Boolean, chosen: Any?, loopProvider: Any?): Boolean =
+            pending && chosen != null && chosen !== loopProvider
+
+        /**
+         * [T-android-offload-warmup-scan] 上游 1.14
+         * `ChatViewModel.kt:321-357`，合并时丢了：`offloadWarmUpScanPlan` 背后的
+         * 下标映射，纯函数以便测试——在 [priorIdx]..[anchorIdx] 这段历史里，
+         * `effectiveAgentHistoryUncounted` 真正会发出去的那些**原始下标**
+         * （超过 1000 字符的 tool_result 连同它们的调用一起剪掉，纯文本消息保留，
+         * 被剪空的消息丢弃，开头的非 user 剥掉，最后在按 marker 决定过 drop 时
+         * 再去掉最前面的 `drop` 条），以及被剪掉的 id 集合。
+         */
+        internal fun warmUpScanIndices(
+            history: List<LLMMessage>,
+            priorIdx: Int,
+            anchorIdx: Int,
+            drop: Int?,
+        ): Pair<List<Int>, Set<String>> {
+            if (priorIdx < 0 || priorIdx > anchorIdx || anchorIdx >= history.size) return emptyList<Int>() to emptySet()
+            val pruned = HashSet<String>()
+            for (i in priorIdx..anchorIdx) {
+                for (part in history[i].contentParts) {
+                    if (part is AgentContentPart.ToolResult && part.content.length > 1000) pruned.add(part.id)
+                }
+            }
+            val kept = ArrayList<Int>()
+            for (i in priorIdx..anchorIdx) {
+                val parts = history[i].contentParts
+                val survives = parts.isEmpty() || parts.any { part ->
+                    when (part) {
+                        is AgentContentPart.ToolUse -> part.id !in pruned
+                        is AgentContentPart.ToolResult -> part.id !in pruned
+                        else -> true
+                    }
+                }
+                if (survives) kept.add(i)
+            }
+            while (kept.isNotEmpty() && history[kept.first()].role != LLMMessage.Role.USER) kept.removeAt(0)
+            val trimmed = drop?.let { kept.drop(minOf(it, kept.size)) } ?: kept
+            return trimmed to pruned
+        }
 
         /**
          * [T-android-persist-row-refresh-merge] [notePersistedUiRow] 里 DB 侧对账的
@@ -2250,6 +2313,14 @@ class ChatViewModel(
     @Volatile
     internal var _browserTabPoolRef: BrowserTabPool? = null
 
+    /**
+     * [T-u12-merge] 上游 1.14 ChatViewModel.kt:2552：把一个**已存在**的标签池
+     * 借给这个 ViewModel（辅助会话不自己建池，直接用父会话那一个——同一个
+     * WebView 池，页面与登录态共享）。合并时这个成员整个丢了，而
+     * ScheduledAgentRunner / ChatViewModel 里都还在调它。
+     */
+    internal fun adoptBrowserTabPool(pool: BrowserTabPool) { _browserTabPoolRef = pool }
+
     /** Browser tab pool for browser_use tool. Lazily created on first access. */
     val browserTabPool: BrowserTabPool by lazy {
         BrowserTabPool(context).also {
@@ -3031,7 +3102,46 @@ class ChatViewModel(
         val cacheWrite: Long,
         val context: Int,
         val loopCount: Int,
-    )
+        /**
+         * [T-android-token-usage-output-speed] 上游 1.14
+         * `ChatViewModel.kt:3037-3045`，合并时丢了：流式输出实际用掉的墙钟毫秒，
+         * 以及**同样这些轮次**产出的输出 token。两者是配对累加的——一轮要么两边
+         * 都记、要么都不记，这样平均值不会被 `streamMs` 出现之前写下的历史行
+         * （或者一轮没产出任何输出）拖向零。
+         */
+        val streamMs: Long = 0L,
+        val streamOutput: Long = 0L,
+    ) {
+        /**
+         * 平均输出速度（token/秒）。还没有任何可测数据时为 null（全新会话，或者
+         * 所有行都早于 `streamMs`）。null 渲染成「—」而不是 "0.0 tok/s"——后者
+         * 读起来像「模型卡住了」。
+         */
+        val outputTokensPerSecond: Double?
+            get() = if (streamMs > 0 && streamOutput > 0) {
+                streamOutput.toDouble() / (streamMs / 1000.0)
+            } else {
+                null
+            }
+
+        /**
+         * [T-android-token-usage-cache-hit-rate] 上游 1.14
+         * `ChatViewModel.kt:3060-3077`：本会话输入里命中缓存的比例（百分比）。
+         * 分母与 sheet 的 "Input (incl. cache)" 行完全一致。
+         *
+         * 没什么可报的时候为 null，于是整行隐藏，而不是在不做缓存的 provider 上
+         * 显示 0.0%——iOS 用的是同一个 `totalInput > 0 && cacheRead > 0` 条件。
+         */
+        val cacheHitRate: Double?
+            get() {
+                val totalInput = input + cacheRead + cacheWrite
+                return if (totalInput > 0 && cacheRead > 0) {
+                    cacheRead.toDouble() / totalInput.toDouble() * 100.0
+                } else {
+                    null
+                }
+            }
+    }
 
     data class ThinkingInfo(
         val supported: Boolean,
@@ -3064,15 +3174,26 @@ class ChatViewModel(
         var cacheRead = 0L
         var cacheWrite = 0L
         var context = 0
+        var streamMs = 0L
+        var streamOutput = 0L
         for (json in usages) {
             try {
                 val obj = org.json.JSONObject(json)
                 input += obj.optLong("inputTokens", 0L)
-                output += obj.optLong("outputTokens", 0L)
+                val turnOutput = obj.optLong("outputTokens", 0L)
+                output += turnOutput
                 cacheRead += obj.optLong("cacheReadTokens", 0L)
                 cacheWrite += obj.optLong("cacheCreationTokens", 0L)
                 val ctx = obj.optInt("latestContextTokens", 0)
                 if (ctx > 0) context = ctx
+                // [T-android-token-usage-output-speed] 本功能之前写下的每一行、
+                // 以及没产出输出的一轮，都没有这个键——只有两半都在时才计入耗时，
+                // 否则平均值会被那些根本贡献不了速度的轮次拖向零。
+                val turnMs = obj.optLong("streamMs", 0L)
+                if (turnMs > 0 && turnOutput > 0) {
+                    streamMs += turnMs
+                    streamOutput += turnOutput
+                }
             } catch (_: Exception) { /* skip malformed row */ }
         }
         val snapshot = _messages.value
@@ -3080,7 +3201,7 @@ class ChatViewModel(
         val toolCalls = snapshot.filter { it.role == "assistant" }
             .sumOf { msg -> msg.toolBlocks.count { it.kind != "text" && it.kind != "info" } }
         val loops = maxOf(toolCalls, assistantCount)
-        return SessionTokenStats(input, output, cacheRead, cacheWrite, context, loops)
+        return SessionTokenStats(input, output, cacheRead, cacheWrite, context, loops, streamMs, streamOutput)
     }
 
     // [T-android-split-chat] toggleMemorySheet / dismissMemorySheet moved to ChatViewModelUiStateExt.kt.
@@ -3744,6 +3865,36 @@ class ChatViewModel(
     private var lastDispatchWindow = 0
 
     /**
+     * [T-ctx-measure-outbound] 最近一个样本算出的比值（见 [calibrateContextSize] /
+     * [noteContextOverflow]）。会话重载时它与内存里的比值一起组成
+     * [com.openminis.app.data.ContextSizeMeter.CalibrationState]，交给 carryingOver ——
+     * 「重载同一个会话要保住内存里学到的比值」靠的就是它。上游同名字段：
+     * `ChatViewModel.kt:1373 lastLearnedCalibration`。
+     */
+    private var lastLearnedCalibration: Double? = null
+
+    /**
+     * [T-ctx-measure-outbound] 内存里这套校准是**哪个会话**学到的（上游
+     * `ChatViewModel.kt:1375 calibrationSessionId`）。只有同一个会话重载才把内存值带上；
+     * 换会话从头开始 —— 否则上一个聊天的比值会被当成这个聊天的证据。
+     */
+    private var calibrationSessionId: String? = null
+
+    /**
+     * [T-ctx-valve-rearm] 本次 loop 是否已经「按外推比值判定超窗」放行过一次。上游
+     * `ChatViewModel.kt:1392`。internal：[inLoopContextCheck] 的判定体在本移植里是
+     * `ChatViewModelInLoopContext.kt` 的扩展函数，类内 private 成员在那里不可达。
+     */
+    internal var sentPastExtrapolatedLimitThisLoop = false
+
+    /**
+     * [T-ctx-measure-outbound] 上一次 loop 内压缩没能把请求压小（比值/历史没有缩小）。
+     * 压不动的压缩不再重试 —— 否则每次压缩都白花一次摘要调用。上游
+     * `ChatViewModel.kt:1394`。internal：同 [sentPastExtrapolatedLimitThisLoop]。
+     */
+    internal var lastInLoopCompactionMadeNoProgress = false
+
+    /**
      * The window a GIVEN model's request is judged against: its own
      * `contextWindowTokens`, capped by the selected group's `contextLimitTokens`.
      * Sibling of [effectiveContextWindowTokens] — that one always reads the
@@ -3758,6 +3909,69 @@ class ChatViewModel(
             ?.let { gid -> config.modelGroups.find { it.id == gid }?.contextLimitTokens }
             ?.takeIf { it > 0 }
         return if (groupLimit != null) minOf(window, groupLimit) to "group" else window to "model"
+    }
+
+    /**
+     * [T-ctx-measure-outbound] 即将发出的这个请求有多大 —— 每一次容量判断
+     * （压缩、卸载、max_tokens）读的**唯一**一个数。上游 1.14
+     * `ChatViewModel.kt:1396-1428`（`contextMeasurement` /
+     * `measureOutboundContextTokens` / `logContextDecision`），合并时整族丢了：两处
+     * 守卫还在读 `_lastTurnContextTokens`（上一轮 API 报回来的数），而压缩 / 卸载 /
+     * 回退一改历史，那个数描述的就是一个**已经不存在的**上下文 —— 于是压缩之后的第一次
+     * 判断又按压缩前的数字压一次（iOS 双胞胎上量到过：3 秒内两次压缩，日志里同一个
+     * 66358）。
+     *
+     * 口径：`measured = ceil((估算(将要发出的历史) + 固定份额) × 比值)`，比值 = 上一份
+     * 报告 ÷ 同一个请求的估算。两边描述的是同一个请求，所以压缩、卸载、回退、重启都
+     * 不会让它失效。
+     */
+    internal data class ContextMeasurement(
+        /** 将要发出的历史（不含 system prompt / 工具表）的估算。 */
+        val history: Int,
+        /** system prompt + 工具表这一份固定开销，由本会话的样本播下。 */
+        val fixed: Int,
+        val ratio: Double,
+        /** 比值来自哪里（own / borrowed / forced / default），供日志复盘。 */
+        val source: String,
+        /** 校准之后的最终值：容量判断读的就是它。 */
+        val measured: Int,
+    )
+
+    /**
+     * [T-ctx-measure-outbound] 量一次**即将发出**的请求。上游
+     * `ChatViewModel.kt:1410-1418`。internal：[checkContextBeforeSend] /
+     * [inLoopContextCheck] 两处守卫在本移植里是拆出去的扩展函数，类内 private 不可达。
+     */
+    internal fun contextMeasurement(override: Double? = null): ContextMeasurement {
+        val history = com.openminis.app.data.ContextSizeMeter.estimateTokens(effectiveAgentHistoryUncounted())
+        val model = currentModel?.id
+        val ratio = override ?: contextCalibrationRatio()
+        val source = when {
+            override != null -> "forced"
+            model != null && com.openminis.app.data.TokenUsageCalibration.scale(model) != 1.0 -> "own"
+            lastLearnedCalibration != null -> "borrowed"
+            else -> "default"
+        }
+        return ContextMeasurement(
+            history = history,
+            fixed = contextFixedTokens,
+            ratio = ratio,
+            source = source,
+            measured = com.openminis.app.data.ContextSizeMeter.calibrated(history + contextFixedTokens, ratio),
+        )
+    }
+
+    /** [T-ctx-measure-outbound] 只要那一个数时用它（上游 ChatViewModel.kt:1405）。 */
+    internal fun measureOutboundContextTokens(ratio: Double? = null): Int = contextMeasurement(ratio).measured
+
+    /** [T-ctx-measure-outbound] 一次容量判断的完整输入与输出，便于按日志复盘。 */
+    internal fun logContextDecision(site: String, m: ContextMeasurement, threshold: Int, window: Int, result: String) {
+        AppLogger.info(
+            TAG,
+            "[CtxMeter] decide site=$site model=${currentModel?.id ?: "?"} history=${m.history} fixed=${m.fixed} " +
+                "ratio=${"%.3f".format(m.ratio)}(${m.source}) measured=${m.measured} threshold=$threshold " +
+                "window=$window → $result",
+        )
     }
 
     /**
@@ -3780,9 +3994,14 @@ class ChatViewModel(
      * model's ratio. Only meaningful against the SAME request the dispatch
      * recorded — otherwise the sample describes another payload.
      */
-    private fun calibrateContextSize(reportedTokens: Int): Boolean {
+    internal fun calibrateContextSize(reportedTokens: Int): Boolean {
         if (lastDispatchEstimate <= 0 || reportedTokens <= 0) return false
         val model = lastDispatchModel?.id ?: currentModel?.id ?: return false
+        // [T-ctx-measure-outbound] 顺手记下这份样本本身的比值：会话重载时它与内存里
+        // 的每模型比值一起组成 CalibrationState，被 carryingOver 保住（上游
+        // ChatViewModel.kt:1461-1482 的 lastLearnedCalibration）。
+        com.openminis.app.data.ContextSizeMeter.calibrationRatio(reportedTokens, lastDispatchEstimate)
+            ?.let { lastLearnedCalibration = it }
         com.openminis.app.data.TokenUsageCalibration.observe(model, lastDispatchEstimate, reportedTokens)
         return true
     }
@@ -3803,9 +4022,14 @@ class ChatViewModel(
             current, lastDispatchEstimate, requested, window,
         )
         if (model != null) com.openminis.app.data.TokenUsageCalibration.raise(model, raised)
-        com.openminis.app.logging.AppLogger.warning(
+        lastLearnedCalibration = raised
+        // [T-ctx-valve-rearm] 比值现在落在 provider 自己给的数上，不再是一条外推，
+        // 所以那次「按外推值放行一次」的额度已经花掉：再放行就等于把刚刚被拒的请求
+        // 原样再发一遍。（上游 ChatViewModel.kt:1499-1502。）
+        sentPastExtrapolatedLimitThisLoop = true
+        AppLogger.warning(
             TAG,
-            "[CtxMeter] provider rejected the request as too long — calibration " +
+            "[CtxMeter] rejected predicted=$lastDispatchEstimate — provider rejected the request as too long — calibration " +
                 "model=${model ?: "?"} ${"%.2f".format(current)} -> ${"%.2f".format(raised)} " +
                 "(estimated=$lastDispatchEstimate statedTokens=${requested ?: "none"} window=$window); " +
                 "the next attempt will compact",
@@ -3819,19 +4043,46 @@ class ChatViewModel(
      * first rejection to the model the PREVIOUS chat was talking to.
      */
     private fun seedContextCalibration(usageJsons: List<String>): Boolean {
-        var found = false
-        for (json in usageJsons) {
-            val sample = com.openminis.app.data.ContextSizeMeter.calibrationSample(json) ?: continue
-            val ratio = com.openminis.app.data.ContextSizeMeter
-                .calibrationRatio(sample.reported, sample.estimated) ?: continue
-            sample.modelId?.let { com.openminis.app.data.TokenUsageCalibration.raise(it, ratio) }
-            if (sample.fixedTokens > 0) contextFixedTokens = sample.fixedTokens
-            found = true
-        }
+        val sid = realSessionId.ifEmpty { sessionId }
+        // [T-ctx-measure-outbound] 重载**同一个**会话时，内存里学到的比值必须保住：
+        // 一条被 provider 拒绝的请求不会在行里留下任何 (report, estimate) 对，所以那个
+        // 被抬高的比值只活在内存里 —— 而回退走的正是 loadSession，把它抹掉会让重试
+        // 原样发出、再被拒一次（iOS 双胞胎上量到过：1.29 → 1.97，回退重载把它重置回
+        // 行里的 1.29，重试未压缩又被拒）。内存值永远不比行旧，所以逐键取胜；换会话
+        // 从头开始。（上游 ChatViewModel.kt:1525-1555。）
+        val learned = if (sid.isNotEmpty() && calibrationSessionId == sid) {
+            com.openminis.app.data.ContextSizeMeter.CalibrationState(
+                com.openminis.app.data.TokenUsageCalibration.snapshot(),
+                lastLearnedCalibration,
+                contextFixedTokens,
+            )
+        } else null
+        // [T-ctx-ratio-smoothing] 行按会话顺序（旧 → 新）过与线上同一条 smoothed 规则
+        // 回放，所以重载复现的是会话当时那个平滑过的比值，而不是最新一条原始样本。
+        val seeded = com.openminis.app.data.ContextSizeMeter.replayCalibration(
+            usageJsons.mapNotNull(com.openminis.app.data.ContextSizeMeter::calibrationSample),
+        )
+        val state = learned?.let { seeded.carryingOver(it) } ?: seeded
+        // 应用口径与合并前一致：逐模型只升不降（TokenUsageCalibration.raise 的契约，
+        // 见它的 KDoc）。上游这里对**每 ViewModel** 的比值表做 clear + putAll；本移植
+        // 的比值表是按模型 id 的全局表，clear 会顺手抹掉别的会话学到的密度，所以只把
+        // state 里有的键抬上去、不删键 —— carryingOver 决定的「哪些键取内存值」照样生效。
+        state.ratios.forEach { (m, r) -> if (m.isNotEmpty()) com.openminis.app.data.TokenUsageCalibration.raise(m, r) }
+        lastLearnedCalibration = state.lastLearned
+        if (state.fixedTokens > 0) contextFixedTokens = state.fixedTokens
         lastDispatchEstimate = 0
         lastDispatchModel = null
         lastDispatchWindow = 0
-        return found
+        // [T-ctx-valve-spend-survives-retry] 那次「按外推值放行一次」的额度与比值一样
+        // 属于这个会话的证据：换会话重新武装，同一会话（回退 / 重载）保留被拒后的花费。
+        if (learned == null) sentPastExtrapolatedLimitThisLoop = false
+        calibrationSessionId = sid
+        AppLogger.info(
+            TAG,
+            "[CtxMeter] seed session=${sid.take(8)} samples=${seeded.samples} keptInMemory=${learned?.ratios?.size ?: 0} " +
+                "ratios=${state.ratios.entries.sortedBy { it.key }.joinToString(",") { "${it.key}=${"%.3f".format(it.value)}" }}",
+        )
+        return seeded.samples > 0 || !learned?.ratios.isNullOrEmpty()
     }
 
     /**
@@ -3841,9 +4092,8 @@ class ChatViewModel(
      * recorder above is private to this class — the same call upstream makes
      * inline at `ChatViewModel.kt:11292`.
      */
-    internal fun recordOutboundDispatch(outboundHistory: List<com.openminis.app.data.model.LLMMessage>) {
-        recordContextDispatch(outboundHistory, currentProvider.model)
-    }
+    internal fun recordOutboundDispatch(outboundHistory: List<com.openminis.app.data.model.LLMMessage>): Int =
+        recordContextDispatch(outboundHistory, currentProvider?.model)
 
     /**
      * Entry point for the agent loop: a provider rejected this request as too
@@ -3862,6 +4112,142 @@ class ChatViewModel(
     /** Entry point for `loadSession` (an Ext file) — re-seed from persisted rows. */
     internal fun seedContextCalibrationFromUsageRows(usageJsons: List<String>) {
         seedContextCalibration(usageJsons)
+    }
+
+    // ── [T-ctx-warmup-fit] 压缩热身的裁剪 + 卸载的 warm-up 扫描计划 ──────────
+    //
+    // 上游 1.14 `ChatViewModel.kt:1376-1381`（状态）、:1568-1604
+    // （trimWarmUpToFit）、:10064-10096（offloadWarmUpScanPlan），合并时整块丢了：
+    //
+    //  * 一次压缩会在锚点之前保留最近几轮用户消息当**热身**。这些轮次很大、或者
+    //    模型的 tokenizer 比会话当时跑的那台更密时，摘要 + 热身仍然会越过压缩线；
+    //    而之后每次压缩保留的都是同一段热身，于是会话在那个模型上永远继续不下去
+    //    （真机上实测过：换到密度 1.8 倍的模型后，压缩完还占着 100% 窗口）。
+    //  * 卸载扫描从锚点之后起步（见 ChatViewModelOffloadExt.offloadScanStartIndex），
+    //    可热身那一段是**真的会发出去**的，于是它反而卸载不到——[offloadWarmUpScanPlan]
+    //    把那一段的下标算出来交给调用点。
+
+    /**
+     * [T-ctx-warmup-fit] 每个压缩 marker：为了让请求塞得下而被丢掉的最前面的热身
+     * 消息条数。只决定一次、之后复用，于是请求前缀跨回合保持稳定（见
+     * [trimWarmUpToFit]）。每请求重新决定会让热窗口每来一条消息就滑一轮
+     * （iOS 双胞胎上量到过），请求前缀每回合都变，prompt caching 直接失效。
+     */
+    private val warmUpDropByMarker = mutableMapOf<String, Int>()
+
+    /**
+     * [T-ctx-warmup-fit] 当前生效的上下文策略，以及它所依据的窗口；窗口未知时为
+     * null。上游 1.14 `ChatViewModel.kt:1447-1459`。本移植没有上游那个无参
+     * `resolvedContextWindow()`（这里的同名函数要传入被评判的模型），所以活窗口
+     * 走 [effectiveContextWindowTokens]——本移植其他每一处容量判断读的也是它。
+     */
+    private fun currentContextPolicy(): Pair<ContextPolicy, Int>? {
+        val window = effectiveContextWindowTokens() ?: return null
+        return ContextPolicy.forContextWindow(window, effectiveCompactPercent()) to window
+    }
+
+    /**
+     * [T-ctx-warmup-fit] 裁剪某次压缩的热身轮次，让请求落在压缩线之下。镜像 iOS
+     * `trimWarmUpToFit`（上游 1.14 `ChatViewModel.kt:1568-1604`）。
+     *
+     * 只在超预算时才动手，所以一次正常压缩的请求与 prompt-cache 前缀原样不动。
+     * 按「整轮用户**文本**消息」从最旧开始丢（tool_result 也是 USER 角色的消息，
+     * 在调用与它的结果之间切开会把配对切断），并且全程用原始估算单位，好让它不会
+     * 递归回测量本身。
+     */
+    private fun trimWarmUpToFit(warmUp: List<LLMMessage>, rest: List<LLMMessage>, summaryText: String): WarmUpTrim {
+        if (warmUp.isEmpty()) return WarmUpTrim(warmUp, decided = true)
+        // [T-ctx-warmup-trim-undecided] 没有 entry / 窗口未知 / 固定 token 还没
+        // 播下：没有可用来判断的预算，热身原样穿过并标记 UNDECIDED，调用方不得
+        // 把它写进按 marker 的缓存。
+        val budget = warmUpBudget(
+            window = effectiveContextWindowTokens(),
+            compactThreshold = currentContextPolicy()?.first?.compactThreshold,
+            ratio = contextCalibrationRatio(),
+            fixedTokens = contextFixedTokens,
+        ) ?: return WarmUpTrim(warmUp, decided = false)
+        val restTokens = com.openminis.app.data.ContextSizeMeter.estimateTokens(rest) +
+            com.openminis.app.data.ContextSizeMeter.estimateTokens(summaryText)
+        if (com.openminis.app.data.ContextSizeMeter.estimateTokens(warmUp) + restTokens < budget) {
+            return WarmUpTrim(warmUp, decided = true)
+        }
+        val drop = ContextSizeMeter.warmUpDrop(
+            sizes = warmUp.map { com.openminis.app.data.ContextSizeMeter.estimateTokens(listOf(it)) },
+            startsTurn = warmUp.map { m ->
+                m.role == LLMMessage.Role.USER && m.contentParts.none { it is AgentContentPart.ToolResult }
+            },
+            restTokens = restTokens,
+            budget = budget,
+        )
+        AppLogger.info(TAG, "[CtxMeter] warmup trimmed to fit: kept ${warmUp.size - drop}/${warmUp.size} message(s) (budget=$budget raw tokens)")
+        return WarmUpTrim(warmUp.drop(drop), decided = true)
+    }
+
+    /**
+     * [T-ctx-warmup-fit] [T-ctx-warmup-trim-undecided] 上游 1.14
+     * `ChatViewModel.kt:4750-4768` 里那段「按 marker 决定一次、之后复用」的接线，
+     * 宿主侧入口：投影算出 preAnchor 剪枝后的热身与锚点之后的那一段，这里决定要
+     * 保留多少。
+     *
+     * 决定只做一次、按 marker 缓存：每请求重新决定会让热身窗口每来一条消息就滑一
+     * 轮（在 iOS 双胞胎上量到过），请求前缀每回合都变，prompt caching 直接失效。
+     * 固定下来之后前缀稳定，请求正常增长，压缩在线上发生。
+     *
+     * [T-ctx-warmup-trim-undecided] 只缓存**真的**决定。算不出预算时裁剪会把热身
+     * 原样放行，那时缓存 drop=0 会把「全都留着」永久钉在这个 marker 上，哪怕预算
+     * 后来算出来了、并且说不合身。
+     *
+     * 可见性为 internal：上游这段内联在单体 `effectiveAgentHistoryUncounted` 里，
+     * 本移植那个投影在 harness（CompactHistoryProjector）——投影侧接上回调用它。
+     */
+    internal fun warmUpKeptForCurrentMarker(
+        preAnchorPruned: List<LLMMessage>,
+        postAnchor: List<LLMMessage>,
+        summaryWrappedText: String,
+    ): List<LLMMessage> {
+        val marker = _cachedLatestMarker ?: return preAnchorPruned
+        return warmUpDropByMarker[marker.id]?.let { drop ->
+            preAnchorPruned.drop(minOf(drop, preAnchorPruned.size))
+        } ?: trimWarmUpToFit(preAnchorPruned, postAnchor, summaryWrappedText).let { trim ->
+            if (trim.decided) warmUpDropByMarker[marker.id] = preAnchorPruned.size - trim.kept.size
+            trim.kept
+        }
+    }
+
+    /**
+     * [T-android-offload-warmup-scan] 上游 1.14 `ChatViewModel.kt:10064-10096`，
+     * 合并时丢了：[effectiveAgentHistoryUncounted] 真正会发出的、锚点之前的热身
+     * 消息在 [agentHistory] 里的**原始下标**，外加它在那一段里剪掉的工具 id。
+     * iOS `offloadWarmUpScanPlan`（155501fcd）的移植。
+     *
+     * [offloadScanStartIndex]（ChatViewModelOffloadExt.kt）从锚点**之后**起步，但
+     * compact-v2 仍会发出锚点之前最多 [COMPACT_KEEP_RECENT_USER_TURNS] 轮用户消息
+     * （≤ 100 条），只剪掉超过 1000 字符的 tool_result 及其调用：那里的
+     * file_write/file_edit 参数、501–1000 字符的结果和图片每次请求都会发出去，
+     * 却再也不可卸载。这里逐步镜像那个函数——同一条回走、同一个 > 1000 剪枝、
+     * 纯文本消息永远保留、被剪空的消息丢弃、开头非 user 剥掉、按 marker 的热身
+     * 裁剪只在**已经决定过**时才套用——于是不会扫到任何发不出去的东西。那个函数
+     * 不发热身时（无摘要 / 无 marker、v1、锚点解析不到）这里就是空。
+     *
+     * 可见性由上游的 private 提为 internal：调用点在 ChatViewModelOffloadExt.kt
+     * 的扩展函数里，private 成员在那里不可达（与 offloadScanStartIndex 同一处理）。
+     */
+    internal fun offloadWarmUpScanPlan(): Pair<List<Int>, Set<String>> {
+        val none = emptyList<Int>() to emptySet<String>()
+        if (_compactSummary.value.isNullOrBlank()) return none
+        val marker = _cachedLatestMarker ?: return none
+        if (marker.version < 2) return none
+        val anchorId = marker.lastCompactedMessageId?.takeIf { it.isNotEmpty() } ?: return none
+        val anchorIdx = agentHistory.indexOfLast { it.dbMessageId == anchorId }
+        if (anchorIdx < 0) return none
+        val priorIdx = com.openminis.app.harness.agent.CompactHistoryProjector.walkBackUserTurnsBounded(
+            history = agentHistory,
+            anchorIdx = anchorIdx,
+            maxUserTextTurns = COMPACT_KEEP_RECENT_USER_TURNS,
+            maxMessages = 100,
+        ).priorIdx ?: return none
+        if (priorIdx > anchorIdx) return none
+        return warmUpScanIndices(agentHistory, priorIdx, anchorIdx, warmUpDropByMarker[marker.id])
     }
 
 
@@ -4379,7 +4765,124 @@ class ChatViewModel(
     }
 
 
+    // ── [T-android-switch-model-next-request] 一轮跑着时换模型 ────────────────
+    //
+    // 上游 1.14 `ChatViewModel.kt:7085-7205`（cancelWorkBoundToPreviousModel /
+    // isBoundToAbandonedModel / pendingModelSwitch / systemPromptFor），合并时
+    // 整段丢了。丢掉的后果有两个：挑选器重绑之后循环还攥着发送时的 provider，
+    // 于是一次 20 个工具调用的任务会全程跑在旧模型上；而挂在自动重试阶梯上等待
+    // 的那次重试，会在用户已经走开之后再用旧模型打一次（幽灵重试）。
+    //
+    // 移植适配只有一处可见性：循环已经拆进 ChatViewModelAgentLoopExt.kt，扩展
+    // 函数读不到 private 成员，所以 [pendingModelSwitch] / [systemPromptFor] 提到
+    // internal——与 recordOutboundDispatch / noteProviderContextRejection 同一条
+    // 既有约定。
+
+    /**
+     * [T-android-switch-model-next-request] 用户在健康的一轮跑着时挑了另一个模型。
+     * 由 [cancelWorkBoundToPreviousModel] 置位（每个挑选入口都先经过它、然后才
+     * 重绑），runAgentLoop 在下一次迭代开头读取并清除。用显式标志而不是「类级
+     * provider 变了」：组内回退同样会移动 provider，那不该被读成用户换模型。
+     * 只在主线程读写。
+     */
+    internal var pendingModelSwitch = false
+
+    /**
+     * [T-android-switch-model-let-stream-finish] 在飞的那一轮，是奔着**正在被离开
+     * 的**模型去的活儿，还仅仅是碰巧在跑的健康回合？
+     *
+     * 这个区分就是整个接缝的意义。`currentProvider` 每次尝试只取一次，所以能活过
+     * 一次换模型的只有自动重试阶梯：它抱着被放弃的 provider 睡完 1s/2s/4s 倒计时，
+     * 醒来后照旧对它发起下一次尝试。那就是这个修复要清掉的幽灵重试，而取消它不花
+     * 任何代价——它要做的那次尝试按定义就是不需要的。
+     *
+     * 正常流式输出的一轮正相反：它产出的就是用户正在读的回答。取消它等于把真实
+     * 输出扔掉（报告的 Pixel 6 那次是 33.8k token 和一个永远没组装完的工具调用），
+     * 却换不到任何好处——模型绑定已经更新，下一个回合无论如何都跑在新模型上。
+     */
+    internal fun isBoundToAbandonedModel(): Boolean =
+        _autoRetryAttempt.value > 0 || _autoRetryCountdown.value > 0
+
+    /**
+     * [T-android-switch-model-next-request] 给 [provider] 用的 system prompt：
+     * 带 Anthropic OAuth 必需的 Claude Code 前缀，其他终端一律不带（那是那个登录
+     * 方式的身份串，不该发给别人）。prompt 的其余部分在 Android 上不分模型。
+     *
+     * 可见性由上游的 private 提为 internal：循环已拆进
+     * ChatViewModelAgentLoopExt.kt，取件之后要在那里重算这份 prompt。
+     */
+    internal fun systemPromptFor(provider: LLMProvider, prompt: String?): String? {
+        val prefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
+        if (prompt == null || prefix.isEmpty()) return prompt
+        val bare = if (prompt.startsWith(prefix)) prompt.removePrefix(prefix).trimStart('\n') else prompt
+        val oauth = (provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true
+        return if (oauth) "$prefix\n\n$bare" else bare
+    }
+
+    /**
+     * [T-android-switch-model-ghost-retry] 在重绑之前，先停掉还在呼叫「即将被离开
+     * 的模型」的那些活儿。没在飞的时候是空操作，所以空闲会话里挑一次模型一分钱
+     * 不花。上游 1.14 `ChatViewModel.kt:7085-7158`。
+     *
+     * 唯一一处移植适配：上游在取消前置 `lastTurnWasCancelled`，本移植没有那个
+     * 字段。它上游唯一的读者是回合结束的用量提示（`publishContextUsage`），而
+     * 本移植没有那条路径（见 ChatViewModel.kt 里 [T-android-context-usage-hint]
+     * 的移植说明），所以置位语义在这里没有落点，不是漏了。
+     */
+    private fun cancelWorkBoundToPreviousModel(reason: String) {
+        if (!_isStreaming.value && streamJob?.isActive != true) return
+        val leaving = currentProvider?.model?.displayName ?: "(unresolved)"
+        if (!isBoundToAbandonedModel()) {
+            // [T-android-switch-model-let-stream-finish] 这一轮正在产出，不打断它。
+            // [T-android-switch-model-next-request] 但它也不再抱着旧模型跑完剩下的
+            // 回合：调用方紧接着就重绑类级 provider，runAgentLoop 在下一次请求
+            // 之前换过去（iOS 86a045284）。工具驱动的任务在「当前这次请求或工具
+            // 调用」之后就用上新模型，而不是等到最后一次。
+            pendingModelSwitch = true
+            AppLogger.info(
+                TAG_STREAM,
+                "[SwitchModel] '$leaving' is streaming normally ($reason) — " +
+                    "letting this request finish; the NEXT request uses the new model",
+            )
+            return
+        }
+        // 循环正在结束：没有下一次请求可以让切换生效，下一个回合自然会解析新绑定。
+        pendingModelSwitch = false
+        AppLogger.info(
+            TAG_STREAM,
+            "[SwitchModel] cancelling retry work bound to '$leaving' ($reason) " +
+                "attempt=${_autoRetryAttempt.value}",
+        )
+        streamJob?.cancel()
+        _isStreaming.value = false
+        // 倒计时文案（"… — retrying (2/3)…"）点名的是旧模型，那才是用户看见的
+        // 幽灵。它归刚刚被取消的阶梯所有，所以不会有别人来清它。
+        _autoRetryAttempt.value = 0
+        _autoRetryCountdown.value = 0
+        clearInlineError()
+        SessionActivityTracker.setInactive(activeSessionId)
+        if (isDraft && realSessionId.isNotEmpty() && activeSessionId != sessionId) {
+            SessionActivityTracker.setInactive(sessionId)
+        }
+        // [T-android-switch-model-let-stream-finish] 这里刻意不走 Stop 的收尾
+        // （本移植即 cancelStream 的 finishStoppedRun）：那是「用户按了停止」的
+        // 闭合动作——它的工具分支会把在飞的工具块翻成 CANCELLED、落一条取消的
+        // tool_result 并抬起 `_canResume`，等于把一次普通换模型变成「任务已停止，
+        // 点恢复」。我们只会从重试阶梯走到这里，那里没有半截的工具块要对账。
+        //
+        // 排在已取消重试后面的排队消息仍要在**新模型**下继续排空，而不是干等着。
+        // resumeQueueAfterCancel 会在 200ms 后重新解析 provider，那时调用方已经
+        // 重绑完毕。
+        if (_promptQueue.value.isNotEmpty()) {
+            AppLogger.info(TAG_STREAM, "[SwitchModel] ${_promptQueue.value.size} queued prompt(s) remain, restarting drain")
+            resumeQueueAfterCancel()
+        }
+    }
+
     fun selectGroup(groupId: String) {
+        // [T-android-switch-model-ghost-retry] 重绑之前，先停掉还在呼叫即将被
+        // 离开的模型的重试阶梯。
+        cancelWorkBoundToPreviousModel("selectGroup")
         _selectedGroupId.value = groupId
         _selectedGroupName.value = providerRepository.group(groupId)?.name ?: ""
         val resolved = resolveProviderFromGroup(groupId)
@@ -4391,6 +4894,8 @@ class ChatViewModel(
 
     /** Select a specific entry within a group (keeps group selected). */
     fun selectGroupEntry(groupId: String, entryId: String) {
+        // [T-android-switch-model-ghost-retry] 同 selectGroup。
+        cancelWorkBoundToPreviousModel("selectGroupEntry")
         _selectedGroupId.value = groupId
         _selectedGroupName.value = providerRepository.group(groupId)?.name ?: ""
         val resolved = resolveProviderFromGroup(groupId, entryId)
@@ -4492,6 +4997,13 @@ class ChatViewModel(
         // made OAuth models unselectable from the picker.
         if (!providerRepository.hasAnyCredential(instance)) return
         val apiKey = providerRepository.usableApiKey(instance) ?: ""
+        // [T-android-switch-model-ghost-retry] 上游 1.14
+        // `ChatViewModel.kt:7353-7371`：取消点在**所有**「这个 entry 不可用」
+        // 的 return 之后。那些 return 的意思是「挑不动」（未知 id / 缺实例 /
+        // 没凭证），切换不会生效；上游第一版把取消放在它们前面，于是一次解析不到
+        // 东西的挑选既杀掉了正在跑的一轮、又留着旧模型绑定——用户看到自己根本
+        // 没离开的模型上死了一轮。不改变任何东西的挑选必须不花任何代价。
+        cancelWorkBoundToPreviousModel("selectEntry")
 
         currentModel = entry.model
         // [T-merge-upstream-1-14] An explicit user pick is a statement that this
@@ -4605,7 +5117,12 @@ class ChatViewModel(
         // iOS calls BrowserTabPool.deletePersistedData(for:) +
         // BrowserUseOffloadBridge.releasePool(forSession:); on Android the
         // pool is per-VM (lazy), so releasing tabs here is sufficient.
-        _browserTabPoolRef?.releaseAllTabs()
+        // [T-u12-merge] 上游 1.14 把原来那个名不副实的 `releaseAllTabs()` 拆成了两个：
+        // `releaseAllTabsToUser()` 只把 inUse 交还用户、页面留着（Takeover 用），
+        // `destroyAllTabs()` 才是真的拆 WebView、释放内存。这里要的是后者——注释一直
+        // 写的就是「丢掉本会话的浏览器资源」，而旧名字只做前者，于是被清空的会话把
+        // 几十 MB 的 WebView 永远留在池子里。用上游的新名字。
+        if (helperConfig == null) _browserTabPoolRef?.destroyAllTabs() // helper 用的是父池，清空子会话不得拆父会话的标签
         runCatching {
             java.io.File(context.filesDir, "browser_tabs/$sid.json").delete()
         }
@@ -4965,7 +5482,12 @@ class ChatViewModel(
         // T149: snapshot messages about to be truncated so we can revoke any
         // memory_write tool blocks they contain. Without this, a retry leaves
         // the on-disk daily log with entries the user has just rewound past.
-        val deletedMessages = messages.subList(index + 1, messages.size).toList()
+        // [T-android-bubble-anchor-drain] Keep through the LAST bubble of a
+        // merged queue batch: they share one persisted row, and retry keeps
+        // that row — leaving a sibling bubble behind would show the user text
+        // the model no longer has.
+        val keepThrough = BubbleRowLocator.groupSpan(messages, index).last
+        val deletedMessages = messages.subList(keepThrough + 1, messages.size).toList()
 
         // Truncate UI messages: keep up to and including this user message.
         // T189: if the retried bubble was still in the queued state (manual
@@ -4973,7 +5495,7 @@ class ChatViewModel(
         // window — or fallback when auto-resume is disabled), flip it out of
         // queued visuals and drop its queue entry so the upcoming send
         // doesn't double up against a later auto-drain.
-        val retainedHead = messages.subList(0, index + 1).map { m ->
+        val retainedHead = messages.subList(0, keepThrough + 1).map { m ->
             if (m.id == messageId && m.isQueued) {
                 // [T-queue-disk-persistence] forgetQueuedPrompt 同时撤掉磁盘
                 // 镜像，否则重启会给这条已被重试的气泡还原出幽灵排队项。
@@ -5017,16 +5539,25 @@ class ChatViewModel(
             val sid = realSessionId.takeIf { it.isNotEmpty() } ?: sessionId
 
             // Find the DB sort_order cutoff for this user message.
+            // [T-android-bubble-anchor] 先按气泡**自己的**落库行定位（[BubbleRowLocator]）：
+            // 气泡与 DB 行不是 1:1——合成的 <system-reminder> 行没有气泡，纯图片轮有
+            // 气泡却没有文本行，"数第 N 个可见用户行"就在这些地方错位。上游 1.14 的
+            // 落点：ChatViewModel.kt:8071-8077（locateUserRow + logBubbleAnchor +
+            // cutoffFor），合并时整段丢了。
+            val located = BubbleRowLocator.locateUserRow(messages, index, chatRepository.loadMessages(sid))
+            logBubbleAnchor("retry", messageId, located)
+            val bubbleCutoff = BubbleRowLocator.cutoffFor(located, keepBubble = true)
             // [T-retry-cutoff-row-anchor] 锚点 = 目标消息**自身的 DB 行**（用户
             // 消息与 DB 行 1:1，id 全局唯一）。旧锚点用「UI 第 N 个用户消息」序号
             // 去 DB 数「有可见文本的用户行」——纯图片/无文本头的用户消息让两侧
             // 序号错位，visibleUserCutoff 返回 null → cutoffSortOrder=-1 → 不删
             // 任何行 → runAgentLoop 开头从 DB 重建出完整旧历史（含出错轮），模型
             // 接到的就是「上一次出错的上下文」。sortOrderOf 直接命中点的那一行，
-            // 永不错位；消息不在 DB（纯内存行）时回退旧计数路径。
+            // 永不错位；只有气泡没有链接行（未落库的排队占位）时才走这条回退。
             val visibleUserIndex = messages.subList(0, index + 1).count { it.role == "user" } - 1
             val targetRowSort = runCatching { chatRepository.dao.sortOrderOf(messageId) }.getOrNull()
             val cutoffSortOrder = when {
+                bubbleCutoff >= 0 -> bubbleCutoff
                 targetRowSort != null -> targetRowSort + 1
                 else -> visibleUserCutoff(sid, visibleUserIndex)?.let { it.sortOrder + 1 } ?: -1
             }
@@ -5075,7 +5606,25 @@ class ChatViewModel(
         index: Int,
         target: ChatMessage,
     ): Int {
-        val visibleUserIndex = messages.subList(0, index + 1).count { it.role == "user" } - 1
+        // [T-android-bubble-anchor] A user target is cut AT its own row. An
+        // assistant target anchors to the user turn it answers — the last
+        // user bubble at or before it — and is cut just AFTER that row,
+        // keeping the question and removing the reply onward. Rows are found
+        // by id, not by counting: the chat and the persisted rows are not 1:1
+        // (synthetic <system-reminder> rows have no bubble; an image-only turn
+        // has a bubble but no text part). 上游 1.14 ChatViewModel.kt:8224-8237。
+        val anchorIdx = if (target.role == "user") index
+        else messages.subList(0, index + 1).indexOfLast { it.role == "user" }
+        // No user turn at or before the target (e.g. deleting from a leading
+        // assistant/system row): everything goes.
+        if (anchorIdx < 0) return 0
+        val located = BubbleRowLocator.locateUserRow(messages, anchorIdx, chatRepository.loadMessages(sid))
+        logBubbleAnchor("delete", messages[anchorIdx].id, located)
+        val bubbleCutoff = BubbleRowLocator.cutoffFor(located, keepBubble = target.role != "user")
+        if (bubbleCutoff >= 0) return bubbleCutoff
+        // [T-retry-cutoff-row-anchor] 回退路径：气泡没有链接行（未落库的排队占位）时
+        // 才回到「数可见用户行 → 取那一行的 sort_order」的旧口径。
+        val visibleUserIndex = messages.subList(0, anchorIdx + 1).count { it.role == "user" } - 1
         if (visibleUserIndex < 0) return 0
         val anchor = visibleUserCutoff(sid, visibleUserIndex) ?: return -1
         return if (target.role == "user") anchor.sortOrder else anchor.sortOrder + 1
@@ -5114,16 +5663,45 @@ class ChatViewModel(
      * current agent loop finishes, drainQueuedPrompts() consumes the queue.
      * Mirrors iOS AIChatViewModel.enqueuePrompt().
      */
-    fun enqueuePrompt(text: String) {
+    fun enqueuePrompt(
+        text: String,
+        origin: QueuedPromptOrigin = QueuedPromptOrigin.USER,
+        // [T-scheduled-tool-prefill] Runs as the first turn of whichever loop
+        // eventually carries this prompt (drain or mid-loop injection).
+        prefill: List<com.openminis.app.scheduled.PrefilledToolCall> = emptyList(),
+    ) {
         val trimmed = text.trim()
-        val pendingAttachments = _attachments.value
+        // [T-p2-gentle-injection] Only a USER prompt owns the composer's staged
+        // attachments. A programmatic prompt arriving while the user has files
+        // staged must not walk off with them (and must not clear them below).
+        val pendingAttachments = if (origin == QueuedPromptOrigin.USER) _attachments.value else emptyList()
         if ((trimmed.isBlank() && pendingAttachments.isEmpty()) || !_isStreaming.value) return
 
         val prompt = QueuedPrompt(
             id = "queued_${System.currentTimeMillis()}_${(Math.random() * 1_000_000).toInt()}",
             text = trimmed,
             attachments = pendingAttachments,
+            origin = origin,
+            prefill = prefill,
+            // [T-scheduled-preemptive-insert] Recognise a scheduled fire by its
+            // envelope, and only when it did not come from the composer: a user
+            // typing the tag by hand does not become a scheduled fire.
+            scheduledTaskId = if (origin == QueuedPromptOrigin.PROGRAMMATIC) {
+                com.openminis.app.scheduled.ScheduledTaskMarker.parse(trimmed)?.taskId
+            } else null,
         )
+        // [T-scheduled-preemptive-insert] A newer undelivered fire of the same
+        // task replaces the older one (queue entry and its dashed bubble): two
+        // pending fires of one task would run the same check twice in a row, and
+        // the newer one carries the fresher prefilled output.
+        prompt.scheduledTaskId?.let { taskId ->
+            val superseded = QueuedPromptBatching.supersededBy(_promptQueue.value, taskId).toSet()
+            if (superseded.isNotEmpty()) {
+                _promptQueue.value = _promptQueue.value.filterNot { it.id in superseded }
+                _messages.value = _messages.value.filterNot { it.queuedPromptId in superseded }
+                Log.i(TAG, "Scheduled task $taskId fired again before delivery — replaced ${superseded.size} older queued fire(s)")
+            }
+        }
         _promptQueue.value = _promptQueue.value + prompt
         mirrorQueuedPromptToDisk(prompt) // [T-queue-disk-persistence]
 
@@ -5141,8 +5719,8 @@ class ChatViewModel(
             queuedPromptId = prompt.id,
         )
         _messages.value = trimLoadedWindow(_messages.value + chatMsg)
-        clearAttachments()
-        Log.i(TAG, "Enqueued prompt (${trimmed.length}ch, ${pendingAttachments.size} attachments), queue=${_promptQueue.value.size}")
+        if (origin == QueuedPromptOrigin.USER) clearAttachments()
+        Log.i(TAG, "Enqueued prompt (${trimmed.length}ch, ${pendingAttachments.size} attachments, origin=$origin), queue=${_promptQueue.value.size}")
     }
 
     /** Remove a queued prompt and its chat message by prompt id. */
@@ -5227,7 +5805,15 @@ class ChatViewModel(
      * entry — its sole purpose is to break up the consecutive-user run for
      * the next API call; chat history reconstruction would just hide it.
      */
-    internal data class InjectedTurn(val newAssistantId: String)
+    internal data class InjectedTurn(
+        val newAssistantId: String,
+        /**
+         * [T-scheduled-tool-prefill] 被注入提示词携带的预置工具调用：循环把它们作为
+         * **下一轮的第一回合**直接"照着跑"，而不是先问模型（见 runAgentLoop 的
+         * pendingScriptedTurn）。上游 1.14 的 InjectedTurn 就是这个形状。
+         */
+        val prefill: List<com.openminis.app.scheduled.PrefilledToolCall> = emptyList(),
+    )
 
 
 
@@ -5509,8 +6095,9 @@ class ChatViewModel(
      */
     internal fun visionPlaceholderFor(path: String?): String? {
         if (currentModelHasNativeVision) return null
-        if (!com.openminis.app.tools.VisionGroupResolver.isConfigured(providerRepository, context)) return null
-        return com.openminis.app.tools.VisionGroupResolver.noVisionImagePlaceholder(path)
+        val visionGroupConfigured = com.openminis.app.tools.VisionGroupResolver.isConfigured(providerRepository, context)
+        if (!visionGroupConfigured) return null
+        return com.openminis.app.tools.VisionGroupResolver.noVisionImagePlaceholder(path, visionGroupConfigured)
     }
 
     /**
@@ -5663,6 +6250,9 @@ class ChatViewModel(
         toolBlockMeta: Map<String, AssistantBlock> = emptyMap(),
         assistantText: String? = null,
         uiMessageId: String? = run.assistantMessageId,
+        // [T-android-token-usage-output-speed] 本轮流式实际用掉的毫秒，随 usage
+        // 行一起落库（见 persistAssistantTurn）。
+        streamMs: Long = 0L,
     ): String? = run.withPersistencePermit {
         kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
             persistAssistantTurn(
@@ -5670,6 +6260,7 @@ class ChatViewModel(
                 // [T-android-usage-capsule-live] 同一个气泡 id 也交给持久化步骤：它
                 // 负责把 usage / completedAt 打在活气泡上（见 persistAssistantTurn）。
                 uiAssistantId = uiMessageId,
+                streamMs = streamMs,
             ).also { id ->
                 if (id != null) {
                     withContext(Dispatchers.Main.immediate) { notePersistedUiRow(uiMessageId, id) }
@@ -5706,11 +6297,17 @@ class ChatViewModel(
         // so the persisted usage can be stamped onto it right away. Null keeps
         // the DB-only behaviour for callers that have no bubble.
         uiAssistantId: String? = null,
+        // [T-android-token-usage-output-speed] 上游 1.14
+        // `ChatViewModel.kt:14928-14937`，合并时丢了：这一轮流式花掉的墙钟毫秒，
+        // 写进 usage 行的 `streamMs` 键，于是 Output Speed 能扛过重启——不像 iOS
+        // 把它留在内存里、view model 一走就没了。默认 0 给没有流式耗时的调用方
+        // （例如恢复 / 重跑路径）。
+        streamMs: Long = 0L,
     ): String? {
         if (parts.isEmpty()) return null
         val partsJson = buildAssistantPartsJson(parts, toolBlockMeta)
         val tokenJson = usage?.let {
-            """{"inputTokens":${it.inputTokens},"outputTokens":${it.outputTokens},"cacheCreationTokens":${it.cacheCreationInputTokens ?: 0},"cacheReadTokens":${it.cacheReadInputTokens ?: 0},"latestContextTokens":${it.latestContextTokens}}"""
+            """{"inputTokens":${it.inputTokens},"outputTokens":${it.outputTokens},"cacheCreationTokens":${it.cacheCreationInputTokens ?: 0},"cacheReadTokens":${it.cacheReadInputTokens ?: 0},"latestContextTokens":${it.latestContextTokens},"streamMs":$streamMs}"""
         }
         val entity = chatRepository.appendMessage(
             realSessionId.ifEmpty { sessionId }, "assistant", partsJson, tokenJson,
@@ -7364,6 +7961,15 @@ class ChatViewModel(
     internal var helperConfig: com.openminis.app.agent.jobs.HelperConfig? = null
 
     /**
+     * [T-android-subagent-card-resume] 卡片上的 Resume 按钮做了什么。
+     *
+     * 上游 1.14 ChatViewModel.kt:2414 是 ChatViewModel 的嵌套枚举（调用点写作
+     * `ChatViewModel.CardResume.…`），本移植把成员拆进了
+     * [ChatViewModelCardResumeExt] 的扩展函数，枚举本身留在这里以保持调用点写法不变。
+     */
+    enum class CardResume { STARTED, QUEUED, REFUSED }
+
+    /**
      * [T-sub-agents-steer] 父模型发给这个正在跑的孩子的纠偏指令，在它的下一个回合
      * 边界上读取。
      *
@@ -7475,4 +8081,29 @@ class ChatViewModel(
         }
     }
 
+}
+
+/**
+ * [T-ctx-warmup-trim-undecided] 上游 1.14 `ChatViewModel.kt:17548-17553`，
+ * 合并时丢了：[ChatViewModel] 热身裁剪的结果。[decided] 为 false 表示算不出预算，
+ * 此时 [kept] 是原样的热身，按 marker 的缓存**不得**把它记下来。
+ */
+internal data class WarmUpTrim(val kept: List<LLMMessage>, val decided: Boolean)
+
+/**
+ * [T-ctx-warmup-trim-undecided] 上游 1.14 `ChatViewModel.kt:17555-17571`：
+ * 一次压缩的热身必须落在其下的原始估算 token 预算；还算不出来时为 null——
+ *  - [window] 未知（null / <= 0），
+ *  - [compactThreshold] 为 null（没有生效的 entry，也就没有上下文策略），
+ *  - [fixedTokens] 还没播下（<= 0）：system prompt + 工具 schema 每次请求都要
+ *    算进去，缺了它们的预算会**许出**一个装不下的承诺，把不合身的热身判成「正好
+ *    塞得下」。
+ * 阈值为 0 表示「到窗口才压缩」（与从前一致）。
+ */
+internal fun warmUpBudget(window: Int?, compactThreshold: Int?, ratio: Double, fixedTokens: Int): Int? {
+    val w = window?.takeIf { it > 0 } ?: return null
+    val threshold = compactThreshold ?: return null
+    if (fixedTokens <= 0) return null
+    val line = if (threshold > 0) threshold else w
+    return (line / ratio).toInt() - fixedTokens
 }

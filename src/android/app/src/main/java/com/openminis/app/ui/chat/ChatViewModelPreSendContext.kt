@@ -13,13 +13,19 @@ import com.openminis.app.R
  * a signal to invoke `/compact` explicitly without blocking their turn.
  */
 internal fun ChatViewModel.checkContextBeforeSend(): PreSendContextAction {
-    val tokens = contextTokensForPolicy()
+    // [T-ctx-measure-outbound] 判**即将发出**的那个请求，不是上一轮 provider 报回来的
+    // 数：一次 /compact 或一次回退之后，那个数描述的是一个已经不存在的上下文。上游
+    // 1.14 `ChatViewModel.kt:5395-5445`。
+    val m = contextMeasurement()
+    val tokens = m.measured
     if (tokens <= 0) return PreSendContextAction.PROCEED
     // [T-context-window-live-read] Live window (entry re-resolved + group
     // contextLimitTokens folded in) — not the currentModel snapshot.
     val window = effectiveContextWindowTokens() ?: return PreSendContextAction.PROCEED
     val policy = ContextPolicy.forContextWindow(window, effectiveCompactPercent())
-    return when (policy.check(tokens, window)) {
+    val verdict = policy.check(tokens, window)
+    logContextDecision("pre-send", m, policy.compactThreshold, window, verdict.name)
+    return when (verdict) {
         ContextPolicy.CheckResult.OK -> PreSendContextAction.PROCEED
 
         // Mirrors iOS AIChatViewModel.swift:2224. Previously Android only

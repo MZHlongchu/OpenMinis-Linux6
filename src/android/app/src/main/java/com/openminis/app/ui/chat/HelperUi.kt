@@ -1428,6 +1428,12 @@ internal fun HelperTranscript(
         val merged = if (streaming.isEmpty()) messages else mergeStreamingOverlay(messages, streaming)
         buildFlatChatItems(merged)
     }
+    // [T-process-card] 只读转录同样要渲染"过程卡"（一段工具执行折叠成一张卡）：子代理
+    // 跑过的东西在主聊天里成卡、在这里却掉成一条条散落的工具胶囊。展开/收起是这张卡
+    // 自己的本地 UI 状态，与主聊天同款（默认收起，按 run 记 id）。
+    var expandedProcessIds by remember { mutableStateOf(emptySet<String>()) }
+    var collapsedProcessIds by remember { mutableStateOf(emptySet<String>()) }
+    val processListState = androidx.compose.foundation.lazy.rememberLazyListState()
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         reverseLayout = true,
@@ -1486,6 +1492,18 @@ internal fun HelperTranscript(
                     }
                 }
                 is FlatChatItem.AssistantLegacyContent -> StreamingMarkdownText(content = item.content, isStreaming = item.isStreaming)
+                // [T-process-card] 与主聊天同一个组件、同一套折叠语义；工具详情走
+                // 调用方给的 onOpenDetail（转录有自己的 ToolDetailSheet）。
+                is FlatChatItem.ProcessRunCard -> ProcessRunCard(
+                    item = item,
+                    listState = processListState,
+                    onToggle = {
+                        val (e, c) = nextProcessToggleState(item, expandedProcessIds, collapsedProcessIds)
+                        expandedProcessIds = e
+                        collapsedProcessIds = c
+                    },
+                    onOpenTool = onOpenDetail,
+                )
             }
         }
     }

@@ -944,7 +944,7 @@ class SessionListViewModel(
                 val firstAssistants = chatRepository.loadMessageHeadsByRole(id, "assistant", 800, 2)
                 val lastAssistants = chatRepository.loadMessageHeadsByRole(id, "assistant", 800, 2, newest = true)
                 if (firstUsers.isEmpty()) return false
-                fun head(row: com.openminis.app.data.db.MessageHeadRow): String =
+                fun head(row: com.openminis.app.data.db.MessageHeadPreviewRow): String =
                     extractText(row.headText.orEmpty())
                 val firstUser = firstUsers.firstOrNull { head(it).isNotBlank() } ?: return false
                 firstUserRaw = head(firstUser)

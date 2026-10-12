@@ -6062,7 +6062,14 @@ fun ChatScreen(
                         // off the critical breathing, same as the placeholder
                         // crossfade honours it.
                         .contextUsageGlow(
-                            tier = contextUsage?.tier ?: ContextUsage.Tier.NORMAL,
+                            // [T-android-context-usage-hint] `contextUsage` 是会话菜单那个
+                            // 环形图用的 `data.model.ContextUsage`（Long 计数、没有档位），
+                            // 而发光认的是 `ui.chat.ContextUsage` 的 Tier，所以按同一对
+                            // 数值构造一次：测量不可用时 from() 返回 null → NORMAL（不发光）。
+                            tier = ContextUsage.from(
+                                usedTokens = (contextUsage?.usedTokens ?: 0L).toInt(),
+                                windowTokens = (contextUsage?.windowTokens ?: 0L).toInt(),
+                            )?.tier ?: ContextUsage.Tier.NORMAL,
                             cornerRadius = 20.dp,
                             animate = !animationsDisabled(context),
                         )

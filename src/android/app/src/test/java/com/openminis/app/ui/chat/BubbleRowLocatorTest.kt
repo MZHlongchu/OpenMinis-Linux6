@@ -116,7 +116,11 @@ class BubbleRowLocatorTest {
         // 不再和 inject/retry 相邻。原断言的意图——drain 必须把每个气泡链到落库行、
         // retry/delete/edit 必须按 group 裁剪——不变，只把"取函数体"的方式从
         // `vm.indexOf("private suspend fun drainQueuedPrompts")` 换成按函数名定位窗口。
-        val drain = body("drainQueuedPrompts", 6000)
+        // [T-a7-package-surface] 本移植把 drain 拆成两半：`drainQueuedPrompts` 只负责
+        // 选批与跑回合，真正的落库 + 「把每个气泡链到落库行」在
+        // `materializeQueuedPromptsAsUserTurn` 里（两条路径——drain 与 retryLast——
+        // 共用它）。断言文本一字未改，只是把承载它的那个函数一并纳入窗口。
+        val drain = body("drainQueuedPrompts", 6000) + body("materializeQueuedPromptsAsUserTurn", 6000)
         assertTrue(
             "drainQueuedPrompts must link every drained bubble to the persisted row",
             drain.contains("sourceDbIds = listOf(drainedRow.id)"),

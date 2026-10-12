@@ -29,7 +29,14 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
         // 的——它启的子代理把结果投给没人。iOS f1f4f23ba 在这里也重置。
         // 位置对齐上游：取批之前、每轮循环入口。
         com.openminis.app.agent.jobs.AgentJobRegistry.clearDelegationMute(activeSessionId)
-        if (!materializeQueuedPromptsAsUserTurn()) break
+        // [T-scheduled-preemptive-insert] 一轮 drain 只送一批，批次由
+        // [QueuedPromptBatching.nextDrainBatch] 选：一个 scheduled fire 独自成批
+        // （它的信封与预置工具调用必须归属唯一一个回合），其余提示仍按老规矩合并。
+        // 上游 1.14 的落点：ChatViewModel.kt:8928（`val queued = QueuedPromptBatching
+        // .nextDrainBatch(_promptQueue.value)`），合并时只留下了纯规则文件、
+        // 没留下调用点。
+        val queued = QueuedPromptBatching.nextDrainBatch(_promptQueue.value)
+        if (!materializeQueuedPromptsAsUserTurn(queued)) break
 
         try {
             if (groupChatEnabled.value && !provider.model.isPureVideoGenerator) {
@@ -68,10 +75,16 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
  *    重试会拿到「上一次错误时」的上下文，用户消息被跳过。
  *
  * @return true = 物化了至少一条排队提示词。
+ *
+ * [T-scheduled-preemptive-insert] [batch] 是本轮要物化的那一批（drain 由
+ * [QueuedPromptBatching.nextDrainBatch] 选出）；默认值 = 队列里全部未搁置的提示，
+ * 这是 [retryLast] 那条路径的既有语义。
  */
-internal suspend fun ChatViewModel.materializeQueuedPromptsAsUserTurn(): Boolean {
+internal suspend fun ChatViewModel.materializeQueuedPromptsAsUserTurn(
+    batch: List<QueuedPrompt> = _promptQueue.value,
+): Boolean {
     // [T-queue-shelved] 只物化 pending 态；搁置消息留在队列（不自动重发）。
-    val queued = _promptQueue.value.filter { !it.shelved }
+    val queued = batch.filter { !it.shelved }
     if (queued.isEmpty()) return false
 
     // [T-truncation-digest-clear] drain 也是上下文重置点（打断后恢复/轮末
@@ -142,16 +155,21 @@ internal suspend fun ChatViewModel.materializeQueuedPromptsAsUserTurn(): Boolean
         prepared.attachedFilesXml,
         bodyPartsJson = drainPaste?.partsJson,
     )
-    val persistedUser = chatRepository.appendMessage(sid, "user", userPartsJson)
+    val drainedRow = chatRepository.appendMessage(sid, "user", userPartsJson)
     // [T-queue-dequeue-after-persist] 落库已返回：现在清队是确定的。
     _promptQueue.value = _promptQueue.value.filterNot { it.id in queuedIds }
     // [T-truncation-digest-clear][T-queue-digest-clear-after-consume] 清空点必须在
     // 「消费确定」之后：空内容早退与 prepare 异常都到不了这里，摘录因此不会在
     // 「一行都没注入」的尝试里被白抹掉。
     clearHistoryDigestState()
+    // [T-android-bubble-anchor-drain] 每个被 drain 的气泡都链到本批落库的**那一行**。
+    // 气泡保留占位 id（"queued_msg_…"），没有这条链接时它们是"未链接"的，retry /
+    // delete / edit 只能退回按序号数气泡，而 N 个气泡压在同一行上正是数序号必然出
+    // 错的情形（编辑合并批次里的第二条会切掉**下一个**回合，合并行连同旧正文留在
+    // 模型上下文里）。上游 1.14 ChatViewModel.kt:8985-8996 的写法，合并时整段丢了。
     _messages.value = _messages.value.map { m ->
         if (m.queuedPromptId != null && queuedIds.contains(m.queuedPromptId)) {
-            m.copy(isQueued = false, queuedPromptId = null)
+            m.copy(isQueued = false, queuedPromptId = null, sourceDbIds = listOf(drainedRow.id))
         } else m
     }
     // [T-queue-disk-persistence] drained prompts became real DB rows —
@@ -167,7 +185,7 @@ internal suspend fun ChatViewModel.materializeQueuedPromptsAsUserTurn(): Boolean
         _messages.value.firstOrNull { it.isQueued && it.content == userText }?.id
     }
     withContext(Dispatchers.Main.immediate) {
-        notePersistedUiRow(queuedUiId, persistedUser.id)
+        notePersistedUiRow(queuedUiId, drainedRow.id)
     }
 
     appendBoundedHistory(LLMMessage(
@@ -178,7 +196,7 @@ internal suspend fun ChatViewModel.materializeQueuedPromptsAsUserTurn(): Boolean
             val bodyCount = combinedParts.takeWhile { it is AgentContentPart.Text }.size
             listOf(AgentContentPart.Text(p.modelText)) + combinedParts.drop(bodyCount)
         } ?: combinedParts,
-        dbMessageId = persistedUser.id,
+        dbMessageId = drainedRow.id,
     ))
     return true
 }

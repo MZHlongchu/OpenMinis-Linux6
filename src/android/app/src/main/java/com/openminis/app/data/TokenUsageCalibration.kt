@@ -55,6 +55,15 @@ object TokenUsageCalibration {
     }
 
     /**
+     * [T-ctx-measure-outbound] 当前全部比值的一份快照。会话重载（loadSession /
+     * 回退）要判断「内存里这套校准还算不算这个会话的证据」，并把内存值交给
+     * `ContextSizeMeter.CalibrationState.carryingOver` —— 一条被 provider 拒绝的请求
+     * 不会在 usage 行里留下 (report, estimate) 对，那个被抬高的比值只活在这里，抹掉它
+     * 会让重试原样发出、再被拒一次。按模型 id 的只读副本，改不到表本身。
+     */
+    fun snapshot(): Map<String, Double> = scales.toMap()
+
+    /**
      * Apply the calibration to a raw heuristic estimate.
      * Returns the same value when uncalibrated (scale = 1.0).
      */

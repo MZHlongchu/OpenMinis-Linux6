@@ -110,6 +110,23 @@ class ProotFlagParityTest {
         // so a mounted folder and a chat's workspace appear in both
         // ([T-android-session-private-mounts]).
         //
+        // [T-android-proot-builder-scan-scope] 这条断言曾被整条删掉，此处按上游 1.14
+        // 原文加回（消息字符串与匹配串一字未改）。它在当前生产上成立：本移植的
+        // PRootKernel.buildProotCommand 仍在 kernelBuilder 切片内以
+        // `for ((linuxPath, hostPath) in bindMounts)` 重放用户挂载
+        // （PRootKernel.kt 的 “User bind mounts” 段）。
+        // 判别力（已实测：把迭代源换成快照变量 `for ((k, v) in replayPlan)` 后，本用例
+        // 即以这条断言红，且它是唯一的失败项）：agent 那条路若不再重放挂载表——循环被删、
+        // 迭代源被换成 bindMounts 的副本/快照，或整个循环被挪到 buildProotCommand 之外——
+        // 切片里就没有 "in bindMounts"，这条立刻红。
+        // 它是「用户挂载在 agent 侧静默消失」的唯一守卫：本文件其余用例只扫
+        // /dev、/proc、/sys 和会话挂载，FreshProcessShell 那条只看第三个 builder，
+        // 都发现不了这一侧少了挂载重放。
+        assertTrue(
+            "PRootKernel must replay the user bind mounts",
+            kernelBuilder.contains("in bindMounts"),
+        )
+        //
         // [T-android-proot-builder-scan-scope] 上游那条调用是
         // `SessionMounts.toProotArgs(SessionMounts.forContext(context, sessionId).mounts)`；
         // 本移植把 SessionMounts 的会话目录职责并进了

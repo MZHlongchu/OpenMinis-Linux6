@@ -15,7 +15,12 @@ internal suspend fun ChatViewModel.truncateBeforeEdit(messageId: String) {
     val index = messages.indexOfFirst { it.id == messageId }
     if (index < 0) return
 
-    val deletedMessages = messages.subList(index, messages.size).toList()
+    // [T-android-bubble-anchor-drain] Remove from the FIRST bubble of a merged
+    // queue batch: the edit removes the batch's shared row, so its sibling
+    // bubbles must go with it. 单个气泡时与旧写法逐字等价。上游 1.14
+    // ChatViewModel.kt:8515-8516。
+    val cutFrom = BubbleRowLocator.groupSpan(messages, index).first
+    val deletedMessages = messages.subList(cutFrom, messages.size).toList()
     // [T-android-uimessages-sublist-cme] Defensive: without `.toList()` this
     // stores a live subList VIEW as `_messages.value`.
     //
@@ -25,7 +30,7 @@ internal suspend fun ChatViewModel.truncateBeforeEdit(messageId: String) {
     // before anything can invalidate it. So this line is hardening, not the
     // proven cause of the reported CME. See the long note on `uiMessages`.
     // (`deletedMessages` above already copies; this line did not.)
-    val kept = messages.subList(0, index).toList()
+    val kept = messages.subList(0, cutFrom).toList()
     _messages.value = kept
     if (_streamingById.value.isNotEmpty()) {
         val keptIds = kept.mapTo(mutableSetOf()) { it.id }
@@ -35,11 +40,24 @@ internal suspend fun ChatViewModel.truncateBeforeEdit(messageId: String) {
     revokeMemoryWritesInDeletedMessages(deletedMessages)
 
     val sid = realSessionId.takeIf { it.isNotEmpty() } ?: sessionId
+    // [T-android-bubble-anchor] Edit = delete from here + an ordinary send, so the
+    // edited row itself goes: cut AT it. Found by id through [BubbleRowLocator],
+    // not by counting visible user rows — counting could run off the end (an
+    // image-only turn earlier in the chat is a bubble with no text part), leave
+    // the pre-edit row in place, and send the edited text after it, so the model
+    // still read the old message. 上游 1.14 ChatViewModel.kt:8542-8547。
+    val located = BubbleRowLocator.locateUserRow(messages, index, chatRepository.loadMessages(sid))
+    logBubbleAnchor("edit", messageId, located)
+    val bubbleCutoff = BubbleRowLocator.cutoffFor(located, keepBubble = false)
     // Visible-user index of the *edited* message — count user turns
     // strictly before `index`, which is the 0-based ordinal of the
-    // edited turn itself.
+    // edited turn itself. 只有气泡没有链接行（未落库的排队占位）时才走这条回退。
     val visibleUserIndex = messages.subList(0, index).count { it.role == "user" }
-    val cutoffSortOrder = visibleUserCutoff(sid, visibleUserIndex)?.sortOrder ?: -1
+    val cutoffSortOrder = if (bubbleCutoff >= 0) {
+        bubbleCutoff
+    } else {
+        visibleUserCutoff(sid, visibleUserIndex)?.sortOrder ?: -1
+    }
     if (cutoffSortOrder >= 0) {
         chatRepository.deleteMessagesAfter(sid, cutoffSortOrder)
     }

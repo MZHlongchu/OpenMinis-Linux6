@@ -41,6 +41,7 @@ import org.junit.Test
  *  - 读循环的 carry-over 与协议行剥离收在 MarkerFramer（ShellStreamDecoder.kt），
  *    不再内联在 PersistentShell 里。
  * 其余用例（包装器字符串、pgid 解析、kill 升级、超时回收 shell）与上游一致，未动。
+ */
 class ForegroundCommandGroupTest {
 
     private val marker = "abc12345"
